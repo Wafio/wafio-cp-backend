@@ -44,19 +44,16 @@ type HostIngestHandler struct {
 //
 // The only accepted credential header is:
 //
-//  1. `X-Wafio-Host-Key` (required) — resolves the owning host via an
-//     argon2id hash lookup, then upserts a per-kind agent row so the
-//     rest of the pipeline keeps the existing agent_id contract. Kind is
-//     inferred from the route path (…/ebpf/… vs. …/waf/…).
+//  1. `X-Wafio-Host-Key` (required): resolves the owning host via an
+//     argon2id hash lookup, then upserts the host agent row so the rest
+//     of the pipeline keeps the existing agent_id contract.
 //
 // On success the middleware populates `agent_id`, `agent_user_id`,
 // `host_id` and `project_id` in Fiber Locals.
 func (h *HostIngestHandler) RequireAgentKey() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		kind := inferAgentKindFromPath(c.Path())
-
 		if hostKey := c.Get("X-Wafio-Host-Key"); hostKey != "" {
-			return h.authorizeWithHostKey(c, kind, hostKey)
+			return h.authorizeWithHostKey(c, hostKey)
 		}
 
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -67,8 +64,9 @@ func (h *HostIngestHandler) RequireAgentKey() fiber.Handler {
 }
 
 // authorizeWithHostKey resolves the Host Key to a host row, ensures there is
-// an agent record for (host_id, kind, name), and wires it into Locals.
-func (h *HostIngestHandler) authorizeWithHostKey(c *fiber.Ctx, kind, rawKey string) error {
+// a host agent record for (host_id, name), and wires it into Locals.
+func (h *HostIngestHandler) authorizeWithHostKey(c *fiber.Ctx, rawKey string) error {
+	const kind = "host"
 	host, err := h.Repo.Host.VerifyKey(c.UserContext(), rawKey)
 	if err != nil && !errors.Is(err, repository.ErrHostKeyInvalid) {
 		// A database error or no verification slot says nothing about the
@@ -100,15 +98,7 @@ func (h *HostIngestHandler) authorizeWithHostKey(c *fiber.Ctx, kind, rawKey stri
 		})
 	}
 	if agentName == "" {
-		switch kind {
-		case "waf":
-			// Default to hostname + "@waf" so multiple WAF processes running
-			// on the same host end up with stable-but-distinct agent rows
-			// even when operators forget to set the header.
-			agentName = host.Name + "@waf"
-		default:
-			agentName = host.Name + "@ebpf"
-		}
+		agentName = host.Name + "@ebpf"
 	}
 	agentID, err := h.Repo.EBPF.UpsertAgentForHost(c.UserContext(), host.ID, host.UserID, host.ProjectID, kind, agentName)
 	if errors.Is(err, repository.ErrAgentLimit) {
@@ -155,16 +145,6 @@ func (h *HostIngestHandler) authorizeWithHostKey(c *fiber.Ctx, kind, rawKey stri
 		}
 	}()
 	return c.Next()
-}
-
-// inferAgentKindFromPath returns the agent kind (`"host"` or `"waf"`) based
-// on the URL path prefix. Used when the client omits the explicit
-// X-Wafio-Agent-Kind header.
-func inferAgentKindFromPath(path string) string {
-	if len(path) >= len("/api/internal/waf") && path[:len("/api/internal/waf")] == "/api/internal/waf" {
-		return "waf"
-	}
-	return "host"
 }
 
 // Ingest receives and stores telemetry from an agent.

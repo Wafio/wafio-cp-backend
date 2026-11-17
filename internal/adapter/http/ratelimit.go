@@ -133,7 +133,7 @@ func RateLimitMailTestByUser(cfg *config.Config) fiber.Handler {
 }
 
 // RateLimitAgentByIP throttles the agent bearer-token endpoints
-// (/api/internal/ebpf/*, /api/internal/waf/*). Keyed by source IP so a
+// (/api/internal/host/*). Keyed by source IP so a
 // compromised key cannot be brute-force enumerated from a single host; the
 // limit is still generous enough that legitimate sub-second heartbeats from
 // colocated agents do not trip.

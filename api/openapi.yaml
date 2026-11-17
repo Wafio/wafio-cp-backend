@@ -31140,7 +31140,7 @@ components:
       additionalProperties: true
     WafRulesThresholds:
       type: object
-      description: 'Legacy (v1) score thresholds (Go type engine.Thresholds). A detection is strong or weak and the document holds no threshold: thresholds is removed on save, when the document is read for the editor and in every bundle. When the effective log value is not below the block value, semantic_policies.record_weak_detections becomes false first; in bot protection score mode the block value becomes bot_protection.score_threshold. A stored document that carries it still loads and saves, and the WAF agent ignores it.'
+      description: 'Legacy (v1) score thresholds. A detection is strong or weak and the document holds no threshold: thresholds is removed on save, when the document is read for the editor and in every bundle. When the effective log value is not below the block value, semantic_policies.record_weak_detections becomes false first; in bot protection score mode the block value becomes bot_protection.score_threshold. A stored document that carries it still loads and saves, and the WAF agent ignores it.'
       properties:
         block:
           type: integer

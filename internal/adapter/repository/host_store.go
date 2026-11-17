@@ -375,7 +375,7 @@ func (s *HostEventStore) closeWithin(wait time.Duration) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InsertFirewallEvents — ring buffer + feature accumulator (no DB write)
+// Firewall events: ring buffer and feature accumulator (no DB write)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // insertFirewallEvents adds events to the agent's live ring, charged to t.

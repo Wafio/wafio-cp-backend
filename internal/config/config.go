@@ -110,7 +110,7 @@ type ServerConfig struct {
 	RateLimitRegisterExpirationSec int  `mapstructure:"rate_limit_register_expiration_sec"`
 	RateLimitLoginMax              int  `mapstructure:"rate_limit_login_max"`
 	RateLimitLoginExpirationSec    int  `mapstructure:"rate_limit_login_expiration_sec"`
-	// Agent-facing endpoints (/api/internal/ebpf/*, /api/internal/waf/*).
+	// Agent-facing endpoint (/api/internal/host/*).
 	// Rate-limited per source IP to blunt brute-force attacks against the
 	// host-key bearer headers. Defaults (applied by resolveDefaults)
 	// are intentionally generous so legitimate 1s/3s heartbeats don't trip.
