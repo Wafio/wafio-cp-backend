@@ -1,7 +1,7 @@
 name: ci
 
 # The gate of scripts/ci-local.sh, on every push to main and every pull request.
-# The database tests are not run here: they need a TimescaleDB (TEST_DB_URL).
+# The database tests run against a TimescaleDB service that lives for the job.
 
 on:
   push:
@@ -20,6 +20,21 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      # A throwaway database: it exists for this job only and is reachable from the runner alone.
+      db:
+        image: timescale/timescaledb:2.17.2-pg17
+        env:
+          POSTGRES_DB: wafio_test
+          POSTGRES_USER: wafio_test
+          POSTGRES_PASSWORD: wafio_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wafio_test -d wafio_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -35,4 +50,27 @@ jobs:
           curl -fsSL -o /tmp/golangci-lint.tgz https://github.com/golangci/golangci-lint/releases/download/v2.13.1/golangci-lint-2.13.1-linux-amd64.tar.gz
           echo "b17bfbc9d4aaa48be7f4f1ce3240bc3d8200c870c072bacf15c26219e2cfb9cc  /tmp/golangci-lint.tgz" | sha256sum -c -
           sudo tar -xzf /tmp/golangci-lint.tgz -C /usr/local/bin --strip-components=1 golangci-lint-2.13.1-linux-amd64/golangci-lint
+      # The WAFIO_DATABASE_* variables stay inside this step: set for the gate they would change what the
+      # config tests read.
+      - name: Migrate the test database and add the fixture project
+        env:
+          WAFIO_DATABASE_HOST: 127.0.0.1
+          WAFIO_DATABASE_PORT: 5432
+          WAFIO_DATABASE_NAME: wafio_test
+          WAFIO_DATABASE_USER: wafio_test
+          WAFIO_DATABASE_PASSWORD: wafio_test
+          WAFIO_DATABASE_SSLMODE: disable
+          PGPASSWORD: wafio_test
+        run: |
+          export WAFIO_JWT_SECRET="$(openssl rand -hex 32)" WAFIO_TOTP_ENC_KEY="$(openssl rand -base64 32)"
+          go run ./cmd/wafio migrate up
+          psql -h 127.0.0.1 -U wafio_test -d wafio_test -v ON_ERROR_STOP=1 <<'SQL'
+          WITH u AS (
+            INSERT INTO users(email, password_hash, name)
+            VALUES ('fixture@wafio.test', 'not-a-login-hash', 'Integration Fixture') RETURNING id
+          ) INSERT INTO projects(user_id, name, code)
+            SELECT id, 'Integration Fixture', 'integration' FROM u;
+          SQL
       - run: scripts/ci-local.sh
+        env:
+          TEST_DB_URL: postgres://wafio_test:wafio_test@127.0.0.1:5432/wafio_test?sslmode=disable
