@@ -2446,7 +2446,7 @@ func (h *HostPolicyHandler) ClearEnforcementLog(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "cleared", "cleared_at": clearedAt.Format(time.RFC3339Nano)})
 }
 
-// ── Port Policy endpoints (enterprise ingress/egress port firewall) ─────────
+// ── Port Policy endpoints (ingress/egress port firewall) ────────────────────
 
 // ListPortPolicies returns port policies from the desired state.
 //

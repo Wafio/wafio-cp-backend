@@ -23,7 +23,7 @@ import (
 //
 //	WAFIO_AGENT_BIN          agent binary under test (required; the suite is skipped without it)
 //	WAFIO_ENGINE_LIB         the engine library an agent without the engine linked in loads (the only WAFIO_ variable the agent keeps)
-//	WAFIO_BLACKBOX_SECDATA   security data root (default $HOME/wr/data/security-data):
+//	WAFIO_BLACKBOX_SECDATA   security data root (required; the suite is skipped without it):
 //	                         geoip/*.mmdb, ja4/ja4.txt, firehol/*.netset
 //	WAFIO_HTTP_SUITE_OUT, WAFIO_GRPC_SUITE_OUT        write the normalised HTTP / gRPC recordings (JSONL)
 //	WAFIO_HTTP_SUITE_GOLDEN, WAFIO_GRPC_SUITE_GOLDEN  compare them with a golden recording
@@ -158,8 +158,7 @@ func newSuite(t *testing.T) *suite {
 	}
 	secData := os.Getenv(envSecData)
 	if secData == "" {
-		home, _ := os.UserHomeDir()
-		secData = filepath.Join(home, "wr", "data", "security-data")
+		t.Skipf("%s not set: black-box conformance needs the security data", envSecData)
 	}
 	if _, err := os.Stat(filepath.Join(secData, "geoip", "country.mmdb")); err != nil {
 		t.Skipf("security data not found under %s (%s): %v", secData, envSecData, err)

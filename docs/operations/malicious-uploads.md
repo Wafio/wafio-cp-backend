@@ -54,9 +54,8 @@ Compare upstream receipt and file integrity, not only status codes. Check agent 
 
 ## Implementation references
 
-- [Scanning configuration and complete-file hashing](../../internal/engine/content_scan.go)
-- [Verdict and incomplete-scan policy handling](../../internal/application/analyze.go)
-- [Engine tests](../../internal/engine/content_scan_test.go)
-- [Pipeline policy tests](../../internal/application/content_scan_pipeline_test.go)
+- [Scanning configuration validation in the control plane](../../internal/engine/content_scan.go) and its [tests](../../internal/engine/content_scan_test.go)
+- Verdict and incomplete-scan policy handling: `crates/application/src/content_scan.rs` and `crates/application/src/analyze.rs` in wafio-agent-waf
+- Pipeline policy tests: `crates/application/src/analyze/tests.rs` in wafio-agent-waf
 - Control-plane settings UI: `src/lib/components/MalwareProviderSettings.svelte` in wafio-cp-frontend
 - Project settings UI: `src/lib/components/ConfigWafForm.svelte` in wafio-cp-frontend

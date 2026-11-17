@@ -16,8 +16,8 @@ const alreadyRootRuleName = "Downgrade already-root credential change"
 // whose real UID is already 0 asking for ID 0 must stay stored but below it;
 // any other real UID keeps the kernel's severity.
 func TestAlreadyRootCredentialRule(t *testing.T) {
-	// The demo host's nightly logrotate events (host_security_events,
-	// 2026-10-17): kernel severity 3 for setgid(0), 4 for setuid(0).
+	// The nightly logrotate events of a test host (host_security_events,
+	// measured): kernel severity 3 for setgid(0), 4 for setuid(0).
 	for _, tc := range []struct {
 		event string
 		sev   int

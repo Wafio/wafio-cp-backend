@@ -270,9 +270,9 @@ func validateTargetComponent(comp, mode string) error {
 }
 
 // knownSemanticEngineKeys lists the semantic engine names accepted in
-// skip_semantic — exactly the keys the tuning bridge maps into
-// SemanticConfig.DisabledEngines (see PathSemanticOverride.ApplyTo). Anything
-// else would silently no-op at eval time, so it is rejected at save time.
+// skip_semantic: exactly the engine keys of semantic_policies and of a path
+// semantic_override. Anything else would silently do nothing on the agent, so
+// it is rejected at save time.
 // "*" is handled separately (skip all engines).
 var knownSemanticEngineKeys = map[string]bool{
 	"sql": true, "xss": true, "cmd": true, "php": true, "python": true,

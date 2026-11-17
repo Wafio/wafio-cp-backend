@@ -2,16 +2,16 @@ package engine
 
 import "slices"
 
-// The WAF agent reports one capability in Hello.features: FeatureScriptRules with the script sidecar,
-// FeatureNoScriptRules without it. Other names (v1 agents) are ignored; every agent gets the same
-// bundle.
+// The WAF agent reports one capability in Hello.features: FeatureScriptRules when it can run script
+// rules, FeatureNoScriptRules when it cannot (a version 1 Go agent without scripts). Other names
+// (v1 agents) are ignored; every agent gets the same bundle.
 
 // FeatureScriptRules is the Hello.features entry a WAF agent sends when it can
 // run script rules.
 const FeatureScriptRules = "script_rules"
 
 // FeatureNoScriptRules is the Hello.features entry a WAF agent sends when it
-// cannot run script rules (it ships without the script sidecar). A script rule
+// cannot run script rules (a version 1 Go agent without scripts). A script rule
 // then leaves every request of its application unfinished, which becomes LOG.
 const FeatureNoScriptRules = "no_script_rules"
 

@@ -1,205 +1,193 @@
-# Kontrak gRPC — Agent Control
+# gRPC contract: Agent Control
 
-Sumber: `shared/proto/agent/v1/agent_control.proto`. Kode hasil generasi ada di `shared/agentpb/` dan tidak boleh diedit tangan.
+Source: `shared/proto/agent/v1/agent_control.proto`. The generated code is in `shared/agentpb/` and must not be edited by hand.
 
-Satu service, dua RPC, dua jenis agent. Autentikasi seluruhnya di lapisan TLS.
+One service, two RPCs, two kinds of agent. Authentication happens entirely in the TLS layer.
 
-## Model autentikasi
+## Authentication model
 
-Setiap tabel di bawah mengasumsikan hal ini dan tidak mengulanginya:
+Every table below assumes this and does not repeat it:
 
-- TLS dengan `tls.RequireAndVerifyClientCert` terhadap CA milik control plane.
-- SHA-256 dari sertifikat klien dicari di `mtls_credentials` untuk memetakan koneksi ke tepat satu `project_id`.
-- Tidak ada lapisan autentikasi kedua. `agent_name` dan `host_key` di dalam `Hello` adalah kunci pencarian, bukan kredensial.
-- Koneksi tanpa sertifikat klien yang valid diputus saat handshake, sebelum satu pun pesan aplikasi terbaca.
+- TLS with `tls.RequireAndVerifyClientCert` against the control plane's own CA.
+- The SHA-256 of the client certificate is looked up in `mtls_credentials` to map the connection to exactly one `project_id`.
+- There is no second authentication layer. `agent_name` and `host_key` inside `Hello` are lookup keys, not credentials.
+- A connection without a valid client certificate is closed during the handshake, before any application message is read.
 
 ## rpc: Stream
 
-Satu stream dua arah per proses agent. Pesan pertama dari klien wajib `Hello`.
+One bidirectional stream per agent process. The first message from the client must be `Hello`.
 
-| Param | Tipe | Rules |
+| Param | Type | Rules |
 |---|---|---|
-| sertifikat klien | X.509 | Wajib. Rantai diverifikasi terhadap CA. Fingerprint SHA-256 wajib ada di `mtls_credentials`, jika tidak stream ditolak (`Unauthenticated`). Kredensial dicek ulang saat stream dibuka dan setiap 5 menit; revoke kredensial (`DELETE .../agent-grpc-credentials/{credId}`) langsung mengakhiri setiap stream yang memakainya dengan `Unauthenticated`; hapus project (dan hapus user pemilik project) mengakhiri stream semua kredensial project itu. Kredensial dibaca ulang juga setelah validasi `Hello`, sebelum `Welcome` dan bundle pertama, jadi revoke di tengah `Hello` tidak menerima apa pun. Download `DownloadMalwareDatabase` dilacak sama seperti `Stream` dan berhenti pada chunk berikutnya setelah revoke atau hapus project. Server mengirim GOAWAY setelah umur koneksi 24 jam (+5 menit grace); agent tersambung ulang dan diautentikasi ulang |
-| pesan pertama | `AgentMessage` | Wajib berisi varian oneof `hello`. Pesan pertama jenis lain mengakhiri stream |
-| kompresi | — | Stream tidak dikompresi di tingkat transport (grpc-go mendekompresi sebelum handler, sehingga alokasinya tidak bisa dibebankan). Agent host v1.9.0+ mengompresi batch telemetry sendiri (`CommandAck.payload`, lihat event CommandAck) setelah control plane mengumumkan `telemetry_gzip` |
-| anggaran terima | — | v1.9.0+. Setiap pesan dibebankan sebesar ukurannya ke akun pemilik project, dan payload gzip sebesar ukuran aslinya (≤ 64 × panjangnya) sebelum didekompresi: 64 MiB/detik per akun, burst satu detiknya; akun yang aktif dalam 2 detik terakhir berbagi total seluruh proses 128 MiB/detik secara max-min adil (keduanya dapat diatur). Selama berutang, stream akun itu tidak membaca pesan berikutnya (flow control memperlambat agent-nya) dan bertanya lagi paling lambat tiap 1 detik; `last_seen` agent-nya tetap disegarkan 30 detik setelah heartbeat terakhir; tidak ada yang ditolak. Hello wajib ≤ 64 KiB (`InvalidArgument`); paling banyak 16 stream per koneksi |
-| `hello.agent_name` | string | Agent yang sudah terdaftar di project tersambung ulang dengan barisnya (agent yang sudah dihapus — soft delete — tidak dikenali lagi). Nama yang belum dikenal didaftarkan otomatis untuk kedua jenis — skrip instalasi agent WAF hanya menetapkan nama dan tidak memanggil API register — paling banyak 20.000 agent hidup per project; di atasnya `ResourceExhausted` |
-| `hello.agent_version` | string | Bebas; dipakai untuk pelaporan versi fleet |
-| `hello.hostname` | string | Bebas; dipakai untuk tampilan |
-| `hello.bundle_generation` | int64 | Hanya agent WAF. Informasional: server selalu mengirim bundel awal saat terhubung |
-| `hello.host_key` | string | Opsional. Bila tidak kosong, diverifikasi terhadap tabel `hosts` — juga untuk agent yang sudah terdaftar (dulu diabaikan untuk agent host yang sudah dikenal) — dan harus milik project tersebut serta tidak dicabut, jika tidak `PermissionDenied` "invalid host_key"; pemeriksaan yang tidak bisa dijalankan (galat database, tidak ada slot verifikasi argon2id sebelum tenggat Hello 3 detik) → `Unavailable`, agent mengulang. Kunci yang sudah pernah terverifikasi terhadap hash tersimpan yang sama tidak menjalankan argon2id lagi. Kunci dicari lewat lookup id (128 bit SHA-256 seluruh kunci, migrasi 000105); kunci yang tersimpan sebelum 000105 dicari lewat prefix tampilan dan setiap kandidat diverifikasi, jadi dua host yang berbagi prefix 20 bit tidak lagi saling menolak. Kunci yang valid mengikat agent ke host itu |
-| host dicabut | — | Agent yang terikat ke host yang dicabut — atau, tanpa host, yang `hello.hostname`-nya nama (atau hostname terlapor) host yang dicabut dan bukan milik host hidup mana pun — ditolak `PermissionDenied` "host revoked". Stream yang belum terikat host saat Hello (agent WAF yang ditautkan lewat hostname di latar belakang) mencari host agentnya lagi pada cek ulang periodik. Cabut atau hapus host (`POST …/hosts/{hostId}/revoke`, `DELETE …/hosts/{hostId}`) langsung menutup stream agent host itu dengan kode yang sama; host dibaca ulang juga setelah validasi `Hello` (sebelum `Welcome`) dan bersama cek ulang kredensial tiap 5 menit. Kredensial mTLS seluruh project tidak ikut dicabut; kredensial yang di-enroll dengan host key host itu ikut dihapus (lihat bagian "Kredensial terikat host") |
-| `hello.agent_kind` | string | Petunjuk `waf`, `host`, atau `ebpf`. Diabaikan bila agent sudah terdaftar |
-| `hello.features` (field 8) | repeated string | Opsional. Kemampuan binary agent; nama yang tidak dikenal diabaikan. Agent WAF mengirim satu nama: `script_rules` (`engine.FeatureScriptRules`) bila sidecar skrip tersedia, `no_script_rules` (`engine.FeatureNoScriptRules`) bila tidak; script rule lalu membuat setiap request app itu tidak selesai diperiksa, yaitu LOG. Control plane menyimpannya sebagai `agents.script_rules` (migrasi 000116; `false` untuk `no_script_rules`, `true` bila agent mengirim `script_rules` atau nama lain, null bila tidak ada feature atau agent host), menolak 400 `SCRIPT_RULES_UNSUPPORTED` pada pembuatan atau pengaktifan script rule untuk app yang semua agent-nya melaporkan `script_rules: false` (script rule yang sudah aktif tetap bisa diedit dan dimatikan), dan menampilkannya sebagai `script_rules` di objek agent API (daftar agent WAF fleet, agent per app); nilainya ditulis ulang pada setiap koneksi. Bundel tidak bergantung pada feature: setiap agent menerima bundel yang sama, hasil `engine.NormalizeBundle` (kunci dokumen v1 ditulis ulang: `inspection_off` menggantikan `disable_semantic` dan `disable_rule_based`, `skip_coraza_when_clean` dibuang, tuning rule dengan engine `crs` dibuang, `scan_mode` `crs_only` dan `semantic_only` menjadi `default`, `skip_crs` dibuang). Konfigurasi yang tersimpan tidak diubah, dan server mencatat tiap penulisan ulang sekali per app dan per koneksi. Nama yang dikirim agent v1 (`semantic_only`, `semantic_keys_jwt_graphql`, `field_rules_v2`, `custom_rule_field_paths`) diabaikan. Agent v1 yang lebih lama dari v1.9 tidak mengenal kunci `jwt` dan `graphql` di `semantic_override` dan `skip_semantic`, jadi menolak bundel yang memuatnya dan tetap melayani bundel yang di-cache. Agent host (v1.9.0+) mengirim `telemetry_demand`: ia menangani `BundleUpdate` `telemetry:demand` (lihat event BundleUpdate). Agent host dengan filter penerusan trace mengirim `trace_forward_filter` (`domain.TraceForwardFilterFeature`): ia menangani `BundleUpdate` `trace:forward_filter` |
-| field 5 | — | `reserved`. Nomor field tidak boleh dipakai ulang setelah `waf_key` dibuang di migrasi 000017 |
+| client certificate | X.509 | Required. The chain is verified against the CA. The SHA-256 fingerprint must be in `mtls_credentials`, otherwise the stream is refused (`Unauthenticated`). The credential is checked again when the stream opens and every 5 minutes; revoking a credential (`DELETE .../agent-grpc-credentials/{credId}`) ends every stream that uses it at once with `Unauthenticated`; deleting a project (or deleting the user that owns it) ends the streams of all credentials of that project. The credential is also read again after `Hello` is validated, before `Welcome` and the first bundle, so a revoke in the middle of `Hello` accepts nothing. A `DownloadMalwareDatabase` download is tracked like `Stream` and stops at the next chunk after a revoke or a project delete. The server sends GOAWAY after a connection age of 24 hours (+5 minutes grace); the agent reconnects and authenticates again |
+| first message | `AgentMessage` | Must hold the oneof variant `hello`. A first message of another kind ends the stream |
+| compression | n/a | The stream is not compressed at transport level (grpc-go decompresses before the handler, so the allocation cannot be charged). Host agent v1.9.0+ compresses telemetry batches itself (`CommandAck.payload`, see the CommandAck event) after the control plane announces `telemetry_gzip` |
+| receive budget | n/a | v1.9.0+. Every message is charged to the account that owns the project at its size, and a gzip payload at its original size (up to 64 times its length) before it is decompressed: 64 MiB/s per account, with a burst of one second; accounts that were active in the last 2 seconds share a process-wide total of 128 MiB/s, max-min fair (both can be configured). While in debt, the stream of that account does not read the next message (flow control slows its agent) and asks again after at most 1 second; the agent's `last_seen` is still refreshed 30 seconds after the last heartbeat; nothing is refused. `Hello` must be at most 64 KiB (`InvalidArgument`); at most 16 streams per connection |
+| `hello.agent_name` | string | An agent already registered in the project reconnects with its row (an agent that was deleted, by soft delete, is not recognised any more). A name not yet known is registered automatically for both kinds (the WAF agent installation script only sets the name and does not call the register API), at most 20,000 live agents per project; beyond that `ResourceExhausted` |
+| `hello.agent_version` | string | Free text; used for fleet version reports |
+| `hello.hostname` | string | Free text; used for display |
+| `hello.bundle_generation` | int64 | WAF agent only. Informational: the server always sends an initial bundle on connect |
+| `hello.host_key` | string | Optional. When not empty it is verified against the `hosts` table, also for an agent that is already registered (it used to be ignored for a known host agent), and must belong to that project and not be revoked, otherwise `PermissionDenied` "invalid host_key". A check that cannot run (database error, no argon2id verification slot before the 3 second `Hello` deadline) gives `Unavailable` and the agent retries. A key that was verified before against the same stored hash does not run argon2id again. The key is found by id lookup (128 bits of the SHA-256 of the whole key, migration 000105); a key stored before 000105 is found by its display prefix and every candidate is verified, so two hosts that share a 20 bit prefix no longer refuse each other. A valid key binds the agent to that host |
+| revoked host | n/a | An agent bound to a revoked host, or, without a host, whose `hello.hostname` is the name (or reported hostname) of a revoked host and not that of any live host, is refused with `PermissionDenied` "host revoked". A stream that was not bound to a host at `Hello` (a WAF agent linked by hostname in the background) looks up its agent's host again at the periodic re-check. Revoking or deleting a host (`POST …/hosts/{hostId}/revoke`, `DELETE …/hosts/{hostId}`) closes the streams of that host's agents at once with the same code; the host is also read again after `Hello` is validated (before `Welcome`) and with the credential re-check every 5 minutes. The project-wide mTLS credentials are not revoked with it; credentials enrolled with the host key of that host are deleted with it (see "Host-bound credentials") |
+| `hello.agent_kind` | string | Hint: `waf`, `host` or `ebpf`. Ignored when the agent is already registered |
+| `hello.features` (field 8) | repeated string | Optional. Capabilities of the agent binary; names that are not known are ignored. The WAF agent sends one name: `script_rules` (`engine.FeatureScriptRules`) when it can run script rules, `no_script_rules` (`engine.FeatureNoScriptRules`) when it cannot (a version 1 Go agent without scripts); a script rule then leaves every request of that app unfinished, which becomes LOG. The control plane stores it as `agents.script_rules` (migration 000116; `false` for `no_script_rules`, `true` when the agent sends `script_rules` or another name, null when there is no feature or the agent is a host agent), refuses with 400 `SCRIPT_RULES_UNSUPPORTED` to create or enable a script rule for an app whose agents all report `script_rules: false` (a script rule that is already enabled can still be edited and switched off), and shows it as `script_rules` in the agent API objects (the WAF fleet agent list, the agent of an app); the value is rewritten on every connection. The bundle does not depend on features: every agent receives the same bundle, the result of `engine.NormalizeBundle` (version 1 document keys are rewritten: `inspection_off` replaces `disable_semantic` and `disable_rule_based`, `skip_coraza_when_clean` is dropped, tuning rules with engine `crs` are dropped, `scan_mode` `crs_only` and `semantic_only` become `default`, `skip_crs` is dropped). The stored configuration is not changed, and the server logs each rewrite once per app and per connection. Names sent by a v1 agent (`semantic_only`, `semantic_keys_jwt_graphql`, `field_rules_v2`, `custom_rule_field_paths`) are ignored. A v1 agent older than v1.9 does not know the keys `jwt` and `graphql` in `semantic_override` and `skip_semantic`, so it refuses a bundle that holds them and keeps serving the cached bundle. The host agent (v1.9.0+) sends `telemetry_demand`: it handles the `BundleUpdate` `telemetry:demand` (see the BundleUpdate event). A host agent with a trace forward filter sends `trace_forward_filter` (`domain.TraceForwardFilterFeature`): it handles the `BundleUpdate` `trace:forward_filter` |
+| field 5 | n/a | `reserved`. The field number must not be reused after `waf_key` was dropped in migration 000017 |
 
-### Kredensial terikat host (enrollment host key, migrasi 000108)
+### Host-bound credentials (host key enrollment, migration 000108)
 
-Kredensial yang dibuat di halaman Credentials berlaku untuk seluruh project (`mtls_credentials.host_id` NULL) dan memakai aturan `Hello` di atas tanpa perubahan. Kredensial hasil `POST /api/internal/host-enroll` diterbitkan untuk satu agent (jenis + nama) pada satu host; interseptor autentikasi menaruh pengikatnya (host, jenis, nama) di konteks stream dan `validateHello` menjalankan `validateBoundHello`. Server ini memegang kredensial itu persis pada identitasnya:
+A credential created on the Credentials page is valid for the whole project (`mtls_credentials.host_id` NULL) and follows the `Hello` rules above unchanged. A credential from `POST /api/internal/host-enroll` is issued for one agent (kind and name) on one host; the authentication interceptor puts its binding (host, kind, name) in the stream context and `validateHello` runs `validateBoundHello`. The server holds that credential to exactly its identity:
 
-| Aturan | Efek |
+| Rule | Effect |
 |---|---|
-| `hello.agent_name` | Harus sama dengan nama yang di-enroll; kosong dianggap `<hostname>@ebpf` (turunan yang sama dengan jalur project). Lain → `PermissionDenied` |
-| `hello.agent_kind` | Petunjuk `waf` berarti WAF; selain itu (kosong, `host`, `ebpf`) berarti host. Harus sama dengan jenis yang di-enroll, jika tidak `PermissionDenied` |
-| host | Harus ada di project dan belum dicabut. Galat pembacaan → `Unavailable` (gagal-tertutup; jalur project menerima saat galat). Cabut atau hapus host sudah menghapus kredensialnya, jadi ini lapis kedua |
-| `hello.host_key` | Bila dikirim harus terverifikasi dan milik host yang terikat, jika tidak `PermissionDenied` |
-| baris agent | Baris dengan nama + jenis itu pada host yang terikat, atau baris baru di host itu bila project belum punya agent bernama itu. Baris lain bernama sama (host lain, tanpa host, atau jenis lain) → `PermissionDenied`; baris yang belum menempel ke host TIDAK lagi diadopsi |
-| audit penolakan | Hello yang ditolak dicatat `agent.rejected` (metadata `reason` = `agent_name` \| `agent_kind` \| `host_revoked` \| `host_key_invalid` \| `host_key_other_host` \| `agent_name_conflict`, `credential_id`, `host_id`, `agent_kind`, `agent_name`, `presented_name`, `presented_kind`, `presented_hostname`, IP peer), paling banyak sekali per kredensial dan alasan tiap 10 menit |
+| `hello.agent_name` | Must equal the enrolled name; empty counts as `<hostname>@ebpf` (the same derivation as the project path). Anything else gives `PermissionDenied` |
+| `hello.agent_kind` | The hint `waf` means WAF; anything else (empty, `host`, `ebpf`) means host. Must equal the enrolled kind, otherwise `PermissionDenied` |
+| host | Must exist in the project and not be revoked. A read error gives `Unavailable` (fail closed; the project path accepts on error). Revoking or deleting a host already deletes its credentials, so this is a second layer |
+| `hello.host_key` | When sent it must verify and belong to the bound host, otherwise `PermissionDenied` |
+| agent row | The row with that name and kind on the bound host, or a new row on that host when the project has no agent with that name. Another row with the same name (another host, no host, or another kind) gives `PermissionDenied`; a row that is not attached to a host is NO LONGER adopted |
+| rejection audit | A rejected `Hello` is recorded as `agent.rejected` (metadata `reason` = `agent_name` \| `agent_kind` \| `host_revoked` \| `host_key_invalid` \| `host_key_other_host` \| `agent_name_conflict`, `credential_id`, `host_id`, `agent_kind`, `agent_name`, `presented_name`, `presented_kind`, `presented_hostname`, peer IP), at most once per credential and reason every 10 minutes |
 
-Akibatnya mesin dengan kredensial ter-enroll tidak dapat tersambung ulang dengan nama lain, jenis lain, atau untuk host lain, apa pun hostname yang dilaporkannya. Residu: kredensial seluruh project tetap dapat melakukannya (cabut di halaman Credentials).
+As a result a machine with an enrolled credential cannot reconnect under another name, another kind, or for another host, whatever hostname it reports. What remains: a project-wide credential can still do it (revoke it on the Credentials page).
 
-Security: authn=mTLS-client-cert; authz=fingerprint-to-project-mapping; tenancy=project_id-dari-fingerprint; transport=TLS-wajib; replay=tidak-berlaku-stream-panjang; audit=agent_audit
+Security: authn=mTLS-client-cert; authz=fingerprint-to-project-mapping; tenancy=project_id-from-fingerprint; transport=TLS-required; replay=not-applicable-long-lived-stream; audit=agent_audit
 
-Koneksi:
+Connection:
 
-- Keepalive server: ping setelah 60 detik tanpa aktivitas, koneksi ditutup bila tidak dijawab dalam 20 detik. Enforcement policy: klien boleh ping paling sering tiap 15 detik (juga tanpa stream aktif); lebih sering dari itu koneksi ditutup (`too_many_pings`).
-- Keepalive klien (agent WAF dan host): ping tiap 30 detik selama stream aktif, timeout 10 detik.
-- `Welcome.agent_id` adalah `agents.id`, id yang ditampilkan dashboard dan API, bukan id kredensial mTLS. Kosong bila baris agent WAF belum terdaftar saat `Hello`.
-- Reconnect agent: backoff eksponensial 1 → 30 detik dengan jitter ±20%, supaya restart control plane tidak membuat semua agent tersambung ulang di detik yang sama.
-- Shutdown control plane: `GracefulStop` paling lama 10 detik, lalu `Stop()` memutus stream yang tersisa; agent tersambung ulang seperti biasa.
+- Server keepalive: a ping after 60 seconds without activity; the connection is closed if it is not answered within 20 seconds. Enforcement policy: a client may ping at most every 15 seconds (also without an active stream); more often than that and the connection is closed (`too_many_pings`).
+- Client keepalive (WAF and host agents): a ping every 30 seconds while the stream is active, timeout 10 seconds.
+- `Welcome.agent_id` is `agents.id`, the id that the dashboard and the API show, not the id of the mTLS credential. Empty when the WAF agent row was not registered yet at `Hello`.
+- Agent reconnect: exponential backoff from 1 to 30 seconds with ±20% jitter, so a control plane restart does not make every agent reconnect in the same second.
+- Control plane shutdown: `GracefulStop` for at most 10 seconds, then `Stop()` cuts the remaining streams; agents reconnect as usual.
 
 ## event: Heartbeat
 
-Agent ke server. Dikirim kedua jenis agent pada interval yang dinegosiasikan lewat `Welcome.heartbeat_seconds`.
+Agent to server. Sent by both kinds of agent at the interval negotiated through `Welcome.heartbeat_seconds`.
 
-| Field | Tipe | Rules |
+| Field | Type | Rules |
 |---|---|---|
-| `unix_time` | int64 | Detik sejak epoch pada agent. Perbedaan dengan waktu server terlihat pada dashboard |
-| `decisions_total` | uint64 | Penghitung monoton sejak agent start |
-| `blocks_total` | uint64 | Penghitung monoton; wajib tidak melebihi `decisions_total` |
-| `host_info_json` | bytes | Snapshot HostInfo ber-encoding JSON. Dikirim pada heartbeat pertama setelah connect dan setiap 5 menit. Kosong bila tidak berubah. Agent host menyertakan `ssh_ports` (port TCP listener sshd/dropbear yang terdeteksi); guard lockout firewall control plane mewajibkan salah satunya tetap terbuka (tanpa `ssh_ports` = 22 diasumsikan, dengan peringatan `SSH_PORT_ASSUMED`) |
-| `analyze_panics_total` | optional uint64 | Hanya agent WAF (v1.2+). Panic yang ditangkap `Analyze`; request di-allow tanpa inspeksi penuh |
-| `engine_panics_total` | optional uint64 | Hanya agent WAF (v1.2+). Panic engine semantik yang ditangkap di dalam scan (`engine.EnginePanicCount`) |
-| `partial_coverage_total` | optional uint64 | Hanya agent WAF (v1.2+). Request yang cakupan scan semantiknya tidak lengkap, sehingga request ditandai sebagian tidak diperiksa (`application.PartialCoverageRequests`) |
-| `parse_budget_exhausted_total` | optional uint64 | Hanya agent WAF (v1.2+). Scan yang melewatkan varian relaxed-parse karena anggaran kerja habis (`engine.ParseBudgetExhaustedCount`) |
-| `bundle_source` (field 9) | optional string | Hanya agent WAF (v1.3+). Asal konfigurasi yang berlaku: `live` (dari stream ini), `cache` (`last-bundle.json` dimuat saat start), `cache_stale` (cache lebih tua dari `--bundle-cache-max-age`, default 7 hari; tetap diterapkan). Tidak diisi = belum ada bundle |
-| `bundle_generation` (field 10) | optional int64 | Hanya agent WAF (v1.3+). Generasi bundle yang berlaku; diisi bersama `bundle_source` |
-| `script_incomplete_total` (field 11) | optional uint64 | Hanya agent WAF (v1.4+). Evaluasi script rule yang tidak selesai (timeout, batas sandbox, panic, runtime error, anggaran request habis); verdict paling buruk LOG (`engine.ScriptIncompleteCount`) |
-| `script_errors_total` (field 12) | optional uint64 | Hanya agent WAF (v1.4+). Bagian runtime error dari field 11 (`engine.ScriptErrorCount`) |
-| `script_rules_rejected_total` (field 13) | optional uint64 | Hanya agent WAF (v1.4+). Script rule yang dibuang saat bundle dimuat karena memakai builtin di luar allowlist |
-| `script_runs_in_flight` (field 14) | optional int64 | Hanya agent WAF (v1.4+). Gauge: run script yang goroutine-nya belum selesai. Server menyimpan nilai negatif sebagai 0 |
-| `agent_panics_total` (field 15) | optional uint64 | Hanya agent WAF (v1.4+). Panic lain yang ditangkap agent (relay WebSocket, enforcement IP-jail); panic analyze/engine ada di field 5–6 |
-| `analyze_latency_p50_us` (field 16) | optional uint64 | Hanya agent WAF (v1.4+). p50 latensi `Analyze` 5 menit terakhir, mikrodetik, diestimasi dari histogram (bucket 0,25/0,5/1/2/5/10/25/50/100/250/1000 ms; nilai di bucket overflow = 1 s). Tidak diisi bila `analyze_latency_samples` = 0 |
-| `analyze_latency_p95_us` (field 17) | optional uint64 | Hanya agent WAF (v1.4+). p95, aturan sama dengan field 16 |
-| `analyze_latency_p99_us` (field 18) | optional uint64 | Hanya agent WAF (v1.4+). p99, aturan sama dengan field 16; target inline < 5 ms |
-| `analyze_latency_samples` (field 19) | optional uint64 | Hanya agent WAF (v1.4+). Jumlah analisis dalam jendela 5 menit (0 = tidak ada trafik) |
-| `regex_rules_dropped_total` (field 20) | optional uint64 | Hanya agent WAF. Aturan kustom GUI/tuning yang dibuang saat bundle dimuat karena regex tidak valid atau programnya > 256 instruksi, kumulatif sejak agent start. Disimpan di `agents.waf_regex_rules_dropped_total` (migrasi 000097); daftar aturan menandai tiap aturan itu lewat `regex_error` |
+| `unix_time` | int64 | Seconds since the epoch on the agent. The difference from server time shows on the dashboard |
+| `decisions_total` | uint64 | Monotonic counter since the agent started |
+| `blocks_total` | uint64 | Monotonic counter; must not exceed `decisions_total` |
+| `host_info_json` | bytes | JSON-encoded HostInfo snapshot. Sent in the first heartbeat after connect and every 5 minutes. Empty when unchanged. The host agent includes `ssh_ports` (the TCP listener ports of sshd/dropbear that were detected); the control plane's firewall lockout guard requires one of them to stay open (without `ssh_ports`, 22 is assumed, with the warning `SSH_PORT_ASSUMED`) |
+| `analyze_panics_total` | optional uint64 | WAF agent only (v1.2+). Panics caught during request analysis; the request is allowed without full inspection |
+| `engine_panics_total` | optional uint64 | WAF agent only (v1.2+). Panics of a semantic engine caught inside a scan |
+| `partial_coverage_total` | optional uint64 | WAF agent only (v1.2+). Requests whose semantic scan coverage was not complete, so the request is marked partly uninspected |
+| `parse_budget_exhausted_total` | optional uint64 | WAF agent only (v1.2+). Scans that skipped relaxed-parse variants because the work budget ran out |
+| `bundle_source` (field 9) | optional string | WAF agent only (v1.3+). Where the configuration in force came from: `live` (from this stream), `cache` (`last-bundle.json`, loaded at start), `cache_stale` (the cache is older than `--bundle-cache-max-age`, default 7 days; it is still applied). Not set = no bundle yet |
+| `bundle_generation` (field 10) | optional int64 | WAF agent only (v1.3+). The bundle generation in force; set together with `bundle_source` |
+| `script_incomplete_total` (field 11) | optional uint64 | WAF agent only (v1.4+). Script rule evaluations that did not finish (timeout, sandbox limit, panic, runtime error, request budget exhausted); the worst verdict is LOG |
+| `script_errors_total` (field 12) | optional uint64 | WAF agent only (v1.4+). The runtime error part of field 11 |
+| `script_rules_rejected_total` (field 13) | optional uint64 | WAF agent only (v1.4+). Script rules dropped when the bundle was loaded because they use a builtin outside the allowlist |
+| `script_runs_in_flight` (field 14) | optional int64 | WAF agent only (v1.4+). Gauge: script runs whose goroutine has not finished. The server stores a negative value as 0 |
+| `agent_panics_total` (field 15) | optional uint64 | WAF agent only (v1.4+). Other panics caught by the agent (WebSocket relay, IP jail enforcement); analysis and engine panics are in fields 5 to 6 |
+| `analyze_latency_p50_us` (field 16) | optional uint64 | WAF agent only (v1.4+). p50 of the analysis latency over the last 5 minutes, in microseconds, estimated from a histogram (buckets 0.25/0.5/1/2/5/10/25/50/100/250/1000 ms; a value in the overflow bucket = 1 s). Not set when `analyze_latency_samples` = 0 |
+| `analyze_latency_p95_us` (field 17) | optional uint64 | WAF agent only (v1.4+). p95, same rules as field 16 |
+| `analyze_latency_p99_us` (field 18) | optional uint64 | WAF agent only (v1.4+). p99, same rules as field 16; inline target < 5 ms |
+| `analyze_latency_samples` (field 19) | optional uint64 | WAF agent only (v1.4+). Number of analyses in the 5 minute window (0 = no traffic) |
+| `regex_rules_dropped_total` (field 20) | optional uint64 | WAF agent only. Custom GUI/tuning rules dropped when the bundle was loaded because the regex is not valid or its program has more than 256 instructions, cumulative since the agent started. Stored in `agents.waf_regex_rules_dropped_total` (migration 000097); the rule list marks each such rule with `regex_error` |
 
-Penghitung kesehatan inspeksi (field 5–8, 11–13, 15, 20) bersifat kumulatif sejak proses agent start dan kembali ke nol saat restart; field 14 adalah gauge dan field 16–19 meringkas jendela geser 5 menit. Field `optional` memberi presence eksplisit: agent lama (atau agent host/eBPF) tidak mengisinya, dan server membiarkan nilai tersimpan apa adanya (NULL = "belum dilaporkan", bukan nol). Server menyimpan nilai terakhir di kolom `agents` (field 5–8: migrasi 000086; field 11–19: migrasi 000096; field 20: migrasi 000097) dan mengembalikannya di `GET /api/fleet/agents`. Upgrade control plane lebih dulu; agent lama cukup tidak mengisi field baru.
+The inspection health counters (fields 5 to 8, 11 to 13, 15, 20) are cumulative since the agent process started and return to zero on restart; field 14 is a gauge and fields 16 to 19 summarise a sliding 5 minute window. `optional` fields give explicit presence: an old agent (or a host/eBPF agent) does not set them, and the server leaves the stored value as it is (NULL = "not reported yet", not zero). The server stores the last value in columns of `agents` (fields 5 to 8: migration 000086; fields 11 to 19: migration 000096; field 20: migration 000097) and returns it in `GET /api/fleet/agents`. Upgrade the control plane first; an old agent simply does not set the new fields.
 
-`bundle_source`/`bundle_generation` (field 9–10) disimpan di `agents.waf_bundle_source` / `agents.waf_bundle_generation` (migrasi 000099) dalam `UPDATE` yang sama dan dikembalikan di `GET /api/fleet/agents` sebagai `bundle_source` / `bundle_generation`. Server hanya menerima `live`, `cache`, `cache_stale` dan `""` untuk `bundle_source`; nilai lain disimpan sebagai `unknown`. Generasi negatif disimpan 0. Perubahan sumber tetap dicatat di log per stream.
+`bundle_source` and `bundle_generation` (fields 9 to 10) are stored in `agents.waf_bundle_source` and `agents.waf_bundle_generation` (migration 000099) in the same `UPDATE` and returned in `GET /api/fleet/agents` as `bundle_source` and `bundle_generation`. The server accepts only `live`, `cache`, `cache_stale` and `""` for `bundle_source`; any other value is stored as `unknown`. A negative generation is stored as 0. A change of source is still logged per stream.
 
-Security: authn=mTLS-client-cert; authz=project-dari-fingerprint; ratelimit=interval-ditetapkan-server-lewat-Welcome; audit=last_seen-diperbarui
+Security: authn=mTLS-client-cert; authz=project-from-fingerprint; ratelimit=interval-set-by-server-through-Welcome; audit=last_seen-updated
 
 ## event: WAFDecisionEvent
 
-Agent WAF ke server. Satu event per request HTTP yang dianalisis inline proxy. Agent eBPF tidak pernah mengirimnya.
+WAF agent to server. One event per HTTP request that the inline proxy analysed. An eBPF agent never sends it.
 
-| Field | Tipe | Rules |
+| Field | Type | Rules |
 |---|---|---|
-| `ts_unix` | int64 | Waktu keputusan pada agent |
-| `method`, `host`, `uri` | string | Konteks request seperti diterima |
-| `remote_ip` | string | Diselesaikan `resolveRemoteIP`; menghormati sakelar percaya-proxy pada agent |
-| `status` | int32 | Kode status HTTP yang diterima klien: respons blokir atau challenge, respons upstream, 502 untuk galat upstream. 0 = tidak tercatat (agent lama, atau event tanpa status seperti log handshake WebSocket). Disimpan di `waf_decisions.status` (migrasi 000117; NULL untuk 0) dan dijawab API sebagai `status`, 0 bila NULL |
-| `score` | int32 | Skor keputusan. Ambang blokir default 150, ambang log default 80 |
-| `action` | string | Wajib salah satu dari `allow`, `block`, `monitor` |
-| `categories` | repeated string | Kategori serangan dari peta rule |
-| `match_detail` | string | Cuplikan yang memicu deteksi |
-| `analyze_method` | string | Lapisan mana yang memutuskan; menjadi `waf_decisions.analyze_method`. `rule_based` dan `hybrid` dari agent v1 disimpan sebagai `semantic`; baris lama tidak ditulis ulang, tetapi API menampilkan dan menghitungnya sebagai `semantic` |
-| `app_id` | string | Boleh kosong untuk trafik host-header yang tak terpetakan |
-| `user_agent`, `content_type` | string | Konteks request |
-| `body_size` | int32 | Ukuran body sebelum pemotongan |
-| `body_preview` | string | Bagian awal body (512 karakter); nilai field form/JSON/multipart bernama rahasia menjadi `[redacted]` seperti `request_body` |
-| `cwe` | string | Dari peta taksonomi. **Kosong untuk 5 dari 13 engine semantic** |
-| `latency_us` | int32 | Latensi keputusan dalam mikrodetik |
-| `match_source` | string | Contoh `header:User-Agent`, `body`, `query:id`, `body:password`, `body.json:password`, `path` |
-| `request_headers` | map string ke string | Disensor sebelum dikirim: `Authorization`/`Proxy-Authorization`/`Cookie`/`Set-Cookie` dibuang, nilai header bernama rahasia (`X-Api-Key`, `X-CSRF-Token`, `X-Amz-Security-Token` …) menjadi `[redacted]`; header yang disebut `match_source` eksak (`match_source_exact`) tetap — tereduksi untuk vonis JWT/Anomaly, Authorization: skema + segmen header JWT, Cookie: cookie yang disebut saja; sumber tebakan tidak mengecualikan nilai rahasia. Control plane menyensor lagi saat ingest untuk agent lama |
-| `request_body` | string | 4096 byte pertama; kosong bila biner. Nilai field form, kunci JSON (semua kedalaman) dan field teks multipart bernama rahasia menjadi `[redacted]` kecuali field yang disebut `match_source` eksak |
-| `query_params` | string | Query string; nilai parameter bernama rahasia (`api_key`, `token`, `access_token`, `password` …) menjadi `[redacted]` kecuali parameter yang disebut `match_source` eksak. Query string di `uri` disensor sama |
-| `payload_type` | string | Contoh `json`, `xml`, `form-urlencoded` |
-| `coverage` | string | v1.2+. Flag celah cakupan scan semantik, dipisah koma (contoh `field_cap,body_binary`); sama dengan penanda `coverage:<flags>` di `match_detail`, tetapi diisi juga untuk `allow`. Kosong = cakupan lengkap atau agent lama. Disimpan di `waf_decisions.coverage`. Flag `engine_disabled:<kunci>` menandai engine yang dimatikan operator untuk request itu (semua dua puluh kunci): informasi, bukan celah, jadi tidak menaikkan vonis dan tidak ada di penanda `coverage:` pada `match_detail`. Flag `engine_log_only:<kunci>` menandai engine yang `action`-nya `log` dan yang deteksi blokirnya ditahan menjadi LOG pada request itu (request diteruskan, kategori, skor dan detail sama dengan blokirnya); sama seperti flag sebelumnya ia informasi, bukan celah. API memecah teks ini: `coverage` berisi flag celah saja, `engines_off` berisi kunci engine yang dimatikan dan `engines_log_only` kunci engine yang ditahan, untuk baris baru dan lama |
-| `match_source_exact` | bool | v1.9+ (field 25). `true` bila engine sendiri menyebut masukan `match_source` (semantik, content scan); `false` untuk sumber tebakan (URI utuh), sumber tanpa masukan, dan agent lama. Hanya sumber eksak yang menyimpan nilai bernama rahasia; control plane menyensor ulang saat ingest dengan nilai ini. Tidak disimpan |
+| `ts_unix` | int64 | Time of the decision on the agent |
+| `method`, `host`, `uri` | string | Request context as received |
+| `remote_ip` | string | The client address as resolved by the agent; honours the trust-proxy switch on the agent |
+| `status` | int32 | HTTP status code the client received: a block or challenge response, the upstream response, 502 for an upstream error. 0 = not recorded (an old agent, or an event without a status such as a WebSocket handshake log). Stored in `waf_decisions.status` (migration 000117; NULL for 0) and answered by the API as `status`, 0 when NULL |
+| `score` | int32 | Decision score. The default block threshold is 150 and the default log threshold 80 |
+| `action` | string | Required, one of `allow`, `block`, `monitor` |
+| `categories` | repeated string | Attack categories from the rule map |
+| `match_detail` | string | The excerpt that triggered the detection |
+| `analyze_method` | string | Which layer decided; becomes `waf_decisions.analyze_method`. `rule_based` and `hybrid` from a v1 agent are stored as `semantic`; old rows are not rewritten, but the API shows and counts them as `semantic` |
+| `app_id` | string | May be empty for host-header traffic that maps to no app |
+| `user_agent`, `content_type` | string | Request context |
+| `body_size` | int32 | Body size before truncation |
+| `body_preview` | string | The start of the body (512 characters); values of form/JSON/multipart fields with a secret name become `[redacted]`, as in `request_body` |
+| `cwe` | string | From the taxonomy map; empty when the detection has no CWE mapping |
+| `latency_us` | int32 | Decision latency in microseconds |
+| `match_source` | string | For example `header:User-Agent`, `body`, `query:id`, `body:password`, `body.json:password`, `path` |
+| `request_headers` | map of string to string | Filtered before sending: `Authorization`/`Proxy-Authorization`/`Cookie`/`Set-Cookie` are dropped, values of headers with a secret name (`X-Api-Key`, `X-CSRF-Token`, `X-Amz-Security-Token` …) become `[redacted]`; a header that an exact `match_source` names (`match_source_exact`) stays, reduced for a JWT/Anomaly verdict (Authorization: the scheme + the header segment of the JWT; Cookie: only the named cookie); a guessed source does not exempt secret values. The control plane filters again at ingest for old agents |
+| `request_body` | string | The first 4096 bytes; empty when binary. Values of form fields, JSON keys (any depth) and multipart text fields with a secret name become `[redacted]`, except the field that an exact `match_source` names |
+| `query_params` | string | The query string; values of parameters with a secret name (`api_key`, `token`, `access_token`, `password` …) become `[redacted]`, except the parameter that an exact `match_source` names. The query string in `uri` is filtered the same way |
+| `payload_type` | string | For example `json`, `xml`, `form-urlencoded` |
+| `coverage` | string | v1.2+. Coverage gap flags of the semantic scan, separated by commas (for example `field_cap,body_binary`); the same as the `coverage:<flags>` marker in `match_detail`, but also set for `allow`. Empty = complete coverage or an old agent. Stored in `waf_decisions.coverage`. The flag `engine_disabled:<key>` marks an engine that the operator switched off for that request (all twenty keys): information, not a gap, so it does not raise the verdict and is not in the `coverage:` marker of `match_detail`. The flag `engine_log_only:<key>` marks an engine whose `action` is `log` and whose blocking detection was held back as LOG on that request (the request is forwarded; category, score and detail are the same as the block would have had); like the previous flag it is information, not a gap. The API splits this text: `coverage` holds the gap flags only, `engines_off` the keys of engines that were switched off and `engines_log_only` the keys of engines that were held back, for new and old rows |
+| `match_source_exact` | bool | v1.9+ (field 25). `true` when the engine itself names the `match_source` input (semantic, content scan); `false` for a guessed source (the whole URI), a source with no input, and old agents. Only an exact source keeps a value with a secret name; the control plane filters again at ingest using this value. Not stored |
 
-Sampling dilakukan di sisi agent agar stream tidak dibanjiri.
+Sampling is done on the agent side so the stream is not flooded.
 
-Security: authn=mTLS-client-cert; authz=project-dari-fingerprint; pii=header-sensitif-disaring-sebelum-kirim; retensi=30-hari-hypertable; audit=waf_decisions-append-only
+Security: authn=mTLS-client-cert; authz=project-from-fingerprint; pii=sensitive-headers-filtered-before-send; retention=30-day-hypertable; audit=waf_decisions-append-only
 
 ## event: CommandAck
 
-Dipakai kedua agent untuk dua tujuan berbeda. Ini adalah kompromi yang disengaja dan terdokumentasi di proto.
+Used by both agents for two different purposes. This is a deliberate compromise and is documented in the proto.
 
-| Field | Tipe | Rules |
+| Field | Type | Rules |
 |---|---|---|
-| `command_id` | string | Agent WAF: cocok dengan `command_id` dari `KeyRotation`. Agent eBPF: harfiah `ebpf:telemetry` |
-| `ok` | bool | Agent WAF: true bila rotasi berhasil. Agent eBPF: selalu true untuk telemetri |
-| `error` | string | Agent WAF: pesan galat sungguhan. **Agent eBPF: payload JSON `PushPayload`, bukan galat.** Field ini dipakai ulang agar skema proto tidak perlu diubah |
-| `payload` (field 4) | bytes | v1.9.0+, hanya agent host dengan `command_id="ebpf:telemetry:v2"`: gzip dari JSON `PushPayload` (sebagai pengganti `error`), dikirim hanya di stream yang control plane-nya mengumumkan `telemetry_gzip` (`telemetry:demand`). Control plane membaca ukuran asli dari trailer gzip (ISIZE, ≤ 8 MiB dan ≤ 64 × panjang member, `telemetrygz.MaxRatio`), membebankannya ke anggaran terima akun sebelum mendekompresi, dan menuntut ukuran serta CRC yang cocok; payload rusak, di atas rasio itu atau di stream tanpa pengumuman dibuang tanpa ingest (yang di atas rasio dan tanpa pengumuman juga tanpa beban), stream tetap berjalan. Agent mem-pad member yang akan terkompresi lebih dari 64× dengan blok deflate stored kosong (5 byte masing-masing, tanpa output) sampai panjangnya 1/64 batch (`telemetrygz.Encode`), jadi batch yang sah tidak pernah ditolak karena rasionya; pembaca gzip mana pun membacanya sebagai batch yang sama |
+| `command_id` | string | WAF agent: matches the `command_id` of `KeyRotation`. eBPF agent: the literal `ebpf:telemetry` |
+| `ok` | bool | WAF agent: true when the rotation succeeded. eBPF agent: always true for telemetry |
+| `error` | string | WAF agent: a real error message. **eBPF agent: the JSON `PushPayload`, not an error.** This field is reused so the proto schema did not need to change |
+| `payload` (field 4) | bytes | v1.9.0+, host agent only with `command_id="ebpf:telemetry:v2"`: gzip of the JSON `PushPayload` (in place of `error`), sent only on a stream whose control plane announced `telemetry_gzip` (`telemetry:demand`). The control plane reads the original size from the gzip trailer (ISIZE, up to 8 MiB and up to 64 times the member length, `telemetrygz.MaxRatio`), charges it to the account receive budget before decompressing, and requires a matching size and CRC; a payload that is damaged, above that ratio or on a stream without the announcement is dropped without ingest (one above the ratio and without the announcement is also dropped without a charge), and the stream keeps running. The agent pads a member that would compress more than 64 times with empty stored deflate blocks (5 bytes each, no output) until its length is 1/64 of the batch (`telemetrygz.Encode`), so a legitimate batch is never refused because of its ratio; any gzip reader reads it as the same batch |
 
-Batch telemetri v2 (`ebpf:telemetry:v2`, berisi `batch_id`) dideduplikasi per (project, agent, `batch_id`) dan dijawab `BundleUpdate{command_id="ebpf:telemetry:receipt"}`. Tanda terima batch yang diterima disimpan 2 menit dalam pool bersama 131.072 entri (progres retry per section 65.536 entri) yang dibagi adil per project: saat penuh, project yang memegang entri terbanyak melepas entri lamanya. Banjir batch kecil dengan `batch_id` baru dari satu project hanya memperpendek jendela deduplikasi project itu sendiri — resend batch-nya yang terlambat bisa tersimpan dua kali — dan tidak lagi membuat batch project lain ditolak (`process_accepted: false`, "receipt capacity exhausted"). Antrean penulis keputusan WAF (8.192 baris) dan antrean block window (1.024) juga dibagi adil per project dan dilayani round-robin.
+A telemetry v2 batch (`ebpf:telemetry:v2`, holding a `batch_id`) is deduplicated per (project, agent, `batch_id`) and answered with `BundleUpdate{command_id="ebpf:telemetry:receipt"}`. The receipt of an accepted batch is kept for 2 minutes in a shared pool of 131,072 entries (retry progress per section 65,536 entries) that is shared fairly between projects: when it is full, the project that holds the most entries releases its oldest. A flood of small batches with new `batch_id` values from one project only shortens the deduplication window of that project itself (a late resend of its batch may be stored twice) and no longer makes batches of other projects refused (`process_accepted: false`, "receipt capacity exhausted"). The WAF decision writer queue (8,192 rows) and the block window queue (1,024) are also shared fairly per project and served round-robin.
 
-Security: authn=mTLS-client-cert; authz=project-dari-fingerprint; integritas=payload-hanya-diterima-dalam-stream-terautentikasi; audit=telemetri-masuk-hypertable
+Security: authn=mTLS-client-cert; authz=project-from-fingerprint; integrity=payload-accepted-only-in-authenticated-stream; audit=telemetry-ingested-into-hypertable
 
 ## event: BundleUpdate
 
-Server ke agent. Membawa konfigurasi, tidak pernah kode.
+Server to agent. Carries configuration, never code.
 
-| Field | Tipe | Rules |
+| Field | Type | Rules |
 |---|---|---|
-| isi bundle | JSON | Agent WAF: dokumen aturan WAF. Agent eBPF: state desired dan trace policy |
-| guard lockout firewall | — | Agent eBPF menjalankan guard yang sama dengan control plane dan API lokal (`ebpf.ValidateHostFirewall`) sebelum mengubah map apa pun. State yang ditolak di-ack dengan `error` berawalan `apply refused (<CODE>): …`; control plane menampilkannya sebagai `bundle_status.status = "refused"` dengan `code`, dan kebijakan terakhir yang berhasil tetap berlaku. Agent menyimpan kebijakan terakhir yang berhasil beserta generasi dan endpoint control plane yang ter-pin (`/var/lib/wafio-host-agent/firewall-last-good.json`, cadangan `/run/wafio/…`, yang lebih baru menang; override `WAFIO_FIREWALL_STATE_FILE`) dan menerapkannya lagi saat start sebelum stream tersambung: control plane di-resolve dulu (atau endpoint tersimpan di-seed); bila keduanya tidak ada, egress Deny All tersimpan diterapkan dengan DNS diizinkan sampai endpoint ter-pin. Setelah Hello agent mengirim `CommandAck{command_id="ebpf:policy_source"}` (JSON `{"source":"saved|default|live","generation":…,"dns_relaxed":true?}` di `error`) → `bundle_status.source` / `saved_generation` / `dns_relaxed` (egress Deny All tersimpan berjalan dengan DNS diizinkan karena endpoint control plane belum ter-pin). Server selalu mengirim desired state, juga yang kosong: bagian yang tidak tersimpan dikirim eksplisit (daftar kosong, port policy mati, config default agent), sehingga state kosong = reset. Objek eBPF tanpa pengecualian untuk map `wafio_cp_endpoints` menolak egress Deny All dan entri blocklist `0.0.0.0/0`/`::/0`. Apply tidak mengosongkan conntrack |
-| endpoint control plane | — | Sebelum setiap dial, agent host me-resolve `--grpc-server`, menulis alamat:port ke `wafio_cp_endpoints`, lalu men-dial persis endpoint itu (target `passthrough:///`, tanpa resolver DNS gRPC). Resolusi gagal = endpoint sebelumnya tetap dipakai |
-| generasi | int64 | Monoton naik. Agent menyimpannya dan mengirim balik lewat `Hello.bundle_generation`. Agent WAF: generasi berasal dari satu sequence untuk semua agent (migrasi 000102), sehingga agent yang terdaftar ulang tidak pernah menerima generasi lebih rendah; bundel WAF membawa `agent_id` dan agent menolak generasi lebih rendah hanya untuk `agent_id` yang sama (bundel `agent_id` lain memulai urutan baru). Bundel konfigurasi WAF yang gagal diterapkan (observer belum siap, port sementara terpakai) dicoba ulang oleh agent dengan backoff 2 s–60 s, paling banyak 10 kali, dan di-ack ulang `ok` dengan `command_id` yang sama begitu berhasil; bundel lebih baru atau stream putus membatalkannya. Agent host: generasi lebih rendah ditolak; generasi sama dengan isi lain diterapkan (isi terbaru di stream berurutan adalah pandangan control plane) |
-| target | — | Bundle WAF hanya dikirim ke agent WAF project tersebut; agent host/eBPF tidak pernah menerimanya |
-| `command_id="telemetry:demand"` | JSON `{"live_for_sec":N,"telemetry_gzip":true,"status_on_demand":true,"status_live_for_sec":M}` | Hanya ke agent host yang melaporkan `hello.features` `telemetry_demand`. Bukan konfigurasi: agent tidak meng-ack, tidak menyimpan generasi. `telemetry_gzip: true` membuat agent mengirim batch telemetry sebagai `CommandAck.payload` gzip di stream itu. Saat tersambung N = sisa jendela live viewer agent itu (0 bila tidak ada; snapshot koneksi dan bandwidth tiap 60 detik); `N = 120` saat halaman Firewall membaca snapshot, dicocokkan per project dan agent, paling banyak sekali per 30 detik per agent (snapshot tiap 3 detik selama jendela; agent membatasi ≤ 600). Status on demand: `status_on_demand: true` (selalu dari control plane ini) membuat agent mengirim payload lambat (host info, status, trace stats, hit count rule) tiap 3 detik dan metrics tiap 1 detik hanya selama jendela status M detik atau jendela snapshot N detik, selain itu keduanya tiap 30 detik; payload lambat juga langsung saat tersambung, saat jendela terbuka dan setelah bundle konfigurasi diterapkan. Saat tersambung M = sisa jendela status (≥ sisa jendela snapshot, 0 bila tidak ada); `M = 120` saat dashboard membaca status (`/host/stream` channel `status`/`metrics`/`stats`/`hostinfo`, `GET …/host/status`, `…/host/metrics`, `…/host/trace/status`, `…/host/trace/stats`), paling banyak sekali per 30 detik per agent; permintaan snapshot membawa `N = M = 120`. Pesan tanpa `status_on_demand` (control plane lama): tiap 3 detik / 1 detik seperti sebelumnya. Agent tanpa fitur itu tidak pernah menerimanya |
-| `command_id="trace:forward_filter"` | JSON `{"revision":R,"digest":"<32 hex>","filter":{"rules":[…],"correlation_stages":[…]}}` (≤ 1 MiB), atau penanda `{"revision":R,"digest":"<32 hex>","disabled":"too_large"}` bila filter > 1 MiB | Hanya ke stream agent host (kind `host`/`ebpf`) yang melaporkan `hello.features` `trace_forward_filter`: rule deteksi dan tahap korelasi yang dievaluasi ingest untuk host itu. Bukan konfigurasi: agent tidak meng-ack, tidak menyimpan generasi, tidak menyimpannya ke disk; filter berlaku hanya untuk stream itu. Setiap batch telemetry gRPC agent membawa `trace_forward` `{"digest":"…","rule_hits":{"<rule id>":n}}` — digest filter yang dipegang stream (kosong = belum ada) dan hit rule dari event yang tidak dikirim; control plane mengirim filter lagi bila digest berbeda (segera bila isinya berubah, selain itu paling sering tiap 10 detik), dan langsung ke stream yang tersambung setelah setiap penulisan rule deteksi host itu atau rantai korelasi project-nya. Penanda `too_large`: agent tidak memfilter dan melaporkan digest penanda (status `too_large`), sehingga tidak dikirim ulang. Filter dengan `revision` lain, digest yang tidak cocok dengan isinya, atau JSON rusak tidak diterapkan (agent mengirim semua event) |
-| batas waktu kirim | — | Server mengirim di luar lock registrasi, paralel per stream, dengan batas waktu (default 10 detik). Stream yang `Send`-nya macet melewati batas diputus (`UNAVAILABLE`); agent menyambung ulang |
-| cache agent | — | Agent WAF menulis setiap bundle yang berhasil diterapkan ke `$STATE_DIRECTORY/last-bundle.json` (atau `--state-dir` / `WAFIO_STATE_DIR`; temp + fsync + rename, mode 0600) dan menerapkannya saat start sebelum connect. File rusak diabaikan |
-| kode yang dapat dieksekusi | — | Dilarang. Objek eBPF terkompilasi tidak pernah melintasi jalur ini |
+| bundle body | JSON | WAF agent: the WAF rule document. eBPF agent: the desired state and trace policies |
+| firewall lockout guard | n/a | The eBPF agent runs the same guard as the control plane and the local API (`hostpolicy.ValidateHostFirewall`) before it changes any map. A refused state is acknowledged with an `error` that starts with `apply refused (<CODE>): …`; the control plane shows it as `bundle_status.status = "refused"` with `code`, and the last policy that succeeded stays in force. The agent keeps the last policy that succeeded together with its generation and the pinned control plane endpoint (`/var/lib/wafio-host-agent/firewall-last-good.json`, backup `/run/wafio/…`, the newer wins; override `WAFIO_FIREWALL_STATE_FILE`) and applies it again at start before the stream connects: the control plane is resolved first (or the stored endpoint is seeded); when neither exists, the stored egress Deny All is applied with DNS allowed until the endpoint is pinned. After `Hello` the agent sends `CommandAck{command_id="ebpf:policy_source"}` (JSON `{"source":"saved\|default\|live","generation":…,"dns_relaxed":true?}` in `error`) → `bundle_status.source` / `saved_generation` / `dns_relaxed` (a stored egress Deny All runs with DNS allowed because the control plane endpoint is not pinned yet). The server always sends the desired state, also an empty one: a part that is not stored is sent explicitly (empty list, port policy off, default agent config), so an empty state = a reset. An eBPF object without an exception for the map `wafio_cp_endpoints` refuses egress Deny All and blocklist entries `0.0.0.0/0`/`::/0`. Apply does not flush conntrack |
+| control plane endpoint | n/a | Before every dial, the host agent resolves `--grpc-server`, writes the address:port to `wafio_cp_endpoints`, then dials exactly that endpoint (target `passthrough:///`, no gRPC DNS resolver). A failed resolution = the previous endpoint stays in use |
+| generation | int64 | Monotonically increasing. The agent stores it and sends it back through `Hello.bundle_generation`. WAF agent: the generation comes from one sequence for all agents (migration 000102), so an agent that registers again never receives a lower generation; the WAF bundle carries `agent_id` and the agent refuses a lower generation only for the same `agent_id` (a bundle with another `agent_id` starts a new sequence). A WAF configuration bundle that fails to apply (observer not ready, port temporarily in use) is retried by the agent with backoff of 2 s to 60 s, at most 10 times, and acknowledged again `ok` with the same `command_id` once it succeeds; a newer bundle or a broken stream cancels it. Host agent: a lower generation is refused; the same generation with other content is applied (the latest content on an ordered stream is the control plane's view) |
+| target | n/a | A WAF bundle is sent only to the WAF agents of that project; a host/eBPF agent never receives it |
+| `command_id="telemetry:demand"` | JSON `{"live_for_sec":N,"telemetry_gzip":true,"status_on_demand":true,"status_live_for_sec":M}` | Only to a host agent that reports `hello.features` `telemetry_demand`. Not configuration: the agent does not acknowledge it and does not store a generation. `telemetry_gzip: true` makes the agent send telemetry batches as gzip `CommandAck.payload` on that stream. On connect N = the remaining live viewer window of that agent (0 when there is none; snapshot of connections and bandwidth every 60 seconds); `N = 120` while the Firewall page reads a snapshot, matched per project and agent, at most once per 30 seconds per agent (a snapshot every 3 seconds during the window; the agent caps it at 600 or less). Status on demand: `status_on_demand: true` (always from this control plane) makes the agent send the slow payload (host info, status, trace stats, rule hit counts) every 3 seconds and metrics every 1 second only during the status window of M seconds or the snapshot window of N seconds, and otherwise both every 30 seconds; the slow payload is also sent at once on connect, when a window opens and after a configuration bundle is applied. On connect M = the remaining status window (at least the remaining snapshot window, 0 when there is none); `M = 120` while the dashboard reads status (`/host/stream` channels `status`/`metrics`/`stats`/`hostinfo`, `GET …/host/status`, `…/host/metrics`, `…/host/trace/status`, `…/host/trace/stats`), at most once per 30 seconds per agent; a snapshot request carries `N = M = 120`. A message without `status_on_demand` (an old control plane): every 3 seconds / 1 second as before. An agent without that feature never receives it |
+| `command_id="trace:forward_filter"` | JSON `{"revision":R,"digest":"<32 hex>","filter":{"rules":[…],"correlation_stages":[…]}}` (up to 1 MiB), or the marker `{"revision":R,"digest":"<32 hex>","disabled":"too_large"}` when the filter is larger than 1 MiB | Only to the stream of a host agent (kind `host`/`ebpf`) that reports `hello.features` `trace_forward_filter`: the detection rules and correlation stages that ingest evaluates for that host. Not configuration: the agent does not acknowledge it, does not store a generation and does not save it to disk; the filter applies to that stream only. Every telemetry batch of the agent over gRPC carries `trace_forward` `{"digest":"…","rule_hits":{"<rule id>":n}}`: the digest of the filter the stream holds (empty = none yet) and the rule hits of events that were not sent; the control plane sends the filter again when the digest differs (at once when its content changes, otherwise at most every 10 seconds), and straight to the connected stream after every write of a detection rule of that host or of a correlation chain of its project. The `too_large` marker: the agent does not filter and reports the digest of the marker (status `too_large`), so it is not sent again. A filter with another `revision`, a digest that does not match its content, or broken JSON is not applied (the agent sends all events) |
+| send timeout | n/a | The server sends outside the registration lock, in parallel per stream, with a timeout (default 10 seconds). A stream whose `Send` blocks past the limit is cut (`UNAVAILABLE`); the agent reconnects |
+| agent cache | n/a | The WAF agent writes every bundle that it applied successfully to `$STATE_DIRECTORY/last-bundle.json` (or `--state-dir` / `WAFIO_STATE_DIR`; temp + fsync + rename, mode 0600) and applies it at start before it connects. A damaged file is ignored |
+| executable code | n/a | Forbidden. A compiled eBPF object never crosses this path |
 
-Security: authn=mTLS-client-cert-arah-server; authz=hanya-bundle-milik-project-terikat-fingerprint; integritas=TLS; kode=tidak-pernah-dikirim; audit=perubahan-konfigurasi-tercatat-di-agent_audit
+Security: authn=mTLS-client-cert-server-direction; authz=only-bundles-of-the-project-bound-to-the-fingerprint; integrity=TLS; code=never-sent; audit=configuration-changes-recorded-in-agent_audit
 
 ## event: KeyRotation
 
-Server ke agent WAF saja. Agent eBPF mengabaikannya.
+Server to the WAF agent only. The eBPF agent ignores it.
 
-| Field | Tipe | Rules |
+| Field | Type | Rules |
 |---|---|---|
-| `command_id` | string | Wajib. Agent membalas dengan `CommandAck` membawa id yang sama |
-| materi kunci | — | Tidak pernah dicatat pada sisi mana pun |
+| `command_id` | string | Required. The agent replies with a `CommandAck` that carries the same id |
+| key material | n/a | Never logged on any side |
 
-Security: authn=mTLS-client-cert; authz=hanya-agent-milik-project; konfirmasi=CommandAck-wajib; logging=materi-kunci-tidak-pernah-dicatat
+Security: authn=mTLS-client-cert; authz=only-agents-of-the-project; confirmation=CommandAck-required; logging=key-material-never-logged
 
-## Aturan evolusi
+## Evolution rules
 
-- Setiap perubahan `.proto` diikuti `./scripts/gen-proto.sh`; hasil di `shared/agentpb/` di-commit.
-- Nomor field tidak boleh dipakai ulang; tandai `reserved` seperti field 5 pada `Hello`.
-- Field baru bersifat opsional secara default di proto3; agent lama akan mengabaikannya.
-- Menambah jenis agent ketiga tidak memerlukan service baru — tambahkan varian ke oneof dan biarkan jenis lain mengabaikannya.
+- Every change to the `.proto` is followed by `./scripts/gen-proto.sh`; the result in `shared/agentpb/` is committed.
+- A field number must not be reused; mark it `reserved` like field 5 of `Hello`.
+- A new field is optional by default in proto3; an old agent ignores it.
+- Adding a third kind of agent does not need a new service: add a variant to the oneof and let the other kinds ignore it.
 
 ## rpc: DownloadMalwareDatabase
 
-Server-streaming RPC untuk corpus hash global. Memakai interceptor mTLS yang sama
-seperti `Stream`; sertifikat wajib terdaftar dan aktif. Corpus ini bukan data
-project dan tidak mengandung Auth-Key, upload pengguna, atau aturan tenant.
-`MalwareDatabaseRequest` kosong; tidak menerima path/URL dari agent.
+A server-streaming RPC for the global hash corpus. It uses the same mTLS interceptor as `Stream`; the certificate must be registered and active. The corpus is not project data and holds no Auth-Key, no user upload and no tenant rules. `MalwareDatabaseRequest` is empty; it accepts no path or URL from the agent.
 
-| Field | Tipe | Rules |
+| Field | Type | Rules |
 |---|---|---|
-| request | `MalwareDatabaseRequest` | Kosong; wajib kredensial mTLS aktif |
-| `data` | bytes | Maksimal 64 KiB per chunk; total maksimal 128 MiB |
-| `sha256` | string | Hanya frame akhir; digest cocok dengan seluruh data dan diikuti EOF |
+| request | `MalwareDatabaseRequest` | Empty; requires an active mTLS credential |
+| `data` | bytes | At most 64 KiB per chunk; at most 128 MiB in total |
+| `sha256` | string | Final frame only; the digest matches all the data and is followed by EOF |
 
-Server membaca snapshot file yang dibuka sekali, mengirim chunk `data` maksimal
-64 KiB, lalu satu frame akhir `sha256` tanpa data. Total maksimal 128 MiB.
-Agent wajib menerima checksum yang cocok dan akhir stream sebelum memvalidasi
-record SHA-256 serta mengganti file secara atomik. Kegagalan mempertahankan file
-lama. Transfer agent dibatasi dua menit dan satu transfer aktif per proses.
+The server reads a snapshot of a file that it opened once, sends `data` chunks of at most 64 KiB, then one final `sha256` frame without data. The total is at most 128 MiB. The agent must receive a matching checksum and the end of the stream before it validates the SHA-256 records and replaces the file atomically. A failure keeps the old file. An agent transfer is limited to two minutes and one active transfer per process.
 
-`FetchSecurityData.malware_from_control_plane` (field 4) mengarahkan komponen
-`malware` ke RPC ini, bukan mengirim kredensial provider. WAF agent juga melakukan
-sinkronisasi saat reconnect dan melaporkan komponen `malware` dalam `secdata:status`.
-Selesaikan upgrade control plane dan WAF agent untuk alur terpusat; agent lama
-mengabaikan field baru dan masih memerlukan konfigurasi fetch lama. Selesainya
-update di control plane bukan bukti bahwa seluruh agent telah selesai menerapkan.
+`FetchSecurityData.malware_from_control_plane` (field 4) points the `malware` component at this RPC instead of sending the provider credential. The WAF agent also synchronises when it reconnects and reports the `malware` component in `secdata:status`. Complete the upgrade of the control plane and the WAF agent for the central flow; an old agent ignores the new field and still needs the old fetch configuration. A finished update on the control plane is not proof that all agents have finished applying it.
 
-Security: authn=mTLS-client-cert; authz=credential-aktif; tenancy=corpus-global-tanpa-data-tenant; transport=TLS-wajib; audit=admin.security_data_updated
+Security: authn=mTLS-client-cert; authz=active-credential; tenancy=global-corpus-without-tenant-data; transport=TLS-required; audit=admin.security_data_updated

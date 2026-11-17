@@ -15,12 +15,10 @@ import (
 // On the inline proxy it is the one path every path matcher uses (path
 // exceptions in both readings, field rules, custom rules, tuning scope, login
 // protection).
-// The proxy never re-derives it:
-// it passes fasthttp's ctx.URI().Path() in domain.IncomingRequest.ForwardedPath.
-// Entry points without a proxy (/v1/analyze, /v1/analyze-nginx,
-// raw-URI callers of MatchPathException) do not know how their
-// host routes the raw target, so they match on RequestPathFor(rawURI) — this
-// path plus the decoded-but-unresolved one — instead.
+// The proxy never re-derives it: it passes fasthttp's ctx.URI().Path().
+// Callers without a proxy (raw-URI callers of MatchPathException) do not know
+// how their host routes the raw target, so they match on RequestPathFor(rawURI)
+// — this path plus the decoded-but-unresolved one — instead.
 //
 // The result is fasthttp's own normalization — the same code the proxy runs,
 // not a re-implementation — so it cannot drift on a fasthttp upgrade:

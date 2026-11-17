@@ -40,7 +40,7 @@ import (
 // share recompute, O(n log n) in the active accounts once a second.
 const (
 	// DefaultRecvAccountRate: ±1,500 host agents at the ±42 KB/s measured on
-	// the demo host before status on demand, or a WAF fleet logging ±20,000 requests a
+	// a test host before status on demand, or a WAF fleet logging ±20,000 requests a
 	// second.
 	DefaultRecvAccountRate = 64 << 20
 	// DefaultRecvTotalRate is the process-wide budget: two accounts at their

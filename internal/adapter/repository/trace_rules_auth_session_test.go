@@ -54,7 +54,7 @@ func staleNetEv(event, comm string, family int, verified bool) application.Trace
 		Filename: "/etc/shadow", AddrFamily: family, ExeVerified: verified}
 }
 
-// The demo host sequences of 2026-10-16: an SSH login (OpenSSH 10
+// The sequences of a test host: an SSH login (OpenSSH 10
 // sshd-session/sshd-auth), the systemd user session it starts, sudo, and an
 // installer copying files as root. None may store HIGH or CRITICAL.
 func TestBenignLoginSessionSequencesStayBelowHigh(t *testing.T) {

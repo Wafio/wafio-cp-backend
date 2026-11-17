@@ -278,7 +278,7 @@ func TestTraceForwardFilterKeepsIngestOutcome(t *testing.T) {
 }
 
 // fwdCorpus is a deterministic event stream as the agent encodes it: a
-// background shaped like the demo host's kernel mix (openat 64%, network
+// background shaped like the kernel mix of a test host (openat 64%, network
 // 17%, kill/prctl 11%, the rest process and credential events), every
 // classification edge case ingest has (non-canonical and relative paths,
 // stale filenames, sensitive files, verified identities, containers,

@@ -1,6 +1,6 @@
 # wafio-cp-backend
 
-The Wafio control plane: the HTTP API and gRPC server that agents connect to, the PostgreSQL and TimescaleDB storage behind them, and the decision data the dashboard reads. This repository also holds the Go module `shared/` that both agents compile in, the database migrations and the release publishing scripts. The WAF agent is the Rust agent of wafio-agent-waf; this repository holds no WAF agent.
+The Wafio control plane: the HTTP API and gRPC server that agents connect to, the PostgreSQL and TimescaleDB storage behind them, and the decision data the dashboard reads. This repository also holds the Go module `shared/` that both agents compile in and the database migrations. The installers and the release scripts are in wafio-release. The WAF agent is the Rust agent of wafio-agent-waf; this repository holds no WAF agent.
 
 ## Place in the platform
 
@@ -13,7 +13,7 @@ The Wafio control plane: the HTTP API and gRPC server that agents connect to, th
 | wafio-portal | wafio.cloud site and blog (SvelteKit), portal API (Go) (private) |
 | uddin-lang-rs | Rust uddin interpreter |
 | wafio-release | installers, release bundle layout, release and publish scripts (private) |
-| wafio-docs | skills, role agents, specs, findings, plans, ops notes (private) |
+| wafio-docs | internal notes (private) |
 
 ## Requirements
 
@@ -36,11 +36,11 @@ Binaries go to `build/`, never to the repository root. The WAF agent is the Rust
 scripts/ci-local.sh
 ```
 
-`scripts/ci-local.sh` is the full gate. It runs on Linux and covers: a check that no agent instruction files or review IDs are tracked, `gitleaks`, `golangci-lint`, `go build`, `go vet`, `go test`, the same three inside `shared/`, a check that `shared/` imports nothing from `internal/`, the installer and release script tests in `scripts/tests/`, `go test -race ./...`, and `govulncheck`. The database tests run in addition when `TEST_DB_URL` points at a throwaway database; the migration round trip (`TestMigrationsRoundTrip`) needs `WAFIO_TEST_MIGRATIONS_DSN` pointing at an empty one.
+`scripts/ci-local.sh` is the full gate. It runs on Linux and covers: a check that no agent instruction files or review IDs are tracked, `gitleaks`, `golangci-lint`, `go build`, `go vet`, `go test`, the same three inside `shared/`, a check that `shared/` imports nothing from `internal/`, the Python tests of the backup and preflight tools in `scripts/tests/`, `go test -race ./...`, and `govulncheck`. The database tests run in addition when `TEST_DB_URL` points at a throwaway database; the migration round trip (`TestMigrationsRoundTrip`) needs `WAFIO_TEST_MIGRATIONS_DSN` pointing at an empty one.
 
 `go test ./...` alone skips the database tests and needs no external service.
 
-Hosted CI (`.github/workflows/ci.yml`, on pull requests and manual dispatch) runs `go vet`, `go test` (also inside `shared/`) and `golangci-lint` v2.13.1, all without a database.
+Hosted CI (`.github/workflows/ci.yml`) runs the whole gate of `scripts/ci-local.sh` on every push to `main`, on every pull request and on manual dispatch. The database tests run against a TimescaleDB service that lives for the job.
 
 ## Run locally
 
@@ -58,7 +58,7 @@ Security data (GeoIP databases, IP lists) is not in the repository: `wafio fetch
 
 ## Configuration
 
-`config/config.example.yaml` documents every key. Order of precedence: `config/config.yaml`, then `WAFIO_*` environment variables (`server.http_addr` is `WAFIO_SERVER_HTTP_ADDR`), then command line flags. `.env.example` lists the variables. `Config.Validate()` in `internal/config/validate.go` stops the boot on an empty `database.name`, an empty `server.http_addr`, a `jwt.secret` that is empty, too short, a shipped placeholder or previously published, a non-positive `jwt.expire_hours`, wildcard CORS origins with credentials, an empty or malformed `totp.enc_key`, an invalid or too broad `server.trusted_proxies`, agent receive budgets out of range, and a `log.level` other than debug, info, warn or error. Never commit `config/config.yaml`.
+`config/config.example.yaml` documents every key. Order of precedence: `config/config.yaml`, then `WAFIO_*` environment variables (`server.http_addr` is `WAFIO_SERVER_HTTP_ADDR`), then command line flags. `Config.Validate()` in `internal/config/validate.go` stops the boot on an empty `database.name`, an empty `server.http_addr`, a `jwt.secret` that is empty, too short, a shipped placeholder or previously published, a non-positive `jwt.expire_hours`, wildcard CORS origins with credentials, an empty or malformed `totp.enc_key`, an invalid or too broad `server.trusted_proxies`, agent receive budgets out of range, and a `log.level` other than debug, info, warn or error. Never commit `config/config.yaml`.
 
 ## Release
 
@@ -76,26 +76,27 @@ The tests named `TestInstaller*` (in `cmd/wafio` and `internal/adapter/http/hand
 
 ```
 cmd/wafio/                serve, migrate, admin, fetch-data, release
-internal/                 adapter, agentserver, apicontract, application, bodyinspect, certutil, config,
-                          conformance, dashboard, domain, engine, fairshare, fsstat, keyauth, lru, otp,
-                          setup, siem, testutil, updater, validate
+internal/                 adapter, agentserver, apicontract, application, certutil, config, conformance,
+                          dashboard, domain, engine, fairshare, fsstat, installertest, keyauth, lru, otp,
+                          setup, testutil, updater, validate (internal/README.md describes them)
 shared/                   Go module github.com/wafio/wafio-cp-backend/shared (see below)
 migrations/               000001 to 000118, up and down
 api/openapi.yaml          HTTP contract
 config/                   config.example.yaml
-deploy/                   the backup units (systemd/) and an nginx example
+deploy/                   the backup units (systemd/) and an nginx example for the HTTP API
 docs/                     agent-protocol.md, cli.md, operations/, releases/
 scripts/                  ci-local.sh, build-dist.sh, gen-proto.sh, gen-notices.sh,
-                          backup-controlplane.py, production_preflight.py, tests/
+                          backup-controlplane.py, production_preflight.py,
+                          tests/ (Python tests of the backup and preflight tools)
 security-data/            JA4 lists
-test/                     end-to-end and pentest rigs, lab upstream
+test/                     frontend-fixtures: JSON files the dashboard tests copy
 Dockerfile                control plane image (`serve --migrate`, ports 9087 and 9090, runs as a user without root)
 docker-compose.yml        services db (TimescaleDB) and api (the control plane image)
 ```
 
 ## Migrations
 
-Files are `golang-migrate` pairs, `NNNNNN_name.up.sql` and `.down.sql`: 108 pairs, the latest is 000117, and 000066 to 000072, 000088 and 000092 are unused numbers. A new migration is numbered above every one already applied, or `golang-migrate` never runs it. `wafio migrate up`, `down [--steps N]` and `fresh` (development only, drops everything) run them; the applied version is in `SELECT version, dirty FROM schema_migrations`; `wafio serve --migrate` applies pending ones at boot. The migrations ship in the control plane bundle.
+Files are `golang-migrate` pairs, `NNNNNN_name.up.sql` and `.down.sql`: 109 pairs, the latest is 000118, and 000066 to 000072, 000088 and 000092 are unused numbers. A new migration is numbered above every one already applied, or `golang-migrate` never runs it. `wafio migrate up`, `down [--steps N]` and `fresh` (development only, drops everything) run them; the applied version is in `SELECT version, dirty FROM schema_migrations`; `wafio serve --migrate` applies pending ones at boot. The migrations ship in the control plane bundle.
 
 ## HTTP contract tests
 

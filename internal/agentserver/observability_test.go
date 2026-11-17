@@ -194,8 +194,8 @@ func TestStoreAgentFeaturesFromHello(t *testing.T) {
 		features []string
 		want     string
 	}{
-		{"the Rust agent with the script sidecar", []string{engine.FeatureScriptRules}, "true"},
-		{"the Rust agent without the script sidecar", []string{engine.FeatureNoScriptRules}, "false"},
+		{"an agent that runs scripts", []string{engine.FeatureScriptRules}, "true"},
+		{"a version 1 Go agent without scripts", []string{engine.FeatureNoScriptRules}, "false"},
 		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true"},
 		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false"},
 		{"agent without features", nil, "unknown"},

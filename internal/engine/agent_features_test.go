@@ -10,8 +10,8 @@ func TestAgentScriptRules(t *testing.T) {
 	}{
 		{"no features: an agent built before Hello.features", nil, "unknown"},
 		{"empty list", []string{}, "unknown"},
-		{"the Rust agent with the sidecar", []string{FeatureScriptRules}, "true"},
-		{"the Rust agent without the sidecar", []string{FeatureNoScriptRules}, "false"},
+		{"an agent that runs scripts", []string{FeatureScriptRules}, "true"},
+		{"a version 1 Go agent without scripts", []string{FeatureNoScriptRules}, "false"},
 		{"a v1 agent: other features, scripts run", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths"}, "true"},
 		{"an older agent that still sends semantic_only, scripts run", []string{"semantic_keys_jwt_graphql", "semantic_only"}, "true"},
 		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", FeatureNoScriptRules}, "false"},

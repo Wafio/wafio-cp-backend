@@ -2,10 +2,11 @@ package domain
 
 // Rust port oracle for ValidateWebSocketRulesJSON (origins go through
 // url.Parse): writes "ok"/"err" per input as JSON lines, which the Rust test
-// websocket_differential replays. Skipped unless WAFIO_GOLDEN_WS_OUT is set:
+// websocket_differential of wafio-agent-waf (crates/domain) replays. Skipped
+// unless WAFIO_GOLDEN_WS_OUT is set:
 //
 //	WAFIO_GOLDEN_WS_OUT=/tmp/ws.jsonl go test ./internal/domain -run TestWebSocketDumpGolden -count=1
-//	cd rust && GODUMP_WS=/tmp/ws.jsonl cargo test -p wafio-domain websocket_differential
+//	GODUMP_WS=/tmp/ws.jsonl cargo test -p wafio-domain websocket_differential   (in wafio-agent-waf)
 
 import (
 	"bufio"

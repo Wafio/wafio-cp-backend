@@ -16,13 +16,13 @@ export WAFIO_RELEASE_PUBLIC_KEY='<base64 Ed25519 public key from the reviewed re
   --config /etc/wafio/config.yaml \
   --frontend /opt/wafio/frontend \
   --database-service wafio-production \
-  --expected-schema 72 \
-  --release-version v1.4.0 \
+  --expected-schema 118 \
+  --release-version v2.0.0 \
   --release-public-key "$WAFIO_RELEASE_PUBLIC_KEY" \
   --signing-key-file /secure/release/wafio-release.key \
-  --artifact dist/wafio-controlplane-v1.4.0-linux-amd64.tar.gz \
-  --artifact dist/wafio-waf-agent-v1.4.0-linux-amd64.tar.gz \
-  --artifact dist/wafio-host-agent-v1.4.0-linux-amd64.tar.gz
+  --artifact dist/wafio-controlplane-v2.0.0-linux-amd64.tar.gz \
+  --artifact dist/wafio-waf-agent-v2.0.0-linux-amd64.tar.gz \
+  --artifact dist/wafio-host-agent-v2.0.0-linux-amd64.tar.gz
 ```
 
 Exit zero and JSON `status: pass` are required. The command fails when `openssl`, `psql`, or `pg_isready` is absent; the named database service is unavailable; `schema_migrations` is dirty or differs from the requested version; configuration or frontend index is absent; signing material is missing, malformed, too broadly readable, or does not match the trusted public key; a component is absent; or any detached signature does not bind the exact artifact hash and version. It reads every input and uses a temporary directory for signature verification. It does not print key bytes or connection details.
@@ -33,19 +33,19 @@ The release scripts, which are in the wafio-release repository, apply the same f
 
 ## Release and rollback
 
-Take and verify the encrypted off-device backup described in `production-backup.md` before changing the database. Record current binary hashes, package version, schema version, agent connection state, SIEM counters, telemetry loss counters, and the rollback artifact signature. Upgrade the control plane before agents because telemetry v2 process receipts depend on the control-plane contract. Apply migrations with `wafio migrate up`; never use `fresh` outside a disposable development database.
+Take and verify the encrypted off-device backup described in `production-backup.md` before changing the database. Record current binary hashes, package version, schema version, agent connection state, telemetry loss counters, and the rollback artifact signature. Upgrade the control plane before agents because telemetry v2 process receipts depend on the control-plane contract. Apply migrations with `wafio migrate up`; never use `fresh` outside a disposable development database.
 
 After each component, confirm `/health`, `/ready`, agent freshness, expected bundle generation, and a bounded benign/block smoke fixture. A successful `/health` response proves only process liveness. `/ready` proves bounded database availability, not traffic protection or downstream SIEM processing.
 
-Rollback uses the previously accepted, signed artifact and the release-specific database procedure. Check `wafio migrate version` first. Use `wafio migrate down --steps 1` only when the reviewed down migration is compatible with the data written since release; otherwise restore the verified backup into a new database and switch using the operator-approved recovery procedure. Do not overwrite the only database or delete the failed environment during diagnosis. Roll agents back after the control plane is compatible, then repeat readiness and reconnect checks.
+Rollback uses the previously accepted, signed artifact and the release-specific database procedure. Check the applied version first (`SELECT version, dirty FROM schema_migrations`). Use `wafio migrate down --steps 1` only when the reviewed down migration is compatible with the data written since release; otherwise restore the verified backup into a new database and switch using the operator-approved recovery procedure. Do not overwrite the only database or delete the failed environment during diagnosis. Roll agents back after the control plane is compatible, then repeat readiness and reconnect checks.
 
 ## Monitoring and incident response
 
-During the rollout, watch control-plane readiness, agent `last_seen`, applied bundle generation, database write failures, transport rejected/dropped events and batches, pending batches, SIEM `accepted`, `delivered`, `failed`, `dropped`, `retried`, `queued`, and `in_flight`, plus host kernel and userspace drop counters. Counters are process-local and reset on restart. SIEM acceptance means queued in memory; it is not a durable downstream receipt. The SIEM queue contains 256 events across four workers and has no durable spool.
+During the rollout, watch control-plane readiness, agent `last_seen`, applied bundle generation, database write failures, transport rejected/dropped events and batches, pending batches, plus host kernel and userspace drop counters. Counters are process-local and reset on restart.
 
 If an agent disconnects, stop the rollout, retain logs and process counters, and verify certificate validity, CA, SNI, endpoint reachability, then observe a fresh `last_seen` and applied generation after reconnect. Do not re-provision credentials until identity mismatch or expiry is established.
 
-If SIEM failures or retries increase, stop increasing traffic, preserve the stable `Idempotency-Key` evidence, check the receiver and network, and wait for `queued` plus `in_flight` to drain. A later success does not recover an event already counted as dropped or failed. Receiver-side deduplication is required because a timeout can make delivery ambiguous. This runbook does not send test notifications to third parties; use an explicitly authorized isolated receiver for fault exercises.
+The control plane holds no SIEM sender: the webhook in `rules_json` (`siem.webhook_url`) is validated here and used by the WAF agent. This runbook does not send test notifications to third parties; use an explicitly authorized isolated receiver for fault exercises.
 
 Reject any update with a missing or invalid signature, a signature for another version/hash, or a downgrade refusal. Keep the current process running, quarantine the artifact and its manifest, and investigate the release pipeline and signing custody. Never replace the trusted public key or generate a new production key merely to make a failing artifact pass.
 
@@ -53,12 +53,12 @@ For database unavailability, preserve `/health` liveness evidence and the `/read
 
 ## Isolated verification evidence
 
-The repository tests cover invalid/mismatched release signatures, missing trusted keys, downgrade refusal, SIEM 429 recovery with stable delivery identity, permanent failure, queue overflow visibility, telemetry retry retention, disconnect state, and reconnect/application retry. Run the bounded suites without external services:
+The repository tests cover invalid/mismatched release signatures, missing trusted keys, downgrade refusal, telemetry retry retention, disconnect state, and reconnect/application retry. Run the bounded suites without external services:
 
 ```bash
-go test ./internal/updater ./internal/siem ./internal/agentserver
-go test -race ./internal/updater ./internal/siem ./internal/agentserver
+go test ./internal/updater ./internal/agentserver
+go test -race ./internal/updater ./internal/agentserver
 python3 -m unittest scripts.tests.test_production_preflight -v
 ```
 
-These tests use in-memory queues, local HTTP fixtures, temporary files, and fake dependency processes. They do not stop a database, fill a disk, mutate a Linux service, or demonstrate delivery to a real SIEM.
+These tests use in-memory queues, local HTTP fixtures, temporary files, and fake dependency processes. They do not stop a database, fill a disk, or mutate a Linux service.

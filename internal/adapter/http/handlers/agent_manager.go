@@ -24,7 +24,7 @@ import (
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// AgentManagerHandler — enterprise-wide agent management.
+// AgentManagerHandler — fleet-wide agent management.
 //
 // Unlike EBPFHandler.ListAgents which is strictly project-scoped and eBPF-only,
 // this handler exposes a single cross-kind, cross-project view so the UI can
@@ -387,10 +387,9 @@ func agentOnlineConflict(agent *repository.EBPFAgent) fiber.Map {
 // ──────────────────────────────────────────────────────────────────────────────
 // Per-agent WAF configuration (1 agent = 1 config).
 //
-// Replaces the single project-wide config for self-hosted (Pro+) tiers. The
-// agent pulls rules_json + sensitivity via the existing bundle endpoint
-// (see internal/adapter/http/handlers/waf_fleet.go Bundle). Free-tier users
-// keep using project_configs since they have no agents.
+// Overrides the project-wide config for one agent. The agent receives
+// rules_json + sensitivity in the bundle the control plane pushes over the
+// gRPC stream. A project without per-agent config uses project_configs.
 // ──────────────────────────────────────────────────────────────────────────────
 
 // ── Per-app WAF config ───────────────────────────────────────────────────────
@@ -609,7 +608,6 @@ type putAppConfigBody struct {
 }
 
 // PutAppConfig writes per-app WAF config (rules_json + sensitivity).
-// Tier gates are applied identically to PutAgentConfig.
 //
 //	PUT /api/projects/:id/agents/:agentId/routes/:appId/config
 func (h *AgentManagerHandler) PutAppConfig(c *fiber.Ctx) error {

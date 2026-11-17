@@ -1,7 +1,9 @@
 package engine
 
-// Oracle for wafio-gocompat's Regexp (rust/crates/gocompat/tests/regexp_differential.rs).
-// Report-only: runs only with WAFIO_REGEXP_ORACLE_OUT=<file>. Generates random Go regexp
+// Oracle for the Rust agent's Regexp port (wafio-agent-waf,
+// crates/bytetext/tests/pattern_differential.rs, which reads the file as
+// WAFIO_REGEXP_ORACLE=<file>). Report-only: runs only with
+// WAFIO_REGEXP_ORACLE_OUT=<file>. Generates random Go regexp
 // patterns from a grammar plus hand-written edge cases and, for each, records whether
 // regexp.Compile accepts it (error text when not) and FindAllStringSubmatchIndex over a
 // fixed list of haystacks. Format (tab-separated, strings hex-encoded):

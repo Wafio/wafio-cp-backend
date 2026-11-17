@@ -1,7 +1,8 @@
 package engine
 
-// Oracle for wafio-gocompat's url.Parse, net.ParseIP and filepath.Clean ports
-// (rust/crates/gocompat/tests/gonet_differential.rs). Report-only: runs only with
+// Oracle for the Rust agent's url.Parse, net.ParseIP and filepath.Clean ports
+// (wafio-agent-waf, crates/bytetext/tests/net_differential.rs, which reads the file as
+// WAFIO_GONET_ORACLE=<file>). Report-only: runs only with
 // WAFIO_GONET_ORACLE_OUT=<file>. Tab-separated, strings hex-encoded:
 //
 //	url <in> <ok> <scheme> <opaque> <host> <path> <rawquery> <fragment> <hostname>

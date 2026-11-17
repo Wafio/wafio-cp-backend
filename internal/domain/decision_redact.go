@@ -156,7 +156,7 @@ var secretSubstringsByFirst = func() (idx [256][][]byte) {
 // ("eyJhbGciOiJub25lIn0.[redacted]") or its length ("[redacted:len=24]").
 //
 // Flagged is the decoded value of the part the engine flagged, known only on
-// the WAF agent (AnalysisResult.MatchValue; in process, never on the wire):
+// the WAF agent (in process, never on the wire):
 // an exact source then keeps a secret-named input only when it holds that
 // value, so a same-named field elsewhere in the request (a victim's token
 // beside the injected one, a duplicate cut off the stored copy) is redacted.

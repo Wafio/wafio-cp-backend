@@ -130,11 +130,11 @@ type TraceEventRow struct {
 	PolicyID        int       `json:"policy_id,omitempty"`
 	EventTime       time.Time `json:"timestamp"`
 
-	// Process lineage (Phase 1)
+	// Process lineage
 	ParentComm      string `json:"parent_comm,omitempty"`
 	GrandparentComm string `json:"grandparent_comm,omitempty"`
 
-	// Container context (Phase 3)
+	// Container context
 	ContainerID    string `json:"container_id,omitempty"`
 	ContainerImage string `json:"container_image,omitempty"`
 	ContainerName  string `json:"container_name,omitempty"`

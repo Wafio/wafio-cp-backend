@@ -1,118 +1,93 @@
-# Kontrak CLI — biner WAFio
+# CLI contract: the `wafio` binary
 
-Control plane (`wafio`) dan dua agent (`wafio-waf-agent`, `wafio-host-agent`). Diekstrak dari definisi `cobra.Command` di `cmd/wafio/` dan pembacaan variabel lingkungan di `cmd/wafio-*-agent/`. `wafio-host-agent` dibangun di repositori `wafio-agent-host`; bagiannya tetap di sini karena installer dan control plane memakai kontrak lingkungannya. API portal ada di repositori `wafio-portal` (`docs/portal-api.md`).
+The control plane binary `wafio`. Extracted from the `cobra.Command` definitions in `cmd/wafio/`. The WAF agent is built from wafio-agent-waf and the host agent from wafio-agent-host; their command lines and environment are documented there. The API of the portal is in the wafio-portal repository (`docs/portal-api.md`).
 
-Konvensi keluaran biner: keluar dengan kode 0 saat berhasil, bukan-0 saat gagal. Kegagalan konfigurasi memakai `log.Fatalf`, yang keluar dengan kode 1.
+Output convention: the binary exits with code 0 on success and non-zero on failure. A configuration failure uses `log.Fatalf`, which exits with code 1.
 
 ## command: wafio serve
 
-Menjalankan control plane: HTTP pada port 9087, gRPC mTLS pada port 9090.
+Runs the control plane: HTTP on port 9087, gRPC with mTLS on port 9090.
 
-| Flag | Tipe | Rules |
+| Flag | Type | Rules |
 |---|---|---|
-| `--migrate` | bool | Default false. Bila true, migrasi dijalankan sebelum server start |
-| `--migrations` | string | Default `migrations`. Path direktori migrasi; wajib ada bila `--migrate` diberikan |
+| `--migrate` | bool | Default false. When true, migrations run before the server starts |
+| `--migrations` | string | Default `migrations`. Path of the migrations directory; it must exist when `--migrate` is given |
 
-Konfigurasi dimuat dengan urutan `config/config.yaml`, lalu variabel lingkungan `WAFIO_*`, lalu flag CLI. Setiap kunci YAML memetakan ke satu variabel lingkungan: `server.http_addr` menjadi `WAFIO_SERVER_HTTP_ADDR`.
+Configuration is loaded in this order: `config/config.yaml`, then `WAFIO_*` environment variables, then command line flags. Every YAML key maps to one environment variable: `server.http_addr` becomes `WAFIO_SERVER_HTTP_ADDR`. A key that is no longer read is ignored.
 
-Sebelum server start, `Config.Validate` (`internal/config/validate.go`) memeriksa konfigurasi dan menghentikan boot dengan daftar semua kesalahan bila ada yang gagal. Yang diperiksa antara lain: `jwt.secret` kosong, masih placeholder bawaan atau contoh, atau kurang dari 32 karakter; `jwt.expire_hours` tidak positif; `totp.enc_key` kosong atau tidak 32 byte; `server.cors_allow_origins` berisi `*` bersama kredensial; `server.http_addr` kosong; trusted proxy tidak valid; `log.level` di luar debug, info, warn, error; `database.name` atau `database.host` kosong, `database.port` di luar 1-65535; batas penerimaan data agent di luar rentang.
+Before the server starts, `Config.Validate` (`internal/config/validate.go`) checks the configuration and stops the boot with the list of all errors if any check fails. It checks, among other things: `jwt.secret` empty, still a shipped placeholder or example, or shorter than 32 characters; `jwt.expire_hours` not positive; `totp.enc_key` empty or not 32 bytes; `server.cors_allow_origins` holding `*` together with credentials; `server.http_addr` empty; an invalid trusted proxy; `log.level` other than debug, info, warn or error; `database.name` or `database.host` empty, `database.port` outside 1 to 65535; agent receive limits out of range.
 
-Security: authn=tidak-berlaku-proses-lokal; privilege=tidak-butuh-root; secrets=dibaca-dari-config-atau-env-tidak-pernah-dari-argv; audit=log-startup; catatan=jwt.secret-placeholder-ditolak-saat-boot
+Security: authn=not-applicable-local-process; privilege=no-root-needed; secrets=read-from-config-or-env-never-from-argv; audit=startup-log; note=jwt.secret-placeholder-refused-at-boot
 
 ## command: wafio migrate
 
-Subperintah: `up`, `down`, `down --steps N`, dan `fresh`. Versi yang sedang berlaku ada di `SELECT version, dirty FROM schema_migrations`.
+Subcommands: `up`, `down`, `down --steps N` and `fresh`. The version in force is in `SELECT version, dirty FROM schema_migrations`.
 
-| Flag | Tipe | Rules |
+| Flag | Type | Rules |
 |---|---|---|
-| `--migrations` | string | Default kosong, artinya deteksi otomatis dari akar proyek |
-| `--steps` | int | Hanya untuk `down`. Jumlah migrasi yang dibatalkan |
+| `--migrations` | string | Default empty, which means auto-detect from the project root. Applies to every subcommand |
+| `--steps` | int | Only for `down`. Default 1. The number of migrations to roll back |
 
-`fresh` membuang seluruh objek lalu menerapkan ulang semuanya. Perintah ini menghancurkan data dan hanya untuk pengembangan.
+`up` applies every pending migration. `down` rolls back one migration, or N with `--steps`. `fresh` drops every object and applies everything again; it destroys data and is for development only.
 
-Security: authn=akses-shell-ke-host; authz=kredensial-basis-data-dari-config; destruktif=fresh-menghapus-seluruh-data-hanya-untuk-pengembangan; audit=riwayat-versi-golang-migrate
+Security: authn=shell-access-to-the-host; authz=database-credentials-from-config; destructive=fresh-deletes-all-data-development-only; audit=golang-migrate-version-history
+
+## command: wafio admin
+
+Manages instance administrators. Use it once after `wafio migrate up` to create the first login.
+
+| Subcommand | Rules |
+|---|---|
+| `create` | Creates an administrator account. Flags: `--email` (required), `--name` (required), `--password`. The password is read from the terminal unless `--password` is given; a flag value is visible in `ps` and in the shell history |
+| `list` | Lists the administrator accounts |
+
+Both subcommands read the database settings from the configuration.
+
+Security: authn=shell-access-to-the-host; authz=database-credentials-from-config; secrets=password-prompted-by-default
 
 ## command: wafio fetch-data
 
-Mengunduh data keamanan: basis data GeoIP, daftar reputasi IP, sidik jari JA3, dan daftar User-Agent.
+Downloads third-party security data into `security-data/`: GeoIP databases, IP reputation lists, JA4 and JA3 fingerprints, the bot User-Agent list and the malware hash corpus. The files are not stored in the repository.
 
-| Flag | Tipe | Rules |
+| Flag | Type | Rules |
 |---|---|---|
-| `--dir` | string | Default `security-data`. Direktori tujuan |
-| `--maxmind-key` | string | Kunci lisensi MaxMind GeoLite2. Menimpa nilai config |
-| `--force` | bool | Default false. Unduh ulang meski berkas sudah ada |
-| `--only` | string | Daftar dipisah koma dari `geoip`, `geoip-country`, `geoip-city`, `geoip-asn`, `firehol`, `ja3`, `ua` |
-| `--profile` | string | Default `all`. Salah satu dari `all`, `control-plane`, `agent` |
+| `--dir` | string | Default `security-data`. Target directory |
+| `--maxmind-key` | string | MaxMind GeoLite2 license key. Overrides the config value `geo.maxmind_license_key`. Without a key the DB-IP free databases are used |
+| `--force` | bool | Default false. Download again even if the file exists |
+| `--only` | string | Comma-separated list of `geoip`, `geoip-country`, `geoip-city`, `geoip-asn`, `firehol`, `ja4`, `ja3`, `ua`, `malware`, `malware-hashes`. Overrides `--profile` |
+| `--profile` | string | Default `all`. One of `all`, `control-plane`, `agent` |
 
-Security: authn=tidak-berlaku; egress=mengunduh-dari-sumber-hulu-pihak-ketiga; integritas=tidak-ada-verifikasi-tanda-tangan-pada-artefak-terunduh; secrets=kunci-maxmind-lewat-flag-terlihat-di-daftar-proses
+The profiles: `all` is every component; `control-plane` is the three GeoIP databases, `ja4` and `ua`; `agent` is the three GeoIP databases, `firehol`, `ja4`, `ua` and `malware`.
 
-Catatan: memberikan kunci lisensi lewat `--maxmind-key` membuatnya terlihat di `ps`. Lebih aman menyetel `WAFIO_MAXMIND_LICENSE_KEY`.
+The `malware` component needs a MalwareBazaar auth key: `WAFIO_MALWARE_AUTH_KEY`, or the key saved under Administration > Security data. Without one, a `--profile` run skips the component and keeps the current database; `--only malware` reports the missing key. The previous valid corpus is kept on an error, and the corpus is refreshed after one hour, or at once with `--force`.
 
-Catatan: daftar reputasi IP diunduh langsung dari penyedianya untuk melindungi server ini dan tidak boleh dijual kembali. Sumber, kredit, dan lisensinya ada di `NOTICES.txt`.
+Security: authn=not-applicable; egress=downloads-from-third-party-upstream-sources; integrity=no-signature-check-on-downloaded-files; secrets=maxmind-key-in-a-flag-is-visible-in-the-process-list
 
-## command: wafio-waf-agent
+Note: a license key given with `--maxmind-key` is visible in `ps`. Setting `WAFIO_GEO_MAXMIND_LICENSE_KEY` is safer.
 
-Sidecar WAF L7. Dikonfigurasi seluruhnya lewat variabel lingkungan; tidak ada flag.
+Note: the IP reputation lists are downloaded directly from their providers to protect this server and must not be redistributed. Sources, credits and licenses are in `NOTICES.txt`.
 
-| Env key | Rules |
+## command: wafio release
+
+Release signing helpers. Agents verify the signatures with a public key compiled into their binary; until that key is set, self-update refuses to install anything.
+
+| Subcommand | Rules |
 |---|---|
-| `WAFIO_GRPC_SERVER` | Wajib. Alamat control plane dalam bentuk host:port |
-| `WAFIO_GRPC_CLIENT_CERT`, `WAFIO_GRPC_CLIENT_KEY`, `WAFIO_GRPC_CA_CERT` | Wajib. Path berkas kredensial mTLS |
-| `WAFIO_GRPC_SERVER_NAME` | Opsional. Menimpa SNI ketika sertifikat server tidak cocok dengan alamat sambungan |
-| `WAFIO_AGENT_NAME` | Wajib sudah terdaftar untuk agent WAF; dipakai sebagai kunci pencarian pada `Hello` |
-| `WAFIO_HOST_KEY` | Opsional. Mengikat agent ke satu baris pada tabel `hosts` |
-| `WAFIO_SERVER_URL` | Basis URL HTTP untuk endpoint ingest |
-| `WAFIO_SECURITY_DATA_DIR` | Opsional. Direktori data keamanan itu sendiri (berisi `geoip/`, `ja4/`, `user-agents/`); tanpa nilai ini `/etc/wafio/security-data`. Flag padanannya `--security-data-dir`. File env v1 menulis `WAFIO_CRS_DEFAULT_DIR` (`<dir>/crs`, `<dir>/crs/coreruleset` atau `<dir>/crs/coreruleset/rules`); agent masih menurunkan direktori dari nama itu dan mencatat satu peringatan, dan installer menggantinya dengan variabel ini |
-| `WAFIO_GEO_COUNTRY_DB_PATH`, `WAFIO_GEO_CITY_DB_PATH`, `WAFIO_GEO_ASN_DB_PATH` | Path basis data MaxMind |
-| `WAFIO_UA_BAD_BOT_FILE` | Daftar User-Agent untuk bot protection |
-| `WAFIO_AGENT_API_KEY` | Warisan. Digantikan `WAFIO_HOST_KEY` |
-| `WAFIO_BODY_DECODE_BUDGET_BYTES` | Opsional. Budget memori se-proses untuk dekode body `Content-Encoding` (byte atau KiB/MiB/GiB/K/M/G; default 64 MiB; `0` = nonaktif; nilai tidak valid → default + log). Dibaca saat dekode pertama. Reservasi per dekode mencakup buffer keluaran dan state decoder (brotli ≈ 4–5 MiB untuk body kecil); budget di bawah state decoder → coding itu tidak didekode (`decompress_limit`). Melebihi budget → byte mentah diperiksa, `BodyScanSkipped=decompress_budget`, request ditandai sebagian tidak diperiksa, `content_scan.on_incomplete` berlaku bila content scan aktif dengan `block` diturunkan ke LOG (dipicu beban, bukan isi request) |
-| `WAFIO_CHALLENGE_COOKIE_MAX_NETWORKS` | Opsional. Jumlah jaringan berbeda (IPv4 /16, IPv6 /48, alamat klien yang sudah di-resolve) yang boleh memakai satu cookie challenge `_wafio_ch`; lebih dari itu cookie dicabut sampai kedaluwarsa dan pengunjung di-challenge ulang (default 8; `0` = nonaktif; nilai tidak valid → default + log) |
-| `WAFIO_CHALLENGE_VERIFY_MAX_PER_MIN` | Opsional. Batas `POST /_wafio/challenge/verify` per IP klien (alamat klien yang sudah di-resolve; IPv6 dihitung per /64) dalam jendela tetap 60 detik; yang melebihi dijawab 429 dengan `Retry-After: 60` sebelum pekerjaan verifikasi apa pun. Endpoint itu dilayani sebelum WAF dan limiter L7 flood, jadi batas ini yang menjaga cache token terpakai (default 120; `0` = nonaktif; nilai tidak valid → default + log; tabel 50.000 alamat). Banyak pengunjung di balik satu NAT berbagi hitungan yang sama: naikkan nilainya bila kantor besar di balik satu IP ditolak |
-| `STATE_DIRECTORY` / `--state-dir` / `WAFIO_STATE_DIR` | Direktori state (dibuat 0700): `last-bundle.json` (cache bundle) dan `challenge-secret` (64 hex, 0600; kunci tanda tangan challenge saat `secret_key` kosong, dipakai bersama proses penerus tableflip; tanpa direktori state kunci acak per proses) |
-| `NOTIFY_SOCKET` | Disetel systemd. Mengaktifkan `Type=notify`; `READY=1` dikirim hanya setelah bundle pertama diterima |
+| `keygen` | Generates an Ed25519 release signing key. Writes the private key to the path of `--out` (default `wafio-release.key`) and prints the public key. Run it on a machine that does the releasing, never on a server that runs WAFio: the private key must never reach a control plane |
+| `sign <artefact>...` | Hashes each artefact, signs (version, hash) with the release key and writes a detached `<artefact>.sig` next to it. Flags: `--key` (default `wafio-release.key`), `--version` (required, for example `v2.0.0`) |
+| `verify <artefact>...` | Verifies each `<artefact>.sig` against the public key compiled into the updater. Flag: `--version` (required). No artefact is published until this accepts the whole release set |
 
-Mendukung upgrade tanpa downtime lewat `SIGUSR2` atau `systemctl reload`, memakai `cloudflare/tableflip`: proses baru mewarisi listener, proses lama menuntaskan koneksi lalu keluar.
+The scripts that call these commands (`scripts/release.sh`, `scripts/publish-release.sh`) are in the wafio-release repository.
 
-Tidak ada API lokal (`/internal/config`, `/v1/analyze`): agent ini hanya membuka listener proxy per-app dari bundle dan, bila `WAFIO_METRICS_ADDR` diset, `/metrics` di alamat loopback. API lokal dengan token per-start hanya ada pada `wafio-host-agent`.
+Security: authn=possession-of-the-private-key-file; secrets=private-key-written-with-owner-only-permissions; audit=detached-signatures-bound-to-version-and-hash
 
-Security: authn=mTLS-untuk-gRPC-dan-host-key-untuk-HTTP-ingest; privilege=tidak-butuh-root; secrets=path-berkas-lewat-env-bukan-nilai-inline; reload=SIGUSR2-zero-downtime; audit=WAFDecisionEvent-per-request
+## Build rules
 
-## command: wafio-host-agent
+Every binary goes to `build/`, never to the repository root or to `bin/`.
 
-Firewall kernel dan tracing runtime. **Hanya Linux.** Memerlukan root dan `CAP_BPF`.
-
-| Env key | Rules |
+| Target | Command |
 |---|---|
-| `WAFIO_GRPC_SERVER` dan kredensial mTLS | Sama dengan agent WAF |
-| `WAFIO_HOST_KEY` | Mengikat agent ke baris `hosts` |
-| path objek eBPF | Objek CO-RE pra-bangun; tidak pernah diambil dari control plane |
-| `WAFIO_PROTECTED_PROCESSES` | Opsional; flag `--protected-processes`. Daftar nama basename executable dipisah koma, **ditambahkan** ke daftar bawaan (`sshd`, `systemd`, `systemd-journald`, `containerd`, `dockerd`, `kubelet`). Tanpa `/`, `\`, `.`/`..`, karakter kontrol; item kosong ditolak |
-| `WAFIO_PROTECTED_EXE_PATHS` | Opsional; flag `--protected-exe-paths`. Path executable persis dipisah koma: absolut, kanonik (`filepath.Clean`), tanpa segmen `..`, bukan direktori. Shell/interpreter/biner multi-call (`bash`, `sh`, `busybox`, `env`, `python*`, `perl*`, `node`, ...) di salah satu daftar diterima tetapi dicatat `WARNING` saat start dan `warning=risky_protected:<daftar>` di baris self-check |
-| `WAFIO_PROTECTED_REPLACE_DEFAULTS` | Opsional; flag `--protected-replace-defaults`. Boolean; `true` mengganti (bukan menambah) daftar bawaan dan wajib disertai minimal satu entri |
-| `WAFIO_LOCAL_API_TOKEN_FILE` | Opsional; flag `--local-api-token-file`. Default `/run/wafio/host-agent.token`. Token API lokal (`127.0.0.1:18089`) per-start, wajib sebagai Bearer pada setiap route kecuali `/healthz`. Berkas ditulis setiap kali listener lokal berjalan, juga bila eBPF atau tracing gagal start |
-| `WAFIO_GEO_COUNTRY_DB_PATH` | Opsional. Cadangan untuk `--geoip-db` (lalu `WAFIO_GEOIP_DB_PATH`, nama lama); kosong keduanya = enricher GeoIP mati. Agent tidak lagi membaca `config.yaml` |
-| `WAFIO_LOCAL_API_TOKEN_GROUP` | Opsional; flag `--local-api-token-group`. Grup pembaca berkas token (0640), mis. `wafio` untuk push IP-jail dari `wafio-waf-agent` |
+| Control plane binary for a release, in `dist/controlplane/` (the bundle is assembled and signed by `scripts/release.sh` in wafio-release) | `./scripts/build-dist.sh <version>` |
+| For development and CI | `go build -trimpath -o build/ ./cmd/wafio` |
 
-Agent host tidak menjalankan pipeline WAF: `/v1/analyze`, `/v1/analyze-nginx`, `/internal/config` dan `/internal/telemetry` tidak dilayani lagi (404, juga dengan token). Flag `--jail-threshold`, `--jail-window-sec`, `--jail-duration-sec`, `--project-id`, `--connect-timeout-ms` dan `--rw-timeout-ms` diterima dan diabaikan (tersembunyi, deprecated) selama satu rilis. `--listen ""` mematikan API lokal; agent tetap berjalan dan mencatat hal itu.
-
-`wafio-host-agent fetch-data` hanya mengunduh `geoip-country` (profil `host-agent`, DB-IP atau MaxMind lewat `--maxmind-key`); profil lain dan komponen lain ditolak. Set data WAF diunduh `wafio-waf-agent fetch-data`.
-
-Objek eBPF wajib sudah ada di disk sebelum start. Kernel minimum 5.10 dengan BTF aktif untuk firewall eBPF (5.8/5.9 tidak didukung sejak 2026-10-10; objek XDP ditolak kernel itu).
-
-Flag menang atas env. Entri tidak valid menghentikan start (`invalid protected-process configuration`). Saat tracing aktif, agent mencatat sekali daftar efektif (`protected-process set: names=[…] exe_paths=[…] builtin_defaults=merged|replaced`) dan satu baris cek mandiri (`protected-process self-check: kernel_set=present|absent map=trace_protected_tgids … protected_tgids=N matched_processes=M`) untuk verifikasi deploy.
-
-Security: authn=mTLS; privilege=butuh-root-dan-CAP_BPF; kode=objek-eBPF-hanya-dari-disk-lokal-tidak-pernah-dari-jaringan; failmode=stub-non-Linux-mengembalikan-ErrNotSupported
-
-## Aturan build
-
-Semua biner masuk ke `build/`. Tidak pernah ke akar repositori atau ke `bin/`.
-
-| Target | Perintah |
-|---|---|
-| Biner control plane untuk rilis, di `dist/controlplane/` (bundel dirakit dan ditandatangani oleh `scripts/release.sh` di wafio-release) | `./scripts/build-dist.sh <versi>` |
-| Untuk pengembangan dan CI | `go build -trimpath -o build/ ./cmd/wafio` |
-
-Objek eBPF dan agent host dibangun di repositori `wafio-agent-host`; agent WAF dibangun di `wafio-agent-waf`.
-
-Build rilis adalah `go build -trimpath` biasa, tanpa obfuskasi: kode sumbernya terbuka. `CGO_ENABLED=0` diperlukan untuk biner Linux statis.
+The release build is a plain `go build -trimpath`, without obfuscation: the source is open. `CGO_ENABLED=0` is needed for a static Linux binary.

@@ -38,7 +38,7 @@ func runCredSequence(e *CorrelationEngine, comm string, verified bool, steps []c
 	return fired
 }
 
-// Benign sequences observed on the demo host: NSS reads of
+// Benign sequences observed on a test host: NSS reads of
 // /etc/passwd, PAM reads of /etc/shadow by the auth stack, followed by
 // local DNS, syslog or LAN traffic.
 func TestCredDumpChainIgnoresBenignDaemons(t *testing.T) {

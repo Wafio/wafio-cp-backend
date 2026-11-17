@@ -413,7 +413,7 @@ func checkStart(t *testing.T, s *suite) {
 	if !strings.HasPrefix(hello.GetAgentVersion(), "wafio-waf-agent/") {
 		t.Errorf("hello agent_version %q", hello.GetAgentVersion())
 	}
-	// One capability: script_rules with the sidecar, no_script_rules without.
+	// One capability: script_rules when the agent runs scripts, no_script_rules when it cannot.
 	if f := hello.GetFeatures(); len(f) != 1 || (f[0] != "script_rules" && f[0] != "no_script_rules") {
 		t.Errorf("hello features %v, want exactly script_rules or no_script_rules", f)
 	}

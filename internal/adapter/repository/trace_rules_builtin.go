@@ -633,7 +633,7 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 }
 
 // authSessionRules calibrate a normal SSH login, sudo and systemd user
-// session start (migration 000106, measured on the demo host 2026-10-16:
+// session start (migration 000106, measured on a test host:
 // ~30 HIGH/CRITICAL events per login).
 //
 // Two kinds of identity:
@@ -833,8 +833,8 @@ func authSessionRules(projectID string) []domain.DetectionRule {
 	}
 }
 
-// systemServiceRules calibrate two system-service patterns measured on the
-// demo host over a week (migration 000111):
+// systemServiceRules calibrate two system-service patterns measured on a
+// test host over a week (migration 000111):
 //   - systemd builds every unit's sandbox (ProtectSystem, PrivateTmp,
 //     InaccessiblePaths …) in a child it forks and names "(<unit binary>)"
 //     before exec — "(fwupdmgr)", "(systemd-netwo)", "(mandb)",
@@ -905,7 +905,7 @@ var jitRuntimeComms = []string{
 }
 
 // jitRuntimeRules calibrate RWX mprotect by JIT runtimes (migration 000113;
-// demo host 2026-10-16: OWASP Juice Shop's node opened a CRITICAL "W^X
+// measured on a test host: OWASP Juice Shop's node opened a CRITICAL "W^X
 // violation" incident, four events in 26 minutes). The kernel marks every
 // mprotect with PROT_WRITE|PROT_EXEC CRITICAL and ingest opens an incident
 // for each stored event at HIGH or above.
@@ -942,8 +942,8 @@ func jitRuntimeRules(projectID string) []domain.DetectionRule {
 	}
 }
 
-// alreadyRootRules calibrate root regaining root (migration 000114; demo host
-// 2026-10-17: logrotate, run nightly as root by logrotate.timer, opened a
+// alreadyRootRules calibrate root regaining root (migration 000114; measured on a
+// test host: logrotate, run nightly as root by logrotate.timer, opened a
 // HIGH "setgid(0) requested" incident every night). The kernel rates
 // setuid(0) CRITICAL and setgid(0) HIGH whenever the target differs from the
 // current effective ID, so a root daemon that dropped its effective IDs for a

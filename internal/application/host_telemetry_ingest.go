@@ -473,7 +473,7 @@ func (s *HostTelemetryIngest) ingestWithBody(ctx context.Context, projectID, age
 					}
 				}
 
-				// Phase 3: multi-stage temporal correlation:
+				// Multi-stage temporal correlation:
 				// a completed attack chain escalates this event to CRITICAL
 				// so the incident surfaces as an active compromise.
 				tsC, _ := time.Parse(time.RFC3339Nano, t.Timestamp)

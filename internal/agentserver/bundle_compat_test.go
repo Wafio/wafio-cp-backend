@@ -50,14 +50,14 @@ func compactJSON(t *testing.T, s string) []byte {
 	return buf.Bytes()
 }
 
-// helloFeatureSets are what agents report: the Rust agent with and without the script sidecar, a v1
-// agent with its four feature names, a v1 agent older than any feature, and one that reports none.
+// helloFeatureSets are what agents report: an agent with scripts, a version 1 Go agent without scripts,
+// a v1 agent with its four feature names, a v1 agent older than any feature, and one that reports none.
 var helloFeatureSets = map[string][]string{
-	"rust agent with scripts":    {engine.FeatureScriptRules},
-	"rust agent without scripts": {engine.FeatureNoScriptRules},
-	"v1 agent":                   {"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"},
-	"v1 agent, one feature":      {"semantic_keys_jwt_graphql"},
-	"no features":                nil,
+	"agent with scripts":          {engine.FeatureScriptRules},
+	"v1 Go agent without scripts": {engine.FeatureNoScriptRules},
+	"v1 agent":                    {"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"},
+	"v1 agent, one feature":       {"semantic_keys_jwt_graphql"},
+	"no features":                 nil,
 }
 
 // Every agent gets the normalized bundle whatever it reports in Hello: an agent that sends no features
@@ -90,7 +90,7 @@ func TestBundleIsTheSameForEveryAgent(t *testing.T) {
 		})
 	}
 	var rust, none []byte
-	rust = (&streamHandle{features: helloFeatureSets["rust agent with scripts"]}).bundleForAgent(in)
+	rust = (&streamHandle{features: helloFeatureSets["agent with scripts"]}).bundleForAgent(in)
 	none = (&streamHandle{}).bundleForAgent(in)
 	if !bytes.Equal(rust, none) {
 		t.Fatal("the bundle for an agent that sends no features differs from the Rust agent's")
