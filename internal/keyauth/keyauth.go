@@ -215,9 +215,6 @@ func ValidateFormat(raw string) bool {
 	return len(raw) == expected
 }
 
-// IsHostKey reports whether the given raw key has the host prefix.
-func IsHostKey(raw string) bool { return strings.HasPrefix(raw, HostKeyPrefix) }
-
 // Mask returns a log-safe rendering of a bearer secret that preserves the
 // short identification prefix (so operators can cross-reference audit events)
 // while redacting the entropy tail.
@@ -238,21 +235,6 @@ func Mask(raw string) string {
 		return "***"
 	}
 	return raw[:ShortPrefixLen] + "***"
-}
-
-// MaskAny is the same as Mask but accepts any stringer-ish value and handles
-// the nil case. Useful in structured log helpers.
-func MaskAny(v any) string {
-	switch s := v.(type) {
-	case nil:
-		return ""
-	case string:
-		return Mask(s)
-	case fmt.Stringer:
-		return Mask(s.String())
-	default:
-		return "***"
-	}
 }
 
 // ── Argon2id encoding helpers ────────────────────────────────────────────

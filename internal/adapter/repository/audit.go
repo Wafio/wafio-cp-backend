@@ -42,12 +42,10 @@ const (
 	AuditHostDeleted       = "host.deleted"
 	AuditHostLabelsUpdated = "host.labels_updated"
 	AuditHostBulkApply     = "host.bulk_apply"
-	AuditAppRoutingSaved   = "app.routing_saved" // kept for backward-compat with existing log entries
 	AuditAppRouteCreated   = "app.route_created"
 	AuditAppRouteUpdated   = "app.route_updated"
 	AuditAppRouteDeleted   = "app.route_deleted"
 	AuditAppDeleted        = "app.deleted"
-	AuditAgentEnrolled     = "agent.enrolled"
 	AuditAgentRejected     = "agent.rejected"
 
 	// Application lifecycle
@@ -100,11 +98,6 @@ const (
 	AuditFirewallPortCfgUpdated    = "firewall.port_policy_config_updated"
 	AuditFirewallEgressAdded       = "firewall.egress_blocklist_added"
 	AuditFirewallEgressRemoved     = "firewall.egress_blocklist_removed"
-
-	// WAF agent lifecycle (fleet registration)
-	AuditWafAgentRegistered = "waf.agent_registered"
-	AuditWafAgentDeleted    = "waf.agent_deleted"
-	AuditWafAgentProxyPort  = "waf.agent_proxy_port_updated"
 
 	// Runtime security (trace) policies + config
 	AuditTraceConfigUpdated = "trace.config_updated"

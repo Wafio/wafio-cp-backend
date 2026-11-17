@@ -245,21 +245,6 @@ func (r *HostRepo) HostRevoked(ctx context.Context, projectID, hostID string) (b
 	return revoked, err
 }
 
-// AgentHostRevoked reports whether the host agentID is linked to is revoked
-// (false for an agent linked to no host).
-func (r *HostRepo) AgentHostRevoked(ctx context.Context, projectID, agentID string) (bool, error) {
-	var revoked bool
-	err := r.pool.QueryRow(ctx, `
-		SELECT h.revoked_at IS NOT NULL
-		  FROM agents a JOIN hosts h ON h.id = a.host_id AND h.project_id = a.project_id
-		 WHERE a.id = $1 AND a.project_id = $2 AND a.deleted_at IS NULL`,
-		agentID, projectID).Scan(&revoked)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	return revoked, err
-}
-
 // RevokedHostNamed reports whether projectID has a revoked host whose name,
 // or reported hostname, is name: an agent of that machine connecting
 // without a host key is refused instead of registering afresh.
@@ -661,14 +646,4 @@ func (r *HostRepo) GetByName(ctx context.Context, projectID, name string) (*Host
 	}
 	_ = json.Unmarshal(labels, &h.Labels)
 	return h, nil
-}
-
-// CountByProject returns the number of hosts (any status) in a project,
-// used for tier-limit enforcement.
-func (r *HostRepo) CountByProject(ctx context.Context, projectID string) (int, error) {
-	var n int
-	err := r.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM hosts WHERE project_id = $1 AND revoked_at IS NULL`,
-		projectID).Scan(&n)
-	return n, err
 }

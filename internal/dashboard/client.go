@@ -29,16 +29,6 @@ type LogEntry struct {
 	HeaderInjectionFields string  `json:"header_injection_fields"`
 }
 
-// LogsFilter for listing logs.
-type LogsFilter struct {
-	FromTS    int64  // unix sec, 0 = no lower bound
-	ToTS      int64  // unix sec, 0 = no upper bound
-	Action    string // allow, log, block; empty = all
-	Limit     int
-	Offset    int
-	URISearch string // optional: substring match in uri (LIKE)
-}
-
 // LogsResult is the response for list logs.
 type LogsResult struct {
 	Total int        `json:"total"`
@@ -58,12 +48,6 @@ type Summary struct {
 type Bucket struct {
 	Key   string `json:"key"`
 	Count int    `json:"count"`
-}
-
-// TimeBucket is count per time interval.
-type TimeBucket struct {
-	Bucket int64 `json:"bucket"` // unix sec start of interval
-	Count  int   `json:"count"`
 }
 
 // GeoLocation is one (remote_addr, country_code) aggregate with per-action counts.

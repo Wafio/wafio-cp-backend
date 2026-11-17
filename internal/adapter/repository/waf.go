@@ -24,15 +24,6 @@ type WAFRepo struct {
 
 // ── Models ────────────────────────────────────────────────────────────────
 
-type WAFAgentAppAssignment struct {
-	AgentID    string    `json:"agent_id"`
-	AppID      string    `json:"app_id"`
-	Priority   int       `json:"priority"`
-	Enabled    bool      `json:"enabled"`
-	Mode       string    `json:"mode"`
-	AssignedAt time.Time `json:"assigned_at"`
-}
-
 type WAFBundleAppRow struct {
 	AppID       string
 	ListenHost  string
@@ -62,17 +53,6 @@ func (r *WAFRepo) AssignApp(ctx context.Context, agentID, appID, mode string) er
 		ON CONFLICT (agent_id, app_id) DO UPDATE SET
 		    mode = EXCLUDED.mode, enabled = TRUE, updated_at = NOW()`,
 		agentID, appID, mode)
-	if err != nil {
-		return err
-	}
-	return r.bumpBundleGeneration(ctx, agentID)
-}
-
-// UnassignApp disables a binding without deleting the row, so history is preserved.
-func (r *WAFRepo) UnassignApp(ctx context.Context, agentID, appID string) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE waf_agent_apps SET enabled = FALSE, updated_at = NOW()
-		WHERE agent_id = $1 AND app_id = $2`, agentID, appID)
 	if err != nil {
 		return err
 	}
@@ -118,18 +98,6 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 		out = append(out, row)
 	}
 	return out, rows.Err()
-}
-
-// GetAgentForApp returns the currently-enabled WAF agent for an app (or "" if none).
-func (r *WAFRepo) GetAgentForApp(ctx context.Context, projectID, appID string) (string, error) {
-	var agentID string
-	err := r.pool.QueryRow(ctx, `
-		SELECT waa.agent_id
-		FROM waf_agent_apps waa
-		JOIN apps ap ON ap.id = waa.app_id
-		WHERE waa.app_id = $1 AND waa.enabled = TRUE AND ap.project_id = $2
-		LIMIT 1`, appID, projectID).Scan(&agentID)
-	return agentID, err
 }
 
 // AgentRouteRow is the UI-facing view of a route assigned to an agent.
@@ -250,38 +218,6 @@ func (r *WAFRepo) UpsertAppConfig(ctx context.Context, appID string, rulesJSON [
 		return err
 	}
 	return r.BumpBundleForApp(ctx, appID)
-}
-
-// GetAgentProxyListenPort returns the per-agent inline-proxy listen port
-// (NULL → 0, meaning "leave default / startup value").
-func (r *WAFRepo) GetAgentProxyListenPort(ctx context.Context, agentID string) (int, error) {
-	var port *int
-	err := r.pool.QueryRow(ctx,
-		`SELECT proxy_listen_port FROM agents WHERE deleted_at IS NULL AND id = $1`, agentID).Scan(&port)
-	if err != nil {
-		return 0, err
-	}
-	if port == nil {
-		return 0, nil
-	}
-	return *port, nil
-}
-
-// SetAgentProxyListenPort persists the per-agent inline-proxy listen port
-// and bumps the bundle generation so the agent picks up the change on its
-// next poll. Pass port=0 to clear the override (agent keeps current port).
-func (r *WAFRepo) SetAgentProxyListenPort(ctx context.Context, agentID string, port int) error {
-	var arg any
-	if port <= 0 {
-		arg = nil
-	} else {
-		arg = port
-	}
-	if _, err := r.pool.Exec(ctx,
-		`UPDATE agents SET proxy_listen_port = $2 WHERE deleted_at IS NULL AND id = $1`, agentID, arg); err != nil {
-		return err
-	}
-	return r.bumpBundleGeneration(ctx, agentID)
 }
 
 // ── Bundle generation ─────────────────────────────────────────────────────
@@ -908,7 +844,7 @@ func (r *WAFRepo) GetAppConfigForProject(ctx context.Context, projectID, appID s
 // and WAF rows keyed by `kind`). This covers both
 // mapped (app_id set) and unmapped (client hit the Host unknown to the
 // bundle, e.g. raw IP) traffic, as long as the agent is registered to a
-// project — which is always true in the Pro tier.
+// project.
 
 // ProjectWAFSummary is defined in domain; the alias keeps this package's API.
 type ProjectWAFSummary = domain.ProjectWAFSummary
@@ -1355,7 +1291,7 @@ type dashboardBucket struct {
 	Count int    `json:"count"`
 }
 
-// dashboardTimeBucket mirrors dashboard.TimeBucket.
+// dashboardTimeBucket is the count of one time interval, bucket being the unix second it starts.
 type dashboardTimeBucket struct {
 	Bucket int64 `json:"bucket"`
 	Count  int   `json:"count"`

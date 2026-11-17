@@ -104,11 +104,6 @@ func (f *Filter) BitsCount() uint64 {
 	return f.m
 }
 
-// HashFunctionsCount returns the number of hash functions k.
-func (f *Filter) HashFunctionsCount() uint32 {
-	return f.k
-}
-
 // EstimatedFPRate returns the theoretical false positive rate given current item count n.
 func (f *Filter) EstimatedFPRate() float64 {
 	if f.m == 0 || f.n == 0 {

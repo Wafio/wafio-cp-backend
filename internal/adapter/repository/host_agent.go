@@ -416,7 +416,7 @@ func agentHealthDest(a *AgentWithHostInfo) []any {
 }
 
 // ListAgentsForUser returns all agents (any kind) visible to the user,
-// optionally scoped to a project. Used by the enterprise fleet UI.
+// optionally scoped to a project. Used by the fleet UI.
 // Visibility is current project membership, never agents.user_id (the
 // registrant): a member removed from a project stops seeing its agents. When userID is
 // empty the membership filter is skipped (caller must
@@ -634,14 +634,6 @@ func (r *EBPFRepo) ListAgentsByProject(ctx context.Context, projectID string) ([
 		agents = append(agents, a)
 	}
 	return agents, rows.Err()
-}
-
-// CountAllAgents returns the total number of registered agents across all projects.
-// Used for license quota enforcement.
-func (r *EBPFRepo) CountAllAgents(ctx context.Context) (int, error) {
-	var n int
-	err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agents WHERE deleted_at IS NULL`).Scan(&n)
-	return n, err
 }
 
 // ListNonWAFAgentsByHostInProject returns non-WAF agents for a host, restricted
@@ -1509,23 +1501,6 @@ func (r *EBPFRepo) GetAgentProjectID(ctx context.Context, agentID string) string
 	return projectID
 }
 
-// NextTracePolicyID returns MAX(policy_id)+1 for the agent (1 when it has
-// none). It only predicts an id; a new row gets its id from
-// CreateTracePolicy, which allocates and inserts atomically.
-func (r *EBPFRepo) NextTracePolicyID(ctx context.Context, agentID string) (int, error) {
-	var maxID *int
-	err := r.pool.QueryRow(ctx,
-		`SELECT MAX(policy_id) FROM ebpf_trace_policies WHERE agent_id = $1`, agentID,
-	).Scan(&maxID)
-	if err != nil {
-		return 0, err
-	}
-	if maxID == nil {
-		return 1, nil
-	}
-	return *maxID + 1, nil
-}
-
 // traceArgs are a TracePolicyRow's column values as stored (JSON lists,
 // signed uid, "" comm mode stored as substring), shared by the writes.
 type traceArgs struct {
@@ -1658,29 +1633,6 @@ func (r *EBPFRepo) DeleteTracePolicyByPolicyID(ctx context.Context, agentID stri
 	_, err := r.pool.Exec(ctx,
 		`DELETE FROM ebpf_trace_policies WHERE agent_id = $1 AND policy_id = $2`,
 		agentID, policyID)
-	return err
-}
-
-// UpdateTracePolicyAfterResync rewrites a row's agent-assigned policy_id and
-// the kernel-enforcement flags returned by the agent. Used by the ingest
-// path's resync loop after an agent restart, where the new PolicyEngine
-// hands out fresh numeric ids for each policy we replay.
-func (r *EBPFRepo) UpdateTracePolicyAfterResync(
-	ctx context.Context, rowID string, newPolicyID int,
-	kernelEnforce, kernelEnforceRequested, autoDowngraded bool,
-	enforcementMode string,
-) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE ebpf_trace_policies
-		   SET policy_id = $2,
-		       kernel_enforce = $3,
-		       kernel_enforce_requested = $4,
-		       auto_downgraded = $5,
-		       enforcement_mode = $6,
-		       updated_at = NOW()
-		 WHERE id = $1`,
-		rowID, newPolicyID, kernelEnforce, kernelEnforceRequested,
-		autoDowngraded, enforcementMode)
 	return err
 }
 
@@ -1950,11 +1902,6 @@ func (r *EBPFRepo) AggregateTraceStatsSince(ctx context.Context, agentIDs []stri
 // FirewallTopIPRow is defined in domain; the alias keeps this package's API.
 type FirewallTopIPRow = domain.FirewallTopIPRow
 
-// FirewallDropsSummary returns total drop counts per reason from the historical event log.
-func (r *EBPFRepo) FirewallDropsSummary(ctx context.Context, agentIDs []string) (map[string]int64, error) {
-	return r.FirewallDropsSummaryRange(ctx, agentIDs, 0, 0)
-}
-
 // FirewallDropsSummaryRange returns drop summary filtered by time range.
 func (r *EBPFRepo) FirewallDropsSummaryRange(ctx context.Context, agentIDs []string, sinceTs, beforeTs int64) (map[string]int64, error) {
 	if r.store == nil || len(agentIDs) == 0 {
@@ -1970,10 +1917,6 @@ func (r *EBPFRepo) FirewallPeakHours(ctx context.Context, agentIDs []string, sin
 		return out, nil
 	}
 	return r.store.QueryFWFeaturePeakHours(ctx, agentIDs, sinceTs)
-}
-
-func (r *EBPFRepo) FirewallTopIPs(ctx context.Context, agentIDs []string, limit int) ([]FirewallTopIPRow, error) {
-	return r.FirewallTopIPsRange(ctx, agentIDs, 0, limit)
 }
 
 // FirewallTopIPsRange returns top attacker IPs filtered by time range.
@@ -2017,12 +1960,4 @@ func (r *EBPFRepo) FirewallDropsSummaryByMinutes(ctx context.Context, agentIDs [
 	}
 	sinceTs := time.Now().Unix() - int64(sinceMinutes)*60
 	return r.store.QueryFWFeatureDropsSummaryRange(ctx, agentIDs, sinceTs, 0)
-}
-
-// CountFirewallDropsSince returns time-windowed firewall drop event count.
-func (r *EBPFRepo) CountFirewallDropsSince(ctx context.Context, agentIDs []string, sinceMinutes int) (int64, error) {
-	if r.store == nil || len(agentIDs) == 0 {
-		return 0, nil
-	}
-	return r.store.CountFWFeatureDropsSince(ctx, agentIDs, sinceMinutes)
 }

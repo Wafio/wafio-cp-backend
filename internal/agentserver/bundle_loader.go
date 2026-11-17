@@ -8,20 +8,13 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
 )
 
-// projectBundleLoader is a Stage 1 minimum viable BundleLoader. It returns
+// projectBundleLoader is the BundleLoader of the control plane. It returns
 // an empty bundle (generation=0) when the project has no agents registered
 // yet, otherwise it forwards to the first WAF agent's bundle for that
 // project so the existing fleet code keeps working unchanged.
-//
-// Stage 2 will replace this with a project-scoped aggregate that does not
-// require an agent row at all.
 type projectBundleLoader struct {
 	repo           *repository.Repository
 	goodBotFetcher *GoodBotFetcher // may be nil
-}
-
-func NewProjectBundleLoader(repo *repository.Repository) BundleLoader {
-	return &projectBundleLoader{repo: repo}
 }
 
 // NewProjectBundleLoaderWithGoodBot creates a bundle loader that includes

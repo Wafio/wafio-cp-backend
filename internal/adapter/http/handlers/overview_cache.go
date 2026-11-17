@@ -147,12 +147,6 @@ func (c *OverviewCache) Len() int {
 	return c.ll.Len()
 }
 
-// IsRefreshing reports whether a background refresh is already in flight for k.
-func (c *OverviewCache) IsRefreshing(k overviewCacheKey) bool {
-	_, ok := c.refresh.Load(k)
-	return ok
-}
-
 // MarkRefreshing marks k as being refreshed. Returns false if already marked.
 func (c *OverviewCache) MarkRefreshing(k overviewCacheKey) bool {
 	_, loaded := c.refresh.LoadOrStore(k, struct{}{})

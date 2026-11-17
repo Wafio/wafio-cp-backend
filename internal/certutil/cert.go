@@ -12,8 +12,6 @@ import (
 	"errors"
 	"math/big"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -196,18 +194,4 @@ func GenerateClientCert(caCertPEM, caKeyPEM []byte, validity time.Duration) (cer
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM, nil
-}
-
-// SaveCertAndKey writes cert PEM and key PEM to dir.
-func SaveCertAndKey(dir, certFilename, keyFilename string, certPEM, keyPEM []byte) error {
-	// 0750: the directory holds a private key. The key itself is 0600 below, so
-	// this is depth rather than the only guard, but a world-traversable
-	// directory of key material is not something to leave at the default.
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, certFilename), certPEM, 0644); err != nil { //nolint:gosec // public certificate; only the key file is secret and it is 0600
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, keyFilename), keyPEM, 0600)
 }

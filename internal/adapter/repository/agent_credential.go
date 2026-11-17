@@ -269,18 +269,3 @@ func (r *AgentGRPCRepo) ListAllAgentCredentials(ctx context.Context) ([]MTLSCred
 	}
 	return scanCredentials(rows)
 }
-
-// DeleteAgentCredential revokes an agent gRPC credential of projectID. It
-// reports whether a row was deleted: false means the id does not exist or
-// belongs to another project.
-func (r *AgentGRPCRepo) DeleteAgentCredential(ctx context.Context, id, projectID string) (bool, error) {
-	tag, err := r.pool.Exec(ctx,
-		`DELETE FROM mtls_credentials
-		  WHERE id = $1 AND project_id = $2 AND purpose = 'agent_grpc'`,
-		id, projectID,
-	)
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
-}

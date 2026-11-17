@@ -170,17 +170,6 @@ func (r *InviteTokenRepo) AcceptProjectInvite(ctx context.Context, token, userID
 	return invite, joined, nil
 }
 
-// Consume marks an invite token as used by setting used_at = NOW().
-// Request paths redeem through RegisterWithInvite / AcceptProjectInvite,
-// which claim the token atomically.
-func (r *InviteTokenRepo) Consume(ctx context.Context, token string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE invite_tokens SET used_at = NOW() WHERE token = $1`,
-		token,
-	)
-	return err
-}
-
 func (r *InviteTokenRepo) List(ctx context.Context) ([]InviteToken, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT token, email, created_by, COALESCE(project_id::text, ''), role, expires_at, used_at, created_at FROM invite_tokens ORDER BY created_at DESC`,

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestBuiltinNoiseRulesRequireLowSourceSeverity keeps the enterprise noise
+// TestBuiltinNoiseRulesRequireLowSourceSeverity keeps the noise
 // contract: a Suppress/Downgrade rule must not hide HIGH/CRITICAL evidence
 // based on a process name alone. Rules that explicitly opt out of the
 // automatic severity guard (SkipSeverityGuard) must instead prove high

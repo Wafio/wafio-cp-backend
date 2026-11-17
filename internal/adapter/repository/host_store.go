@@ -378,12 +378,7 @@ func (s *HostEventStore) closeWithin(wait time.Duration) {
 // InsertFirewallEvents — ring buffer + feature accumulator (no DB write)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (s *HostEventStore) InsertFirewallEvents(agentID string, events []fwEventInMem) {
-	s.insertFirewallEvents(unknownLiveTenant, agentID, events)
-}
-
-// insertFirewallEvents is InsertFirewallEvents with the agent's live ring
-// charged to t.
+// insertFirewallEvents adds events to the agent's live ring, charged to t.
 func (s *HostEventStore) insertFirewallEvents(t liveTenant, agentID string, events []fwEventInMem) {
 	if len(events) == 0 {
 		return
@@ -930,14 +925,8 @@ func (s *HostEventStore) flushSecAccumulator(agentID string, acc *secWindowAcc, 
 	}
 }
 
-// SetLatestMetrics updates the in-memory metrics cache for an agent.
-// Called by EBPFRepo.InsertMetrics so SSE reads never hit PostgreSQL.
-func (s *HostEventStore) SetLatestMetrics(agentID string, m *EBPFMetricsRow) {
-	s.setLatestMetrics(unknownLiveTenant, agentID, m)
-}
-
-// setLatestMetrics is SetLatestMetrics with the agent's entry charged to t.
-// The cache holds latestMetricsAgents agents, evicted fairly; a miss
+// setLatestMetrics updates the in-memory metrics cache for an agent, charged to t.
+// Called by EBPFRepo.InsertMetrics so SSE reads never hit PostgreSQL. The cache holds latestMetricsAgents agents, evicted fairly; a miss
 // reads PostgreSQL.
 func (s *HostEventStore) setLatestMetrics(t liveTenant, agentID string, m *EBPFMetricsRow) {
 	s.latestMetrics.set(t, agentID, m)
@@ -1124,21 +1113,6 @@ func (s *HostEventStore) QueryFWFeatureUniqueIPCount(ctx context.Context, agentI
 
 	var total int64
 	_ = s.pool.QueryRow(ctx, q, args...).Scan(&total)
-	return total, nil
-}
-
-// CountFWFeatureDropsSince returns total drops in the past sinceMinutes window.
-func (s *HostEventStore) CountFWFeatureDropsSince(ctx context.Context, agentIDs []string, sinceMinutes int) (int64, error) {
-	if len(agentIDs) == 0 {
-		return 0, nil
-	}
-	since := time.Now().Add(-time.Duration(sinceMinutes) * time.Minute)
-	var total int64
-	_ = s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(drop_count),0) FROM host_fw_features
-		 WHERE agent_id = ANY($1) AND ts >= $2`,
-		agentIDs, since,
-	).Scan(&total)
 	return total, nil
 }
 

@@ -1774,12 +1774,6 @@ func (s *Server) Connections(projectID string) []ConnectionStats {
 	return out
 }
 
-// healthy is a tiny atomic set during ListenAndServe success — exposed for
-// readiness probes if needed later.
-var healthy atomic.Bool
-
-func (s *Server) Healthy() bool { return healthy.Load() }
-
 // PushTracePoliciesViaGRPC pushes all persisted trace policies for the given
 // agent to the connected host agent stream as a BundleUpdate whose bundle_json
 // contains {"trace_policies": [...]}. This is the gRPC replacement for the

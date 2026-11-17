@@ -15,36 +15,23 @@ import (
 // returns it with a body that can still be read. A request no operation
 // documents (removed routes, the frontend, a method the path does not have)
 // is returned unvalidated. Errors from app.Test are returned unchanged. A
-// body that cannot be read fails t; a stream test that cuts its own stream
-// uses FiberTestCutStream.
+// body that cannot be read fails t.
 func FiberTest(t testing.TB, app *fiber.App, req *http.Request, msTimeout ...int) (*http.Response, error) {
 	t.Helper()
 	s, err := Default()
 	if err != nil {
 		t.Fatalf("apicontract: %v", err)
 	}
-	return s.fiberTest(t, app, req, false, msTimeout...)
-}
-
-// FiberTestCutStream is FiberTest for a response whose body the test cuts
-// short on purpose (an endless stream): what was read is validated, a read
-// error is not a failure.
-func FiberTestCutStream(t testing.TB, app *fiber.App, req *http.Request, msTimeout ...int) (*http.Response, error) {
-	t.Helper()
-	s, err := Default()
-	if err != nil {
-		t.Fatalf("apicontract: %v", err)
-	}
-	return s.fiberTest(t, app, req, true, msTimeout...)
+	return s.fiberTest(t, app, req, msTimeout...)
 }
 
 // FiberTest is the package-level FiberTest against s.
 func (s *Spec) FiberTest(t testing.TB, app *fiber.App, req *http.Request, msTimeout ...int) (*http.Response, error) {
 	t.Helper()
-	return s.fiberTest(t, app, req, false, msTimeout...)
+	return s.fiberTest(t, app, req, msTimeout...)
 }
 
-func (s *Spec) fiberTest(t testing.TB, app *fiber.App, req *http.Request, cutOK bool, msTimeout ...int) (*http.Response, error) {
+func (s *Spec) fiberTest(t testing.TB, app *fiber.App, req *http.Request, msTimeout ...int) (*http.Response, error) {
 	t.Helper()
 	// Match before running: handlers may consume or rewrite the request.
 	key, documented := s.Match(req.Method, req.URL.Path)
@@ -55,7 +42,7 @@ func (s *Spec) fiberTest(t testing.TB, app *fiber.App, req *http.Request, cutOK 
 	raw, rerr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
-	if rerr != nil && !cutOK {
+	if rerr != nil {
 		t.Errorf("apicontract: %s %s: reading the body: %v", req.Method, req.URL.RequestURI(), rerr)
 		return resp, nil
 	}
@@ -65,21 +52,6 @@ func (s *Spec) fiberTest(t testing.TB, app *fiber.App, req *http.Request, cutOK 
 		}
 	}
 	return resp, nil
-}
-
-// MustMatch returns the operation key for method + path, failing t when the
-// spec documents none.
-func MustMatch(t testing.TB, method, path string) string {
-	t.Helper()
-	s, err := Default()
-	if err != nil {
-		t.Fatalf("apicontract: %v", err)
-	}
-	key, ok := s.Match(method, path)
-	if !ok {
-		t.Fatalf("apicontract: no documented operation for %s %s", method, path)
-	}
-	return key
 }
 
 // TestOperation runs req on app and validates the response against the named

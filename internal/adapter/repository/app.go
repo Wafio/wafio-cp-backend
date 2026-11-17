@@ -43,17 +43,6 @@ type App struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type Deployment struct {
-	ID         string     `json:"id"`
-	AppID      string     `json:"app_id"`
-	GitCommit  string     `json:"git_commit,omitempty"`
-	GitMessage string     `json:"git_message,omitempty"`
-	Status     string     `json:"status"`
-	BuildLog   string     `json:"build_log,omitempty"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-}
-
 // ── Repository ────────────────────────────────────────────────────────────
 
 type AppRepo struct {
@@ -143,76 +132,6 @@ func (r *AppRepo) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *AppRepo) CountByProject(ctx context.Context, projectID string) (int, error) {
-	var n int
-	err := r.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM apps WHERE project_id = $1`, projectID).Scan(&n)
-	return n, err
-}
-
-func (r *AppRepo) CountByUser(ctx context.Context, userID string) (int, error) {
-	var n int
-	err := r.pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM apps a
-		JOIN projects p ON a.project_id = p.id
-		WHERE p.user_id = $1`, userID).Scan(&n)
-	return n, err
-}
-
-// ── Deployment CRUD ───────────────────────────────────────────────────────
-
-func (r *AppRepo) CreateDeployment(ctx context.Context, appID string) (*Deployment, error) {
-	d := &Deployment{}
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO deployments (app_id) VALUES ($1)
-		RETURNING id, app_id, status, started_at`, appID,
-	).Scan(&d.ID, &d.AppID, &d.Status, &d.StartedAt)
-	return d, err
-}
-
-func (r *AppRepo) UpdateDeployment(ctx context.Context, id, status, buildLog, gitCommit, gitMessage string) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE deployments SET status = $2, build_log = $3, git_commit = $4, git_message = $5,
-		       finished_at = CASE WHEN $2::varchar IN ('live','failed') THEN NOW() ELSE finished_at END
-		WHERE id = $1`, id, status, buildLog, gitCommit, gitMessage)
-	return err
-}
-
-func (r *AppRepo) ListDeployments(ctx context.Context, appID string, limit int) ([]Deployment, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, app_id, COALESCE(git_commit,''), COALESCE(git_message,''), status, COALESCE(build_log,''), started_at, finished_at
-		FROM deployments WHERE app_id = $1
-		ORDER BY started_at DESC LIMIT $2`, appID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	deps := []Deployment{}
-	for rows.Next() {
-		var d Deployment
-		if err := rows.Scan(&d.ID, &d.AppID, &d.GitCommit, &d.GitMessage,
-			&d.Status, &d.BuildLog, &d.StartedAt, &d.FinishedAt); err != nil {
-			return nil, err
-		}
-		deps = append(deps, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return deps, nil
-}
-
-func (r *AppRepo) GetDeployment(ctx context.Context, id string) (*Deployment, error) {
-	d := &Deployment{}
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, app_id, COALESCE(git_commit,''), COALESCE(git_message,''), status, COALESCE(build_log,''), started_at, finished_at
-		FROM deployments WHERE id = $1`, id,
-	).Scan(&d.ID, &d.AppID, &d.GitCommit, &d.GitMessage,
-		&d.Status, &d.BuildLog, &d.StartedAt, &d.FinishedAt)
-	return d, err
-}
-
 // ListenLookup is a minimal projection of (project_id → (host:port → app_id))
 // used by the gRPC stream to enrich live WAF decisions whose AppID is empty
 // or "static" (agents in --static-upstream mode). Returns rows for all apps
@@ -243,53 +162,4 @@ func (r *AppRepo) ListListenTargets(ctx context.Context, projectID string) (map[
 		return nil, err
 	}
 	return out, nil
-}
-
-// BundleAppRow is a row returned by ListBundleApps. Used by the gRPC bundle
-// loader to build the JSON the agent applies to its inline proxy router.
-type BundleAppRow struct {
-	AppID      string
-	ListenHost string
-	ListenPort int
-	Upstream   string
-	Mode       string
-}
-
-// ListBundleApps returns every app in the project that has a complete
-// (listen_host, listen_port, upstream_url) tuple — i.e. is ready to serve
-// traffic through a WAF agent. The second return value is the bundle
-// generation (max updated_at as unix seconds) so the agent can short-circuit
-// when nothing has changed since the last sync.
-func (r *AppRepo) ListBundleApps(ctx context.Context, projectID string) ([]BundleAppRow, int64, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, listen_host, listen_port, upstream_url,
-		       EXTRACT(EPOCH FROM updated_at)::bigint AS gen
-		FROM apps
-		WHERE project_id = $1
-		  AND listen_host  IS NOT NULL
-		  AND listen_port  IS NOT NULL
-		  AND upstream_url IS NOT NULL
-		ORDER BY listen_port`, projectID)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	out := []BundleAppRow{}
-	var maxGen int64
-	for rows.Next() {
-		var row BundleAppRow
-		var gen int64
-		if err := rows.Scan(&row.AppID, &row.ListenHost, &row.ListenPort, &row.Upstream, &gen); err != nil {
-			return nil, 0, err
-		}
-		row.Mode = "block"
-		if gen > maxGen {
-			maxGen = gen
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
-	return out, maxGen, nil
 }

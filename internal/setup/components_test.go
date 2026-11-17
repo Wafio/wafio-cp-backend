@@ -44,21 +44,3 @@ func TestWithoutMalware(t *testing.T) {
 		t.Fatalf("unchanged list: %v", got)
 	}
 }
-
-func TestAgentSkipsMalware(t *testing.T) {
-	t.Setenv("WAFIO_MALWARE_AUTH_KEY", "")
-	rest, skipped := AgentSkipsMalware(ProfileComponents(ProfileAgent), false)
-	if !skipped || slices.Contains(rest, "malware") {
-		t.Fatalf("profile run without a key: %v skipped=%v", rest, skipped)
-	}
-	if rest, skipped := AgentSkipsMalware([]string{"malware"}, true); skipped || !slices.Equal(rest, []string{"malware"}) {
-		t.Fatalf("explicit --only malware must still try (and report a missing key): %v", rest)
-	}
-	if rest, skipped := AgentSkipsMalware(ProfileComponents(ProfileHostAgent), false); skipped || !slices.Equal(rest, []string{"geoip-country"}) {
-		t.Fatalf("host-agent profile has no malware: %v %v", rest, skipped)
-	}
-	t.Setenv("WAFIO_MALWARE_AUTH_KEY", "k")
-	if _, skipped := AgentSkipsMalware(nil, false); skipped {
-		t.Fatal("a key in the environment downloads it")
-	}
-}

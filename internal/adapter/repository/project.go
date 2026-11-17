@@ -77,45 +77,6 @@ func (p *ProjectRepo) GetByID(ctx context.Context, id string) (*Project, error) 
 	return &proj, nil
 }
 
-func (p *ProjectRepo) GetByUserAndCode(ctx context.Context, userID, code string) (*Project, error) {
-	row := p.pool.QueryRow(ctx,
-		`SELECT id, user_id, name, code, description, created_at, updated_at FROM projects WHERE user_id = $1 AND code = $2`,
-		userID, code,
-	)
-	var proj Project
-	err := row.Scan(&proj.ID, &proj.UserID, &proj.Name, &proj.Code, &proj.Description, &proj.CreatedAt, &proj.UpdatedAt)
-	if err != nil {
-		return nil, err
-	}
-	return &proj, nil
-}
-
-func (p *ProjectRepo) CountByUser(ctx context.Context, userID string) (int, error) {
-	var n int
-	err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM projects WHERE user_id = $1`, userID).Scan(&n)
-	return n, err
-}
-
-func (p *ProjectRepo) ListByUser(ctx context.Context, userID string, limit, offset int) ([]Project, error) {
-	rows, err := p.pool.Query(ctx,
-		`SELECT id, user_id, name, code, description, created_at, updated_at FROM projects WHERE user_id = $1 ORDER BY created_at DESC,id LIMIT $2 OFFSET $3`,
-		userID, limit, offset,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	list := []Project{}
-	for rows.Next() {
-		var proj Project
-		if err := rows.Scan(&proj.ID, &proj.UserID, &proj.Name, &proj.Code, &proj.Description, &proj.CreatedAt, &proj.UpdatedAt); err != nil {
-			return nil, err
-		}
-		list = append(list, proj)
-	}
-	return list, rows.Err()
-}
-
 func (p *ProjectRepo) Update(ctx context.Context, id, name, description string) error {
 	result, err := p.pool.Exec(ctx,
 		`UPDATE projects SET name = $1, description = $2, updated_at = NOW() WHERE id = $3`,
@@ -159,12 +120,6 @@ func (p *ProjectRepo) DeleteAudited(ctx context.Context, id string, ev SystemAud
 		p.ForgetOwner(id)
 	}
 	return deleted, err
-}
-
-func (p *ProjectRepo) CountAll(ctx context.Context) (int, error) {
-	var n int
-	err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&n)
-	return n, err
 }
 
 // ListAllIDs returns all project IDs. Used by background cache warmers.

@@ -1,9 +1,6 @@
 package setup
 
-import (
-	"os"
-	"strings"
-)
+import "strings"
 
 // AllComponents lists every component FetchAll downloads when FetchConfig.Only
 // is empty ("malware" also covers its alias "malware-hashes").
@@ -41,17 +38,4 @@ func WithoutMalware(only []string) []string {
 func isMalwareComponent(c string) bool {
 	c = strings.ToLower(strings.TrimSpace(c))
 	return c == "malware" || c == "malware-hashes"
-}
-
-// AgentSkipsMalware applies the agents' rule to a component list: agents
-// receive the malware database from the control plane (the MalwareBazaar key
-// never leaves it), so a profile run (explicit false) without
-// WAFIO_MALWARE_AUTH_KEY in the environment drops the download instead of
-// failing. An explicit --only list is left alone, so a missing key is still
-// reported there. skipped reports whether it dropped it.
-func AgentSkipsMalware(only []string, explicit bool) (rest []string, skipped bool) {
-	if explicit || !IncludesMalware(only) || strings.TrimSpace(os.Getenv("WAFIO_MALWARE_AUTH_KEY")) != "" {
-		return only, false
-	}
-	return WithoutMalware(only), true
 }

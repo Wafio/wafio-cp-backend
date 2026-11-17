@@ -8,14 +8,6 @@ type AgentCapabilities struct {
 	ScriptRules *bool // false: cannot run script rules
 }
 
-// ProjectAgentCapabilities returns the capabilities of every live WAF agent of
-// the project.
-func (r *WAFRepo) ProjectAgentCapabilities(ctx context.Context, projectID string) ([]AgentCapabilities, error) {
-	return r.agentCapabilities(ctx,
-		`SELECT script_rules FROM agents
-		 WHERE project_id = $1 AND kind = 'waf' AND deleted_at IS NULL`, projectID)
-}
-
 // AppAgentCapabilities returns the capabilities of the WAF agent that serves
 // the application (at most one: an application has one enabled assignment).
 func (r *WAFRepo) AppAgentCapabilities(ctx context.Context, projectID, appID string) ([]AgentCapabilities, error) {
