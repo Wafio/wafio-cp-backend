@@ -209,7 +209,7 @@ func ValidateTuningRule(t TuningRule) error {
 	switch strings.ToLower(strings.TrimSpace(t.Engine)) {
 	case "", "semantic", "crs", "both":
 	default:
-		return fmt.Errorf("invalid engine %q (semantic|crs|both)", t.Engine)
+		return fmt.Errorf("invalid engine %q (semantic)", t.Engine)
 	}
 	return validateTuningEffect(t.Effect, t.Target, true)
 }

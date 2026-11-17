@@ -483,7 +483,7 @@ func buildInviteEmail(inviteURL string, expiresAt time.Time) string {
     <div class="body">
       <div class="badge">&#x2709; Invitation</div>
       <h1>You've been invited to join Wafio</h1>
-      <p>An administrator has created an account invitation for you on <strong style="color:#e2e8f0">Wafio</strong> — an enterprise WAF &amp; eBPF security platform for protecting your infrastructure against HTTP attacks, L3/L4 threats, and runtime exploits.</p>
+      <p>An administrator has created an account invitation for you on <strong style="color:#e2e8f0">Wafio</strong>, a web application firewall and eBPF host firewall.</p>
       <p>Click the button below to set up your account and get started:</p>
       <div class="cta-wrap">
         <a href="` + safeURL + `" class="cta">Accept Invitation &#x2192;</a>
