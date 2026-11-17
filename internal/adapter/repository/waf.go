@@ -248,16 +248,6 @@ func (r *WAFRepo) BumpBundleGeneration(ctx context.Context, agentID string) erro
 	return r.bumpBundleGeneration(ctx, agentID)
 }
 
-// MarkBundlePulled updates the last_pulled timestamp. Best-effort — errors
-// are swallowed by the caller since this is purely observational.
-func (r *WAFRepo) MarkBundlePulled(ctx context.Context, agentID string) error {
-	_, err := r.pool.Exec(ctx, `
-		INSERT INTO waf_agent_bundles (agent_id, generation, last_pulled, updated_at)
-		VALUES ($1, 1, NOW(), NOW())
-		ON CONFLICT (agent_id) DO UPDATE SET last_pulled = NOW()`, agentID)
-	return err
-}
-
 // ── Decisions ingest ──────────────────────────────────────────────────────
 
 type WAFDecision struct {

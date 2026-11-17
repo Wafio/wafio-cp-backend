@@ -12,8 +12,7 @@ import (
 
 // WAF bundle generations come from one sequence (migration 000102), so
 // an agent deleted and re-registered under the same name never receives a
-// generation at or below the one it held; recording a pull leaves the
-// generation alone.
+// generation at or below the one it held.
 func TestDBWAFBundleGenerationMonotonicAcrossRecreatedAgent(t *testing.T) {
 	dsn := os.Getenv("TEST_DB_URL")
 	if dsn == "" {
@@ -55,12 +54,6 @@ func TestDBWAFBundleGenerationMonotonicAcrossRecreatedAgent(t *testing.T) {
 		}
 	}
 	held := generation(first)
-	if err := repo.WAF.MarkBundlePulled(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	if got := generation(first); got != held {
-		t.Fatalf("recording a pull changed the generation %d -> %d", held, got)
-	}
 	if err := repo.WAF.BumpBundleGeneration(ctx, first); err != nil {
 		t.Fatal(err)
 	}
@@ -73,18 +66,12 @@ func TestDBWAFBundleGenerationMonotonicAcrossRecreatedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := newAgent()
-	// MarkBundlePulled creates the row on a first pull; even that insert
+	// The first bump inserts the row with generation 1; even that insert
 	// must start above every generation issued before.
-	if err := repo.WAF.MarkBundlePulled(ctx, second); err != nil {
-		t.Fatal(err)
-	}
-	if got := generation(second); got <= held {
-		t.Fatalf("re-registered agent starts at %d, not above the deleted agent's %d", got, held)
-	}
 	if err := repo.WAF.BumpBundleGeneration(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	if got := generation(second); got <= held {
-		t.Fatalf("re-registered agent bumped to %d, not above %d", got, held)
+		t.Fatalf("re-registered agent starts at %d, not above the deleted agent's %d", got, held)
 	}
 }
