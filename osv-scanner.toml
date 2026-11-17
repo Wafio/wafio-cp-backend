@@ -1,6 +1,0 @@
-# OSV Scanner configuration for Wafio
-# https://google.github.io/osv-scanner/
-
-[[IgnoredVulns]]
-id = "GO-2026-5932"
-reason = "golang.org/x/crypto/openpgp is deprecated upstream across all versions, but openpgp is not used or imported anywhere in this repository (verified via go mod why)"

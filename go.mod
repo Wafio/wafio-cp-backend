@@ -5,7 +5,6 @@ go 1.26.0
 toolchain go1.26.11
 
 require (
-	github.com/andybalholm/brotli v1.2.7
 	github.com/bonkzero404/uddin-lang v1.0.1-0.20261025112914-14b95667ce68
 	github.com/fasthttp/websocket v1.5.12
 	github.com/getkin/kin-openapi v0.149.0

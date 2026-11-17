@@ -3,7 +3,6 @@
 # Secrets and local configuration
 .env
 .env.*
-!.env.example
 config/config.yaml
 mtls-credentials.json
 # Private keys. The CA certificate stays tracked where a test needs it.

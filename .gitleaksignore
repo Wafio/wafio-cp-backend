@@ -1,0 +1,3 @@
+# Two findings in a commit of the history: synthetic values in a pentest script that has since been deleted.
+451b6f17d69b172dd0737864257118e115ab8a9e:test/pentest_juice_suite.sh:jwt:101
+451b6f17d69b172dd0737864257118e115ab8a9e:test/pentest_juice_suite.sh:generic-api-key:144

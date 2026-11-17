@@ -20,7 +20,6 @@ type Config struct {
 	TOTP        TOTPConfig
 	MTLS        MTLSConfig
 	SMTP        SMTPConfig
-	Logs        LogsConfig
 	Log         LogConfig
 	Geo         GeoConfig
 	BotDefaults BotDefaultsConfig
@@ -49,10 +48,6 @@ func (c LogConfig) SlogLevel() (level slog.Level, ok bool) {
 	return slog.LevelInfo, false
 }
 
-type LogsConfig struct {
-	CacheTTLSec int `mapstructure:"cache_ttl_sec"`
-}
-
 type GeoConfig struct {
 	CountryDBPath     string `mapstructure:"country_db_path"`
 	CityDBPath        string `mapstructure:"city_db_path"`
@@ -69,23 +64,21 @@ type BotDefaultsConfig struct {
 
 // SMTPConfig for sending OTP and other transactional email (e.g. Mailtrap).
 type SMTPConfig struct {
-	Host         string `mapstructure:"host"`
-	Port         int    `mapstructure:"port"`
-	Username     string `mapstructure:"username"`
-	Password     string `mapstructure:"password"`
-	From         string `mapstructure:"from"`           // From address (e.g. "Wafio <noreply@wafio.local>")
-	Encryption   string `mapstructure:"encryption"`     // auto|starttls|ssl|none
-	OTPExpiryMin int    `mapstructure:"otp_expiry_min"` // OTP validity in minutes (default 10)
+	Host       string `mapstructure:"host"`
+	Port       int    `mapstructure:"port"`
+	Username   string `mapstructure:"username"`
+	Password   string `mapstructure:"password"`
+	From       string `mapstructure:"from"`       // From address (e.g. "Wafio <noreply@wafio.local>")
+	Encryption string `mapstructure:"encryption"` // auto|starttls|ssl|none
 }
 
 // MTLSConfig holds mTLS certificate generation settings.
 // Note: cert validity for agent credentials is set per-credential at provisioning time.
 type MTLSConfig struct {
-	CertsDir              string `mapstructure:"certs_dir"`
-	CertValidityDays      int    `mapstructure:"cert_validity_days"`            // validity of the ephemeral gRPC server cert
-	ServerCertAutoRenew   bool   `mapstructure:"server_cert_auto_renew"`        // renew server cert before expiry without restart
-	ServerCertRenewBefore int    `mapstructure:"server_cert_renew_before_days"` // renew when cert expires within this many days
-	CertWarnBeforeDays    int    `mapstructure:"cert_warn_before_days"`         // warn when agent certs expire within this many days
+	CertValidityDays      int  `mapstructure:"cert_validity_days"`            // validity of the ephemeral gRPC server cert
+	ServerCertAutoRenew   bool `mapstructure:"server_cert_auto_renew"`        // renew server cert before expiry without restart
+	ServerCertRenewBefore int  `mapstructure:"server_cert_renew_before_days"` // renew when cert expires within this many days
+	CertWarnBeforeDays    int  `mapstructure:"cert_warn_before_days"`         // warn when agent certs expire within this many days
 }
 
 type ServerConfig struct {
@@ -101,7 +94,7 @@ type ServerConfig struct {
 	CORSAllowCredentials   bool   `mapstructure:"cors_allow_credentials"`
 	CORSMaxAgeSec          int    `mapstructure:"cors_max_age_sec"`
 	SecurityHeadersEnabled bool   `mapstructure:"security_headers_enabled"`
-	// API rate limit (enterprise: per-IP for public, per-user for authenticated)
+	// API rate limit (per IP for public routes, per user for authenticated ones)
 	RateLimitEnabled               bool `mapstructure:"rate_limit_enabled"`
 	RateLimitMax                   int  `mapstructure:"rate_limit_max"`            // max requests per window (0 = disabled)
 	RateLimitExpirationSec         int  `mapstructure:"rate_limit_expiration_sec"` // window in seconds (e.g. 60 = per minute)
@@ -109,8 +102,6 @@ type ServerConfig struct {
 	RateLimitAuthExpirationSec     int  `mapstructure:"rate_limit_auth_expiration_sec"`
 	RateLimitOTPMax                int  `mapstructure:"rate_limit_otp_max"`
 	RateLimitOTPExpirationSec      int  `mapstructure:"rate_limit_otp_expiration_sec"`
-	RateLimitRenewMax              int  `mapstructure:"rate_limit_renew_max"`
-	RateLimitRenewExpirationSec    int  `mapstructure:"rate_limit_renew_expiration_sec"`
 	RateLimitReadMax               int  `mapstructure:"rate_limit_read_max"`
 	RateLimitReadExpirationSec     int  `mapstructure:"rate_limit_read_expiration_sec"`
 	RateLimitWriteMax              int  `mapstructure:"rate_limit_write_max"`
@@ -288,9 +279,6 @@ func Load() (*Config, error) {
 	if strings.TrimSpace(cfg.JWT.Secret) == "" || cfg.JWT.Secret == "change-me-in-production" {
 		log.Printf("[SECURITY WARNING] insecure JWT secret detected. Set WAFIO_JWT_SECRET to a strong random value before production.")
 	}
-	if cfg.MTLS.CertsDir == "" {
-		cfg.MTLS.CertsDir = "certs"
-	}
 	if cfg.MTLS.CertValidityDays <= 0 {
 		cfg.MTLS.CertValidityDays = 365
 	}
@@ -300,16 +288,7 @@ func Load() (*Config, error) {
 	if cfg.MTLS.CertWarnBeforeDays <= 0 {
 		cfg.MTLS.CertWarnBeforeDays = 30
 	}
-	if cfg.SMTP.OTPExpiryMin <= 0 {
-		cfg.SMTP.OTPExpiryMin = 10
-	}
 	// Legacy env fallback (kept for backward compatibility):
-	// - WAFIO_TLS_GEN_CLIENT_DIR -> WAFIO_MTLS_CERTS_DIR
-	if os.Getenv("WAFIO_MTLS_CERTS_DIR") == "" {
-		if legacy := os.Getenv("WAFIO_TLS_GEN_CLIENT_DIR"); legacy != "" {
-			cfg.MTLS.CertsDir = legacy
-		}
-	}
 	// - WAFIO_GEOIP_DB_PATH -> WAFIO_GEO_COUNTRY_DB_PATH
 	if os.Getenv("WAFIO_GEO_COUNTRY_DB_PATH") == "" {
 		if legacy := os.Getenv("WAFIO_GEOIP_DB_PATH"); legacy != "" {
@@ -351,8 +330,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.rate_limit_auth_expiration_sec", 60)
 	v.SetDefault("server.rate_limit_otp_max", 5)
 	v.SetDefault("server.rate_limit_otp_expiration_sec", 300)
-	v.SetDefault("server.rate_limit_renew_max", 10)
-	v.SetDefault("server.rate_limit_renew_expiration_sec", 60)
 	v.SetDefault("server.rate_limit_read_max", 240)
 	v.SetDefault("server.rate_limit_read_expiration_sec", 60)
 	v.SetDefault("server.rate_limit_write_max", 120)
@@ -386,7 +363,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("jwt.secret", "change-me-in-production")
 	v.SetDefault("jwt.expire_hours", 72)
 	v.SetDefault("totp.enc_key", "") // registers key so WAFIO_TOTP_ENC_KEY binds
-	v.SetDefault("mtls.certs_dir", "certs")
 	v.SetDefault("mtls.cert_validity_days", 365)
 	v.SetDefault("mtls.server_cert_auto_renew", true)
 	v.SetDefault("mtls.server_cert_renew_before_days", 30)
@@ -398,8 +374,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("smtp.port", 587)
 	v.SetDefault("smtp.from", "Wafio <noreply@wafio.local>")
 	v.SetDefault("smtp.encryption", "auto")
-	v.SetDefault("smtp.otp_expiry_min", 10)
-	v.SetDefault("logs.cache_ttl_sec", 0)
 	v.SetDefault("log.level", "info")
 	v.SetDefault("geo.country_db_path", "security-data/geoip/country.mmdb")
 	v.SetDefault("geo.city_db_path", "security-data/geoip/city.mmdb")

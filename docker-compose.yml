@@ -29,8 +29,8 @@ services:
       dockerfile: Dockerfile
     container_name: wafio-api
     restart: unless-stopped
-    # The image runs without root. It writes ./certs and ./security-data, so run it as the owner of those
-    # directories: WAFIO_UID=$(id -u) WAFIO_GID=$(id -g) docker compose up -d
+    # The image runs without root. It writes ./security-data, so run it as the owner of that
+    # directory: WAFIO_UID=$(id -u) WAFIO_GID=$(id -g) docker compose up -d
     user: "${WAFIO_UID:-65532}:${WAFIO_GID:-65532}"
     depends_on:
       db:
@@ -38,7 +38,7 @@ services:
     environment:
       WAFIO_SERVER_HTTP_ADDR: ":9087"
       WAFIO_SERVER_CORS_ENABLED: "true"
-      WAFIO_SERVER_CORS_ALLOW_ORIGINS: "https://wafio.cloud,https://www.wafio.cloud"
+      WAFIO_SERVER_CORS_ALLOW_ORIGINS: "http://localhost:5173"
       WAFIO_SERVER_CORS_ALLOW_METHODS: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
       WAFIO_SERVER_CORS_ALLOW_HEADERS: "Origin,Content-Type,Accept,Authorization"
       WAFIO_SERVER_CORS_ALLOW_CREDENTIALS: "false"
@@ -50,21 +50,19 @@ services:
       WAFIO_DATABASE_PASSWORD: postgres
       WAFIO_DATABASE_SSLMODE: disable
 
-    expose:
-      - "9087"
-      - "9090"
+    ports:
+      - "127.0.0.1:9087:9087"
+      - "127.0.0.1:9090:9090"
     ulimits:
       nofile:
         soft: 262144
         hard: 262144
     volumes:
       - ./config:/app/config
-      - ./certs:/app/certs
       - ./security-data:/app/security-data
       - ./migrations:/app/migrations
     networks:
       - backend
-      - edge-proxy
 
 volumes:
   wafio_db_data:
@@ -72,5 +70,3 @@ volumes:
 networks:
   backend:
     driver: bridge
-  edge-proxy:
-    external: true

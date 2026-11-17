@@ -122,3 +122,26 @@ func TestValidateDatabaseRejectsEmptyName(t *testing.T) {
 		t.Fatalf("expected database.name error, got %v", err)
 	}
 }
+
+// A config file written for an older release may still set keys that are no longer read; Load
+// ignores them.
+func TestLoadIgnoresKeysThatAreNoLongerRead(t *testing.T) {
+	dir := chdirTemp(t)
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "server:\n  rate_limit_renew_max: 10\n  rate_limit_renew_expiration_sec: 60\n" +
+		"smtp:\n  host: file.smtp\n  otp_expiry_min: 10\n" +
+		"mtls:\n  certs_dir: certs\n  cert_validity_days: 30\n" +
+		"logs:\n  cache_ttl_sec: 60\n"
+	if err := os.WriteFile(filepath.Join(dir, "config", "config.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SMTP.Host != "file.smtp" || cfg.MTLS.CertValidityDays != 30 {
+		t.Fatalf("keys that are still read were lost: smtp.host=%q mtls.cert_validity_days=%d", cfg.SMTP.Host, cfg.MTLS.CertValidityDays)
+	}
+}
