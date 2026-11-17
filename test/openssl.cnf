@@ -1,0 +1,29 @@
+# Snippet untuk generate cert TCP mTLS (dipakai test/gen_certs_openssl.sh)
+
+[req]
+distinguished_name = dn
+prompt = no
+
+[dn]
+CN = wafio-ca
+
+[v3_ca]
+basicConstraints = critical,CA:true
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+
+[v3_server]
+basicConstraints = CA:false
+keyUsage = digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:localhost,IP:127.0.0.1
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+
+[v3_client]
+basicConstraints = CA:false
+keyUsage = digitalSignature
+extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer

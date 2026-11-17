@@ -1,0 +1,25 @@
+# gitleaks configuration (scripts/ci-local.sh, secret scan).
+#
+# Extends the default rule set. The only path allowlists are test data and
+# fixtures: WAF attack/benign corpora are full of JWTs, API-key-shaped strings
+# and webhook URLs on purpose, and Go tests carry dummy tokens. A new secret
+# anywhere else fails the scan.
+
+title = "wafio-cp-backend"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "WAF detection corpora and test fixtures (synthetic payloads)"
+paths = [
+  '''_test\.go$''',
+]
+
+[[allowlists]]
+description = "Synthetic JWT and API key examples in the API spec and the pentest rig"
+targetRules = ["jwt", "generic-api-key"]
+paths = [
+  '''^api/openapi\.yaml$''',
+  '''^test/pentest_juice_suite\.sh$''',
+]

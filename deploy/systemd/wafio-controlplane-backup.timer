@@ -1,0 +1,14 @@
+[Unit]
+Description=Example schedule for WAFio encrypted control-plane backups
+Documentation=file:/usr/share/doc/wafio/production-backup.md
+
+[Timer]
+# Example only. Choose this value from the approved RPO before enabling the timer.
+OnCalendar=*-*-* 02:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=wafio-controlplane-backup.service
+
+[Install]
+WantedBy=timers.target
+

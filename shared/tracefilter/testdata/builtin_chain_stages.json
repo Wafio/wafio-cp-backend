@@ -1,0 +1,140 @@
+[
+  [
+    {
+      "field": "event_name",
+      "op": "eq",
+      "value": "openat"
+    },
+    {
+      "field": "filename",
+      "op": "starts_with_any",
+      "value": [
+        "/dev/shm/",
+        "/tmp/",
+        "/var/tmp/",
+        "/var/www/"
+      ]
+    }
+  ],
+  [
+    {
+      "field": "event_name",
+      "op": "in",
+      "value": [
+        "fchmodat",
+        "chmod"
+      ]
+    }
+  ],
+  [
+    {
+      "field": "event_name",
+      "op": "eq",
+      "value": "execve"
+    },
+    {
+      "field": "parent_comm",
+      "op": "in",
+      "value": [
+        "nginx",
+        "apache2",
+        "httpd",
+        "php-fpm"
+      ]
+    }
+  ],
+  [
+    {
+      "field": "event_name",
+      "op": "eq",
+      "value": "openat"
+    },
+    {
+      "field": "filename",
+      "op": "in",
+      "value": [
+        "/etc/shadow",
+        "/etc/shadow-",
+        "/etc/gshadow",
+        "/etc/gshadow-",
+        "/etc/security/opasswd"
+      ]
+    },
+    {
+      "field": "exe_verified",
+      "op": "neq",
+      "value": true
+    },
+    {
+      "field": "comm",
+      "op": "not_in",
+      "value": [
+        "sshd",
+        "sshd-session",
+        "sshd-auth",
+        "login",
+        "agetty",
+        "gdm-session-wor",
+        "lightdm",
+        "sddm-helper",
+        "su",
+        "sudo",
+        "sudoedit",
+        "doas",
+        "pkexec",
+        "polkitd",
+        "polkit-agent-he",
+        "unix_chkpwd",
+        "unix_update",
+        "cron",
+        "crond",
+        "anacron",
+        "atd",
+        "systemd",
+        "systemd-logind",
+        "systemd-userdbd",
+        "systemd-homed",
+        "accounts-daemon",
+        "nscd",
+        "sssd",
+        "sssd_be",
+        "passwd",
+        "chpasswd",
+        "chage",
+        "chsh",
+        "chfn",
+        "useradd",
+        "usermod",
+        "userdel",
+        "groupadd",
+        "groupmod",
+        "groupdel",
+        "gpasswd",
+        "newusers",
+        "pwck",
+        "grpck",
+        "vipw",
+        "vigr",
+        "pwconv",
+        "grpconv",
+        "pwunconv",
+        "grpunconv"
+      ]
+    }
+  ],
+  [
+    {
+      "field": "event_name",
+      "op": "in",
+      "value": [
+        "connect",
+        "sendto"
+      ]
+    },
+    {
+      "field": "dest_scope",
+      "op": "eq",
+      "value": "public"
+    }
+  ]
+]

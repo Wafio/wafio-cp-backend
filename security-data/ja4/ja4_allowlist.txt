@@ -1,0 +1,21 @@
+# WAFio Default JA4 TLS Allowlist
+# Format: <ja4_fingerprint> <comment>
+# Sources: Legitimate modern desktop & mobile browsers, search engine crawlers
+
+# Google Chrome & Chromium
+t13d1516h2_8daaf6152771_b92d69e0f5f8 Google Chrome 120-134+ (Windows, macOS, Linux)
+t13d1517h2_8daaf6152771_b92d69e0f5f8 Google Chrome / Chromium with ECH (Encrypted Client Hello)
+t13d1516h2_8daaf6152771_b0da82dd1658 Microsoft Edge (Windows 10/11, macOS)
+t13d1516h2_8daaf6152771_f569b91c8120 Brave Browser (Shields active)
+t13d1516h2_8daaf6152771_cd02fb6d0e88 Opera Browser (Desktop)
+t13d1516h2_8daaf6152771_a18f9d0c2e34 Vivaldi Browser
+
+# Mozilla Firefox
+t13d1715h2_5a787ecb3204_0457b8fb24cf Mozilla Firefox 120-136+ (Windows, macOS, Linux)
+t13d1715h2_5a787ecb3204_1740fb876b51 Mozilla Firefox with ECH / DoH enabled
+t13d1715h2_5a787ecb3204_bb193a02fe81 Firefox ESR (Extended Support Release)
+
+# Apple Safari (WebKit)
+t13d2013h2_99c64a594897_83cdad49d794 Apple Safari 17-18+ (macOS Sonoma & Sequoia)
+t13d2013h2_99c64a594897_7a2f520b1341 Mobile Safari (iOS 17/18, iPadOS)
+t13d1912h2_99c64a594897_83cdad49d794 Apple Safari 16 (macOS Ventura)

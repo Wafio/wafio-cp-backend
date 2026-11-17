@@ -1,0 +1,49 @@
+# WAFio Default JA4 TLS Blocklist
+# Format: <ja4_fingerprint> <comment>
+# Fingerprints are in the JA4 format (FoxIO, BSD-3-Clause)
+
+# Python HTTP Libraries
+t13d1516h2_8daaf6152771_e562703ab859 Python requests / urllib3 (TLS 1.3, h2)
+t13d1517h2_8daaf6152771_e562703ab859 Python 3.11+ urllib3 (TLS 1.3)
+t13d1713h1_ab0a1bf427ad_89ab6efea773 Python 3.12+ standard urllib (TLS 1.3, h1)
+t13d1516h1_8daaf6152771_e562703ab859 Python httpx / aiohttp (TLS 1.3, h1)
+t12d1516h2_8daaf6152771_e562703ab859 Python requests / urllib3 (TLS 1.2 fallback)
+t12d1517h2_8daaf6152771_e562703ab859 Python urllib (TLS 1.2 legacy)
+
+# cURL / libcurl CLI & Stacks
+t13d3012h2_1d37bd780c83_882d495ac381 curl modern (TLS 1.3 + OpenSSL, 30 ciphers, h2)
+t13d1516h2_55d143c68385_616429fa8f5c curl 7.8x / 8.x (TLS 1.3 standard build)
+t13d1516h2_55d143c68385_7104e179e963 curl alternative OpenSSL build
+t12d1516h2_55d143c68385_616429fa8f5c curl (TLS 1.2 build)
+t13d1211h2_55d143c68385_616429fa8f5c curl minimal build
+
+# Go HTTP Clients
+t13d1312h2_f57a46bbacb6_ab7e3b40a677 Go 1.21-1.24 net/http client (TLS 1.3, h2)
+t13d190900_a32b2609eb47_d668380e3215 Go standard crypto/tls (TLS 1.3 raw client)
+t12d190900_a32b2609eb47_d668380e3215 Go standard crypto/tls (TLS 1.2 client)
+t13d1312h1_f57a46bbacb6_ab7e3b40a677 Go net/http HTTP/1.1 client
+
+# Node.js / JavaScript Automation
+t13d5211_b262b3658495_8e6e362c5eac Node.js https / axios / node-fetch (TLS 1.3)
+t13d5211h2_b262b3658495_8e6e362c5eac Node.js HTTP/2 client
+t12d5211_b262b3658495_8e6e362c5eac Node.js legacy TLS 1.2
+
+# Java / JVM Clients
+t13d1413h2_8daaf6152771_0b6910ea092a Java 17+ java.net.http.HttpClient
+t12d1412h2_8daaf6152771_0b6910ea092a Java OkHttp / Retrofit
+t12d110900_8daaf6152771_0b6910ea092a Apache HttpClient 4.x / 5.x
+
+# Rust & Scripting Libraries
+t13d1516h2_8daaf6152771_9e9262f6ce63 Rust reqwest / rustls (TLS 1.3)
+t13d1211h2_8daaf6152771_9e9262f6ce63 Rust hyper HTTP client
+t13d1009h2_8daaf6152771_65893ad3a1b0 Ruby Net::HTTP / Faraday
+t12d1009h2_8daaf6152771_65893ad3a1b0 PHP cURL / Guzzle
+
+# Scanners, Exploit Tools & C2 Frameworks
+t13d1007h1_8daaf6152771_2c9182390a12 sqlmap automated SQL injection scanner
+t13d1312h2_f57a46bbacb6_e1069bfa3d88 Nuclei vulnerability scanner
+t13i151600_8daaf6152771_000000000000 Non-SNI direct IP scanner (Masscan, ZGrab, Shodan)
+t13i190900_a32b2609eb47_000000000000 Non-SNI Go automated port scanner
+t12i151600_8daaf6152771_000000000000 Non-SNI TLS 1.2 vulnerability scanner
+t12d170800_8daaf6152771_4b8f04c6225a Cobalt Strike / Metasploit HTTPS beacon
+t12d140800_8daaf6152771_3a8b41f231e5 Sliver / Empire C2 framework

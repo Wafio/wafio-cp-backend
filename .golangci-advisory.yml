@@ -1,0 +1,31 @@
+# Advisory pass: reported, never blocking. See the note in .golangci.yml.
+#
+# The backlog is mostly gosec integer-conversion (G115) and file-path (G304)
+# warnings, staticcheck findings and unused function parameters in the
+# semantic engines. Run the pass for current counts:
+#   golangci-lint run -c .golangci-advisory.yml ./...
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  enable:
+    - errcheck
+    - gosec
+    - staticcheck
+    - unparam
+    - unused
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck, unparam]
+      # G404: the click puzzle seeds math/rand from crypto/rand, and the answer
+      # is protected by a signature rather than by the randomness of the grid.
+      - path: internal/engine/challenge\.go
+        text: "G404"
+      # G602: the octet loop is bounded by len(parts) <= 4 and an explicit
+      # i >= 4 break; gosec cannot see either.
+      - path: internal/engine/ssrf_semantic\.go
+        text: "G602"

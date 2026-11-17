@@ -1,0 +1,302 @@
+// Wafio agent control plane.
+//
+// Bidirectional gRPC stream shared by two agent types:
+//
+//   WAF agent (cmd/wafio-waf-agent):
+//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation ack)
+//     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping
+//
+//   eBPF/host agent (cmd/wafio-host-agent):
+//     → sends : Hello, Heartbeat, CommandAck{id="ebpf:telemetry"} (telemetry)
+//     ← receives: Welcome, BundleUpdate (eBPF state / trace policies), Ping
+//     ← ignores : KeyRotation
+//
+// Authentication is entirely at the TLS layer — the client cert fingerprint
+// maps to mtls_credentials.project_id. The Hello message carries the
+// agent_name for DB lookup (WAF agents must be pre-registered; eBPF agents
+// are auto-created) and an optional host_key to bind to a host row.
+syntax = "proto3";
+
+package wafio.agent.v1;
+
+option go_package = "github.com/wafio/wafio-cp-backend/shared/agentpb;agentv1";
+
+service AgentControl {
+  // One bidirectional stream per running agent process. The first message
+  // the client sends MUST be Hello. The server replies with Welcome and
+  // (if the agent's bundle is stale) an immediate BundleUpdate.
+  rpc Stream(stream AgentMessage) returns (stream ServerMessage);
+  // Global public hash corpus over authenticated mTLS; never contains provider credentials.
+  rpc DownloadMalwareDatabase(MalwareDatabaseRequest) returns (stream MalwareDatabaseChunk);
+}
+
+// ─── agent → server ─────────────────────────────────────────────────────────
+
+// AgentMessage is the union of all messages an agent can send.
+// Both WAF and eBPF agents use this wrapper.
+message AgentMessage {
+  oneof kind {
+    Hello            hello     = 1; // both agents — first message on connect
+    Heartbeat        heartbeat = 2; // both agents — liveness + host info
+    WAFDecisionEvent decision  = 3; // WAF agent only
+    CommandAck       ack       = 4; // WAF agent: KeyRotation ack
+                                    // eBPF agent: telemetry (id="ebpf:telemetry")
+  }
+}
+
+// Hello is the first message every agent sends after opening the stream.
+// Both agent types use Hello; fields used differ slightly:
+//
+//   WAF agent  : agent_name (required, must exist in DB), agent_version,
+//                hostname, bundle_generation, host_key (optional)
+//   eBPF agent : agent_name (auto-created if absent), agent_version,
+//                hostname, host_key (optional — binds agent to a host row)
+message Hello {
+  string agent_name        = 1;
+  string agent_version     = 2;
+  string hostname          = 3;
+  // WAF agent only: bundle generation the agent already has.
+  // Server skips BundleUpdate push when generation matches.
+  int64  bundle_generation = 4;
+  // field 5 (waf_key) removed — WAF keys were dropped in migration 000017.
+  reserved 5; reserved "waf_key";
+  // Both agents (optional). When non-empty the server matches it against the
+  // hosts table for the project. Omit for "host-less" deployments —
+  // authentication falls back to mTLS cert alone.
+  string host_key          = 6;
+  // Optional kind hint sent by the agent binary on first registration.
+  // "waf" for WAF agents, "host" or "ebpf" for host/eBPF agents.
+  // When the agent is already registered in the DB the hint is ignored;
+  // when it is a new agent the server uses this to set the correct kind.
+  string agent_kind        = 7;
+  // Optional capability names the agent binary reports. The WAF agent sends
+  // "script_rules" when it can run script rules and "no_script_rules" when it
+  // cannot (it ships without the script sidecar). A v1 agent sent other names
+  // (semantic_only, semantic_keys_jwt_graphql, field_rules_v2,
+  // custom_rule_field_paths); the server ignores them, and every agent gets
+  // the same bundle. Unknown names are ignored.
+  repeated string features = 8;
+}
+
+// Heartbeat is sent by both agents for liveness and host-info updates.
+// Frequency: every N seconds as negotiated in Welcome.heartbeat_seconds.
+// host_info_json is sent on first heartbeat after connect and every 5 min.
+message Heartbeat {
+  int64  unix_time       = 1;
+  uint64 decisions_total = 2;
+  uint64 blocks_total    = 3;
+  // JSON-encoded HostInfo snapshot. Sent on the first heartbeat after
+  // connect and every 5 minutes thereafter to keep the dashboard fresh.
+  // Empty when unchanged since last send.
+  bytes  host_info_json  = 4;
+
+  // WAF agent inspection-health counters (added in v1.2). Cumulative since
+  // the agent process started; they reset on restart. `optional` gives them
+  // explicit presence so the control plane can tell "agent too old to
+  // report" (unset) from "reported zero". eBPF/host agents leave them unset.
+  //
+  //   analyze_panics_total          panics recovered by Analyze (request
+  //                                 allowed without full inspection)
+  //   engine_panics_total           semantic-engine panics recovered in-scan
+  //   partial_coverage_total        requests whose semantic scan did not
+  //                                 cover the whole request (a coverage
+  //                                 gap, see the coverage field)
+  //   parse_budget_exhausted_total  engine scans that skipped relaxed-parse
+  //                                 variants because the work budget ran out
+  optional uint64 analyze_panics_total         = 5;
+  optional uint64 engine_panics_total          = 6;
+  optional uint64 partial_coverage_total       = 7;
+  optional uint64 parse_budget_exhausted_total = 8;
+
+  // WAF agent bundle provenance (added in v1.3). eBPF/host agents and
+  // older WAF agents leave them unset.
+  //
+  //   bundle_source      where the WAF config in force came from:
+  //                      "live"        applied from this control plane stream
+  //                      "cache"       loaded from the agent's on-disk
+  //                                    last-bundle.json at startup
+  //                      "cache_stale" as "cache", but the file is older than
+  //                                    the agent's max cache age (default 7 d)
+  //                      ""            no bundle applied yet
+  //   bundle_generation  generation of the bundle in force (0 = none)
+  optional string bundle_source     = 9;
+  optional int64  bundle_generation = 10;
+
+  // WAF agent script-rule and recovered-panic counters (added in v1.4).
+  // Cumulative since the agent process started, like fields
+  // 5-8; eBPF/host agents and older WAF agents leave them unset.
+  //
+  //   script_incomplete_total      script-rule evaluations that did not
+  //                                finish (timeout, sandbox limit, panic,
+  //                                runtime error, request budget spent);
+  //                                each made the verdict LOG at worst
+  //   script_errors_total          the runtime-error share of it
+  //   script_rules_rejected_total  script rules dropped at bundle load for
+  //                                referencing a builtin outside the allowlist
+  //   script_runs_in_flight        script runs whose goroutine has not exited
+  //                                yet (gauge; a timed-out run stops at its
+  //                                next operation)
+  //   agent_panics_total           other panics the agent recovered (WebSocket
+  //                                relay, IP-jail enforcement); analyze and
+  //                                engine panics are fields 5-6
+  optional uint64 script_incomplete_total     = 11;
+  optional uint64 script_errors_total         = 12;
+  optional uint64 script_rules_rejected_total = 13;
+  optional int64  script_runs_in_flight       = 14;
+  optional uint64 agent_panics_total          = 15;
+
+  // WAF agent analyze latency over the last 5 minutes (added in v1.4),
+  // estimated from a histogram with buckets at
+  // 0.25/0.5/1/2/5/10/25/50/100/250/1000 ms. analyze_latency_samples is the
+  // number of analyses in that window; the percentiles are unset when it is 0.
+  // Values are microseconds; a value in the overflow bucket reports 1 s.
+  optional uint64 analyze_latency_p50_us  = 16;
+  optional uint64 analyze_latency_p95_us  = 17;
+  optional uint64 analyze_latency_p99_us  = 18;
+  optional uint64 analyze_latency_samples = 19;
+
+  // Custom GUI/tuning rules the WAF agent dropped at bundle load because a
+  // regex was invalid or over the program budget, since agent
+  // start. Sent by the agent; the control plane does not store it yet (the
+  // rule list reports each such rule as regex_error).
+  optional uint64 regex_rules_dropped_total = 20;
+}
+
+// WAFDecisionEvent is sent by the WAF agent only (eBPF agents do not send this).
+// One event per HTTP request the inline proxy analyzed.
+// Sampled on the agent side to avoid flooding the stream.
+message WAFDecisionEvent {
+  int64  ts_unix         = 1;
+  string method          = 2;
+  string host            = 3;
+  string uri             = 4;
+  string remote_ip       = 5;
+  int32  status          = 6;
+  int32  score           = 7;
+  string action          = 8; // allow|block|monitor
+  repeated string categories = 9;
+  string match_detail    = 10;
+  string analyze_method  = 11;
+  string app_id          = 12;
+  string user_agent      = 13;
+  string content_type    = 14;
+  int32  body_size       = 15;
+  string body_preview    = 16; // first 512 characters of the body, redacted like request_body
+  string cwe             = 17;
+  int32  latency_us      = 18;
+  // Injection enrichment fields (added in v1.1).
+  string match_source                   = 19; // e.g. "header:User-Agent", "body", "query:id", "path"
+  map<string, string> request_headers   = 20; // request headers, credentials redacted (Authorization/Cookie dropped, secret-named values "[redacted]", the match_source input kept)
+  string request_body                   = 21; // request body (first 4096 bytes, empty if binary), secret-named form/JSON/multipart field values "[redacted]"
+  string query_params                   = 22; // query string from URI (e.g. "id=1&q=test"), secret-named values "[redacted]"
+  string payload_type                   = 23; // detected payload type: json/xml/form-urlencoded/etc.
+  // Semantic-scan coverage (added in v1.2). "" = the semantic stage covered
+  // the whole request (or the agent predates the field); otherwise the
+  // comma-separated gap flags also stamped into match_detail as
+  // "coverage:<flags>", e.g. "field_cap,body_binary".
+  string coverage                       = 24;
+  // true: an engine named the match_source input itself (it flagged that
+  // header, parameter or body field value); false: guessed (a
+  // hit on the whole URI), naming no input, or an agent that predates the
+  // field. Only an exact source keeps a secret-named value;
+  // the control plane redacts again at ingest with it (added in v1.9).
+  bool   match_source_exact             = 25;
+}
+
+// CommandAck is used by both agents but for different purposes:
+//
+//   WAF agent  : acknowledges a KeyRotation command (command_id matches
+//                the rotation's command_id; ok=true on success).
+//   eBPF agent : sends telemetry using command_id="ebpf:telemetry", ok=true,
+//                and a JSON-encoded PushPayload in the error field (repurposed
+//                as a data carrier — not an actual error string).
+message CommandAck {
+  string command_id = 1;
+  bool   ok         = 2;
+  string error      = 3;
+  // payload (v1.9.0): the gzip of the JSON PushPayload a host
+  // agent otherwise puts in error, with command_id="ebpf:telemetry:v2".
+  // Sent only on a stream whose control plane announced telemetry_gzip in
+  // a telemetry:demand BundleUpdate; older control planes never see it.
+  bytes  payload    = 4;
+}
+
+// ─── server → agent ─────────────────────────────────────────────────────────
+
+// ServerMessage is the union of all messages the server can push.
+message ServerMessage {
+  oneof kind {
+    Welcome             welcome              = 1; // both agents — reply to Hello
+    BundleUpdate        bundle               = 2; // WAF agent: WAF rules JSON
+                                                  // eBPF agent: eBPF state / trace policies
+    KeyRotation         key_rotation         = 3; // WAF agent only (eBPF agents ignore this)
+    Ping                ping                 = 4; // both agents — liveness probe
+    FetchSecurityData   fetch_security_data  = 5; // both agents — refresh local security data
+  }
+
+  // field 6 (self_update) removed — control-plane push updates never had a
+  // caller and shipped full binaries over the wire. Agents update
+  // via the signed wafio.cloud release channel + operator install instead.
+  reserved 6; reserved "self_update";
+}
+
+// Welcome is sent by the server to both agents immediately after Hello validation.
+message Welcome {
+  string agent_id          = 1;
+  int64  server_time_unix  = 2;
+  uint32 heartbeat_seconds = 3;
+}
+
+// BundleUpdate carries a JSON payload whose content differs per agent type:
+//
+//   WAF agent  : full WAF rules + config (apps, sensitivity, mode, etc.)
+//                parsed by the WAF runtime (semantic engines + decision engine).
+//   eBPF agent : one of:
+//                  {"ebpf_state": {...}}       — firewall desired state push
+//                  {"trace_policies": [...]}   — runtime security policy sync
+//
+// bundle_json should be treated as opaque by the transport layer.
+message BundleUpdate {
+  string command_id = 1;
+  int64  generation = 2;
+  bytes  bundle_json = 3;
+}
+
+// KeyRotation is sent by the server to WAF agents only.
+// eBPF/host agents receive but ignore this message.
+// The WAF agent acks with CommandAck{command_id, ok=true} then reconnects
+// so the next Hello carries the new host_key.
+message KeyRotation {
+  string command_id          = 1;
+  string new_host_key        = 2; // optional; "" means leave unchanged
+  // field 3 (new_waf_keys) removed — WAF keys were dropped in migration 000017.
+  reserved 3; reserved "new_waf_keys";
+}
+
+// Ping is sent by the server to both agents as a liveness probe.
+// Agents reply with a bare Heartbeat (unix_time only).
+message Ping {
+  int64 nonce = 1;
+}
+
+// FetchSecurityData is sent by the server to instruct agents to (re-)download
+// their local security data (GeoIP, Firehol, JA3, bot UA).
+// Agents run the equivalent of `wafio-waf-agent fetch-data` then hot-reload
+// their runtime. They ack with CommandAck{command_id, ok, error}.
+message FetchSecurityData {
+  string command_id = 1;
+  // Comma-separated component filter, e.g. "geoip-country,ja4".
+  // Empty means all components for the agent profile.
+  string components = 2;
+  // When true, re-download even if local files are up-to-date.
+  bool   force      = 3;
+  // Fetch malware hashes from DownloadMalwareDatabase instead of the provider.
+  bool malware_from_control_plane = 4;
+}
+
+message MalwareDatabaseRequest {}
+message MalwareDatabaseChunk {
+  bytes data = 1;
+  // Final frame only: SHA-256 of the complete corpus. No data in final frame.
+  string sha256 = 2;
+}

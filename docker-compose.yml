@@ -1,0 +1,76 @@
+services:
+  db:
+    # TimescaleDB, not plain postgres. The hypertable migrations need it.
+    # They degrade to plain tables when the extension is absent, but the
+    # intended stack is this one: without it there is no chunking and no
+    # automatic retention.
+    image: timescale/timescaledb:2.17.2-pg17
+    container_name: wafio-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wafio
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - wafio_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wafio"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wafio-api
+    restart: unless-stopped
+    # The image runs without root. It writes ./certs and ./security-data, so run it as the owner of those
+    # directories: WAFIO_UID=$(id -u) WAFIO_GID=$(id -g) docker compose up -d
+    user: "${WAFIO_UID:-65532}:${WAFIO_GID:-65532}"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WAFIO_SERVER_HTTP_ADDR: ":9087"
+      WAFIO_SERVER_CORS_ENABLED: "true"
+      WAFIO_SERVER_CORS_ALLOW_ORIGINS: "https://wafio.cloud,https://www.wafio.cloud"
+      WAFIO_SERVER_CORS_ALLOW_METHODS: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      WAFIO_SERVER_CORS_ALLOW_HEADERS: "Origin,Content-Type,Accept,Authorization"
+      WAFIO_SERVER_CORS_ALLOW_CREDENTIALS: "false"
+
+      WAFIO_DATABASE_HOST: db
+      WAFIO_DATABASE_PORT: "5432"
+      WAFIO_DATABASE_NAME: wafio
+      WAFIO_DATABASE_USER: postgres
+      WAFIO_DATABASE_PASSWORD: postgres
+      WAFIO_DATABASE_SSLMODE: disable
+
+    expose:
+      - "9087"
+      - "9090"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ./config:/app/config
+      - ./certs:/app/certs
+      - ./security-data:/app/security-data
+      - ./migrations:/app/migrations
+    networks:
+      - backend
+      - edge-proxy
+
+volumes:
+  wafio_db_data:
+
+networks:
+  backend:
+    driver: bridge
+  edge-proxy:
+    external: true

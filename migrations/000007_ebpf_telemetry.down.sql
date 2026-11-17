@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS ebpf_enforcement_log;
+DROP TABLE IF EXISTS ebpf_trace_stats;
+DROP TABLE IF EXISTS ebpf_trace_events;
+DROP TABLE IF EXISTS ebpf_bandwidth;
+DROP TABLE IF EXISTS ebpf_connections;
+DROP TABLE IF EXISTS ebpf_events;
+DROP TABLE IF EXISTS ebpf_metrics;
+DROP TABLE IF EXISTS ebpf_status;
+DROP TABLE IF EXISTS ebpf_agents;

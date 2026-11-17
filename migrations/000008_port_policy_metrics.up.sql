@@ -1,0 +1,3 @@
+ALTER TABLE ebpf_metrics
+    ADD COLUMN IF NOT EXISTS port_policy_drops BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS egress_ip_drops   BIGINT NOT NULL DEFAULT 0;

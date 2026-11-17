@@ -1,0 +1,31 @@
+[Unit]
+Description=WAFio encrypted control-plane backup
+Documentation=file:/usr/share/doc/wafio/production-backup.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+StateDirectory=wafio-backup
+StateDirectoryMode=0700
+ExecStart=/usr/local/libexec/wafio/backup-controlplane.py backup --config /etc/wafio/backup.json
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+ReadOnlyPaths=/etc/wafio
+ReadWritePaths=/var/backups/wafio
+# For a file-backed AWS profile, set AWS_CONFIG_FILE and
+# AWS_SHARED_CREDENTIALS_FILE to protected files under /etc/wafio in a drop-in.

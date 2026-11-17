@@ -1,0 +1,70 @@
+# A rule that is only written down is a suggestion. This file is the part a
+# machine enforces.
+#
+# Two tiers on purpose:
+#
+#   Blocking (this file): passes on the current tree with 0 issues, so a red
+#                           build always means a NEW problem. A gate that is red
+#                           on day one is a gate everyone learns to ignore.
+#
+#   Advisory (.golangci-advisory.yml): errcheck, staticcheck, unused, gosec,
+#                           unparam. ~196 findings on the current tree, mostly
+#                           unchecked deferred Close and integer-conversion
+#                           warnings. Real, worth burning down, but not worth
+#                           blocking every merge until they are.
+#
+# Run the advisory pass with:
+#   golangci-lint run -c .golangci-advisory.yml ./...
+version: "2"
+
+run:
+  timeout: 5m
+
+# Formatting is enforced, never reviewed. gofmt was absent from this file until
+# a struct literal shipped unaligned through a green build -- the gate did not
+# check, so nobody did.
+formatters:
+  enable:
+    - gofmt
+
+linters:
+  default: none
+  enable:
+    - bodyclose     # a leaked response body is a real leak
+    - depguard      # the hexagonal dependency rule
+    - forbidigo     # raw driver errors must not reach clients
+    - govet
+    - ineffassign
+    - rowserrcheck  # a scan loop that never checks rows.Err() returns a cut-short page as success
+
+  settings:
+    depguard:
+      rules:
+        domain:
+          files:
+            - "**/internal/domain/**"
+          deny:
+            - pkg: "github.com/wafio/wafio-cp-backend/internal/adapter"
+              desc: "domain must not depend on adapters"
+            - pkg: "github.com/wafio/wafio-cp-backend/internal/application"
+              desc: "domain must not depend on the application layer"
+        contract-tests:
+          files:
+            - "!$test"
+            - "!**/internal/apicontract/**"
+          deny:
+            - pkg: "github.com/wafio/wafio-cp-backend/internal/apicontract"
+              desc: "test support only: import it from _test.go files so release binaries do not link kin-openapi"
+            - pkg: "github.com/getkin/kin-openapi"
+              desc: "OpenAPI validation is test-only (internal/apicontract)"
+
+    forbidigo:
+      forbid:
+        - pattern: 'fiber\.Map\{[^}]*\+ err\.Error\(\)'
+          msg: "do not concatenate a raw error into an HTTP response; log it and return a generic message"
+
+    # pgx's Rows reports a mid-iteration read error only through Err(); without
+    # it a list query returns a cut-short page with 200.
+    rowserrcheck:
+      packages:
+        - github.com/jackc/pgx/v5

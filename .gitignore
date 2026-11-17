@@ -1,0 +1,31 @@
+.DS_Store
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+config/config.yaml
+mtls-credentials.json
+# Private keys. The CA certificate stays tracked where a test needs it.
+*.pem
+*.key
+!**/ca.crt
+config/*_private*
+
+# Build and release output
+/build/
+/dist/
+/wafio
+*.sbom.json
+
+# Data downloaded by `wafio fetch-data`; only the JA4 lists are tracked
+/security-data/*
+!/security-data/ja4/
+
+# Local files
+go.work
+go.work.sum
+*.log
+nohup.out
+__pycache__/
+*.pyc

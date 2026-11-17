@@ -1,0 +1,101 @@
+openapi: 3.1.0
+info:
+  title: apicontract test spec
+  version: "1"
+paths:
+  /api/items/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        200:
+          description: one item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          description: not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      responses:
+        "204":
+          description: deleted
+  /api/items/export:
+    get:
+      responses:
+        "200":
+          description: CSV
+          content:
+            text/csv:
+              schema:
+                type: string
+        4XX:
+          description: client error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/items/{id}/stream:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      x-sse-events:
+        - event: item
+          description: an item changed
+          schema:
+            $ref: "#/components/schemas/Item"
+          example: {"id": "a", "name": null}
+        - event: ping
+          description: keep-alive
+          schema:
+            type: string
+            const: ping
+        - event: hello
+          description: any data
+      responses:
+        "200":
+          description: stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+components:
+  schemas:
+    Item:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: [string, "null"]
+        count:
+          type: integer
+          minimum: 0
+        owner:
+          type: string
+          format: email
+        ref:
+          type: string
+          format: uuid
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        code:
+          type: string

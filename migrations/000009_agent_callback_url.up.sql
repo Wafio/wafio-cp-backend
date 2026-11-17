@@ -1,0 +1,1 @@
+ALTER TABLE ebpf_agents ADD COLUMN IF NOT EXISTS callback_url TEXT NOT NULL DEFAULT '';
