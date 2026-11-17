@@ -1,9 +1,11 @@
 name: ci
 
-# Small extra gate on pull requests: vet, lint and the tests that need no
-# database. The full set of gates is scripts/ci-local.sh, run on Linux.
+# Small extra gate on pushes to main and on pull requests: vet, lint and the
+# tests that need no database. The full set of gates is scripts/ci-local.sh, run on Linux.
 
 on:
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
