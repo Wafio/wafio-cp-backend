@@ -18,7 +18,7 @@ import (
 // The proxy never re-derives it: it passes fasthttp's ctx.URI().Path().
 // Callers without a proxy (raw-URI callers of MatchPathException) do not know
 // how their host routes the raw target, so they match on RequestPathFor(rawURI)
-// — this path plus the decoded-but-unresolved one — instead.
+// instead: this path plus the decoded-but-unresolved one.
 //
 // The result is fasthttp's own normalization — the same code the proxy runs,
 // not a re-implementation — so it cannot drift on a fasthttp upgrade:

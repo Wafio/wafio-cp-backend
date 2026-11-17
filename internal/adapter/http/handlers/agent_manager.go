@@ -24,7 +24,7 @@ import (
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// AgentManagerHandler — fleet-wide agent management.
+// AgentManagerHandler: fleet-wide agent management.
 //
 // Unlike EBPFHandler.ListAgents which is strictly project-scoped and eBPF-only,
 // this handler exposes a single cross-kind, cross-project view so the UI can
