@@ -22,7 +22,7 @@ import (
 // HostIngestHandler — receives telemetry pushed from agents, stores in PostgreSQL.
 // ──────────────────────────────────────────────────────────────────────────────
 //
-// Endpoint: POST /api/internal/ebpf/ingest (authenticated via X-Agent-Key)
+// Endpoint: POST /api/internal/host/ingest (authenticated via X-Wafio-Host-Key)
 //
 // The agent sends a PushPayload JSON body with all telemetry data.
 // The handler validates the API key, resolves the agent, and writes to DB.
@@ -169,7 +169,7 @@ func inferAgentKindFromPath(path string) string {
 
 // Ingest receives and stores telemetry from an agent.
 //
-//	POST /api/internal/ebpf/ingest
+//	POST /api/internal/host/ingest
 func (h *HostIngestHandler) Ingest(c *fiber.Ctx) error {
 	agentID, ok := c.Locals("agent_id").(string)
 	if !ok || agentID == "" {

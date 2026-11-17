@@ -51,17 +51,6 @@ func TestLiveDecisionDTOStrength(t *testing.T) {
 	}
 }
 
-// The legacy HTTP ingest accepts the optional coverage field.
-func TestWAFIngestDecisionAcceptsCoverage(t *testing.T) {
-	var p wafIngestPayload
-	if err := json.Unmarshal([]byte(`{"decisions":[{"action":"allow","uri":"/","coverage":"header_count"}]}`), &p); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Decisions) != 1 || p.Decisions[0].Coverage != "header_count" {
-		t.Fatalf("decoded: %+v", p.Decisions)
-	}
-}
-
 type fakeGeoEnricher map[string]string
 
 func (f fakeGeoEnricher) Enrich(ip string) (string, string, float64, float64, string) {
@@ -133,20 +122,5 @@ func TestLiveDecisionDTOStatusMethodAndEnginesOff(t *testing.T) {
 		Coverage: "field_cap,engine_disabled:xss,engine_log_only:sql"})
 	if got.Coverage != "field_cap" || !slices.Equal(got.EnginesOff, []string{"xss"}) || !slices.Equal(got.EnginesLogOnly, []string{"sql"}) {
 		t.Errorf("held event: %+v", got)
-	}
-}
-
-// The legacy HTTP ingest takes the optional status and maps an older agent's
-// analyze method to semantic.
-func TestWAFIngestRowsStatusAndMethod(t *testing.T) {
-	var p wafIngestPayload
-	if err := json.Unmarshal([]byte(`{"decisions":[
-		{"action":"block","uri":"/a","status":403,"analyze_method":"semantic"},
-		{"action":"allow","uri":"/b","analyze_method":"rule_based"}]}`), &p); err != nil {
-		t.Fatal(err)
-	}
-	rows := wafIngestRows("p", "a", p.Decisions)
-	if rows[0].Status != 403 || rows[0].AnalyzeMethod != "semantic" || rows[1].Status != 0 || rows[1].AnalyzeMethod != "semantic" {
-		t.Fatalf("rows: %+v", rows)
 	}
 }

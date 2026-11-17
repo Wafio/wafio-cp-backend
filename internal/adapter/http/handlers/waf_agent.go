@@ -18,27 +18,18 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
 	"github.com/wafio/wafio-cp-backend/internal/application"
 	"github.com/wafio/wafio-cp-backend/internal/domain"
-	"github.com/wafio/wafio-cp-backend/internal/engine"
 	"golang.org/x/sync/singleflight"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// WAF fleet control-plane endpoints.
-//
-// Agent-facing (authenticated via X-Agent-Key / Bearer):
-//
-//	GET  /api/internal/waf/bundle  — pull the list of apps this agent serves
-//	POST /api/internal/waf/ingest  — push sampled decisions + metrics
-//
-// User-facing (JWT, under /api/projects/:id/apps/:appId):
+// WAF fleet control-plane endpoints, all user-facing (JWT, under
+// /api/projects/:id/apps/:appId):
 //
 //	GET  /waf-agent                — which WAF agent serves this app
 //	PUT  /waf-agent                — assign / reassign
 //	DELETE /waf-agent              — unassign
 //
-// The bundle endpoint participates in an ETag-based long-poll: the agent
-// sends If-None-Match: "gen-<n>" and the server returns 304 when the
-// generation matches, or 200 with the new bundle otherwise.
+// Agents get their bundle and send decisions over the gRPC stream.
 // ──────────────────────────────────────────────────────────────────────────────
 
 type WAFAgentHandler struct {
@@ -58,225 +49,6 @@ func uiBucketSecs(minutes int) int {
 		return 60
 	}
 	return b
-}
-
-// bundleApp is one app of GET /api/internal/waf/bundle, a route no agent calls. Its rules_json is
-// rewritten like a stream bundle (engine.NormalizeRulesJSON), so it never serves the old keys.
-type bundleApp struct {
-	AppID      string   `json:"app_id"`
-	ListenHost string   `json:"listen_host"`
-	ListenPort int      `json:"listen_port,omitempty"`
-	Aliases    []string `json:"aliases,omitempty"`
-	Upstream   string   `json:"upstream"`
-	Mode       string   `json:"mode"`
-	// Per-app WAF config (migration 000023). nil/0 = use agent-level fallback.
-	RulesJSON   json.RawMessage `json:"rules_json,omitempty"`
-	Sensitivity int             `json:"sensitivity,omitempty"`
-	// Per-app reverse-proxy config (migration 000061).
-	ProxyConfig json.RawMessage `json:"proxy_config,omitempty"`
-}
-
-type bundleResponse struct {
-	AgentID     string          `json:"agent_id"`
-	Generation  int64           `json:"generation"`
-	Apps        []bundleApp     `json:"apps"`
-	RulesJSON   json.RawMessage `json:"rules_json,omitempty"`
-	Sensitivity int             `json:"sensitivity,omitempty"`
-}
-
-// Bundle serves the authoritative app list for the calling WAF agent.
-// RequireAgentKey middleware must populate "agent_id" in Locals.
-func (h *WAFAgentHandler) Bundle(c *fiber.Ctx) error {
-	agentID, _ := c.Locals("agent_id").(string)
-	if agentID == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "missing agent context",
-			"code":  "AGENT_AUTH_REQUIRED",
-		})
-	}
-
-	gen, _ := h.Repo.WAF.GetBundleGeneration(c.UserContext(), agentID)
-	etag := fmt.Sprintf("\"gen-%d\"", gen)
-
-	if inm := c.Get("If-None-Match"); inm != "" && inm == etag {
-		// Client already has this generation; still update last_pulled so the
-		// UI can show "agent last checked in …" accurately.
-		_ = h.Repo.WAF.MarkBundlePulled(c.UserContext(), agentID)
-		c.Set("ETag", etag)
-		return c.SendStatus(fiber.StatusNotModified)
-	}
-
-	rows, err := h.Repo.WAF.ListAssignmentsForAgent(c.UserContext(), agentID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "failed to list assignments",
-			"code":  "WAF_BUNDLE_FAILED",
-		})
-	}
-
-	apps := make([]bundleApp, 0, len(rows))
-	for _, r := range rows {
-		ba := bundleApp{
-			AppID:      r.AppID,
-			ListenHost: r.ListenHost,
-			ListenPort: r.ListenPort,
-			Upstream:   r.Upstream,
-			Mode:       normalizeMode(r.Mode),
-		}
-		// Per-app reverse-proxy config (migration 000061).
-		if len(r.ProxyConfig) > 0 {
-			ba.ProxyConfig = json.RawMessage(r.ProxyConfig)
-		}
-		// Per-app WAF config (migration 000023), without the legacy keys of v1 documents.
-		if len(r.RulesJSON) > 0 {
-			ba.RulesJSON, _ = engine.NormalizeRulesJSON(json.RawMessage(r.RulesJSON))
-		}
-		if r.Sensitivity > 0 {
-			ba.Sensitivity = r.Sensitivity
-		}
-		apps = append(apps, ba)
-	}
-	_ = h.Repo.WAF.MarkBundlePulled(c.UserContext(), agentID)
-	c.Set("ETag", etag)
-	c.Set("Cache-Control", "no-store")
-	resp := bundleResponse{
-		AgentID:     agentID,
-		Generation:  gen,
-		Apps:        apps,
-		Sensitivity: 2,
-		RulesJSON:   json.RawMessage("{}"),
-	}
-	if ag, aerr := h.Repo.EBPF.GetAgentByID(c.UserContext(), agentID); aerr == nil && ag != nil {
-		if pc, perr := h.Repo.Project.GetConfig(c.UserContext(), ag.ProjectID); perr == nil && pc != nil && len(pc.RulesJSON) > 0 {
-			resp.RulesJSON, _ = engine.NormalizeRulesJSON(json.RawMessage(pc.RulesJSON))
-			if pc.Sensitivity > 0 {
-				resp.Sensitivity = pc.Sensitivity
-			}
-		}
-	}
-	return c.JSON(resp)
-}
-
-// wafIngestPayload mirrors agent.wafDecisionEvent batch envelope.
-type wafIngestPayload struct {
-	Hostname  string                     `json:"hostname"`
-	HostInfo  *application.AgentHostInfo `json:"host_info,omitempty"`
-	Heartbeat bool                       `json:"heartbeat,omitempty"`
-	Decisions []wafIngestDecision        `json:"decisions"`
-}
-
-type wafIngestDecision struct {
-	AppID         string    `json:"app_id"`
-	Host          string    `json:"host"`
-	Method        string    `json:"method"`
-	URI           string    `json:"uri"`
-	RemoteAddr    string    `json:"remote_addr"`
-	UserAgent     string    `json:"user_agent,omitempty"`
-	ContentType   string    `json:"content_type,omitempty"`
-	Action        string    `json:"action"`
-	Score         int       `json:"score,omitempty"`
-	Categories    []string  `json:"categories,omitempty"`
-	CWE           string    `json:"cwe,omitempty"`
-	MatchDetail   string    `json:"match_detail,omitempty"`
-	AnalyzeMethod string    `json:"analyze_method,omitempty"`
-	BodySize      int       `json:"body_size,omitempty"`
-	LatencyUS     int       `json:"latency_us,omitempty"`
-	BodyPreview   string    `json:"body_preview,omitempty"`
-	Mode          string    `json:"mode,omitempty"`
-	EventTime     time.Time `json:"event_time"`
-	Coverage      string    `json:"coverage,omitempty"`
-	Status        int       `json:"status,omitempty"`
-}
-
-// Ingest receives batched WAF decisions from an agent.
-func (h *WAFAgentHandler) Ingest(c *fiber.Ctx) error {
-	agentID, _ := c.Locals("agent_id").(string)
-	if agentID == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "missing agent context",
-			"code":  "AGENT_AUTH_REQUIRED",
-		})
-	}
-	projectID, _ := c.Locals("project_id").(string)
-	var payload wafIngestPayload
-	if err := c.BodyParser(&payload); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid payload",
-			"code":  "WAF_INGEST_BAD_BODY",
-		})
-	}
-	// Persist host info on every WAF ingest (heartbeat or real batch). This
-	// is the only signal we get from the WAF agent about its host, so we
-	// can't afford to tie it to the presence of decisions.
-	if payload.HostInfo != nil {
-		row := repository.AgentHostInfoRow{
-			Raw:         payload.HostInfo.StoredJSON(),
-			Hostname:    payload.HostInfo.Hostname,
-			OS:          payload.HostInfo.OS,
-			OSVersion:   payload.HostInfo.OSVersion,
-			Kernel:      payload.HostInfo.KernelRel,
-			Arch:        payload.HostInfo.Arch,
-			CPUCount:    payload.HostInfo.CPUCount,
-			MemoryTotal: clampInt64FromUint64(payload.HostInfo.MemoryTotal),
-			VirtType:    payload.HostInfo.VirtType,
-			Version:     payload.HostInfo.AgentVersion,
-			Kind:        payload.HostInfo.AgentKind,
-			BootUnix:    payload.HostInfo.BootTime,
-		}
-		_ = h.Repo.EBPF.UpdateAgentHostInfo(c.UserContext(), projectID, agentID, row)
-		if hostID, ok := c.Locals("host_id").(string); ok && hostID != "" {
-			_ = h.Repo.Host.UpdateHostInfo(c.UserContext(), projectID, hostID, row)
-		}
-	}
-	if len(payload.Decisions) == 0 {
-		return c.SendStatus(fiber.StatusNoContent)
-	}
-	rows := wafIngestRows(projectID, agentID, payload.Decisions)
-	if err := h.Repo.WAF.InsertDecisions(c.UserContext(), rows); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "insert failed",
-			"code":  "WAF_INGEST_DB",
-		})
-	}
-	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-		"inserted": len(rows),
-	})
-}
-
-// wafIngestRows maps a legacy HTTP ingest batch to waf_decisions rows,
-// applying the control-plane redaction of gRPC ingest: this
-// payload carries no match source, headers or query field, so every
-// secret-named query parameter of the URI and every secret-named field of the
-// body preview is redacted (path parameters keep payload-like values).
-func wafIngestRows(projectID, agentID string, decisions []wafIngestDecision) []repository.WAFDecision {
-	rows := make([]repository.WAFDecision, 0, len(decisions))
-	none := domain.MatchEvidence{}
-	for _, d := range decisions {
-		rows = append(rows, repository.WAFDecision{
-			ProjectID:     projectID,
-			AgentID:       agentID,
-			AppID:         d.AppID,
-			Host:          d.Host,
-			Method:        d.Method,
-			URI:           domain.RedactDecisionURI(d.URI, none),
-			RemoteAddr:    d.RemoteAddr,
-			UserAgent:     d.UserAgent,
-			ContentType:   d.ContentType,
-			Action:        d.Action,
-			Score:         d.Score,
-			Categories:    d.Categories,
-			CWE:           d.CWE,
-			MatchDetail:   d.MatchDetail,
-			AnalyzeMethod: domain.CanonicalAnalyzeMethod(d.AnalyzeMethod),
-			BodySize:      d.BodySize,
-			LatencyUS:     d.LatencyUS,
-			BodyPreview:   domain.RedactDecisionBody(d.BodyPreview, d.ContentType, none),
-			EventTime:     d.EventTime,
-			Coverage:      d.Coverage,
-			Status:        d.Status,
-		})
-	}
-	return rows
 }
 
 // ── User-facing app binding ───────────────────────────────────────────────

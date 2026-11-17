@@ -127,7 +127,7 @@ func genericErrorCode(status int) string {
 // for the deprecated ?token=<JWT> carrier on SSE endpoints. The
 // dashboard uses single-use stream tickets, so ?token= is refused by default;
 // "allow" turns it back on for an old client (each use logged, answered with a
-// Deprecation header). Agents authenticate with mTLS and X-Agent-Key, never an
+// Deprecation header). Agents authenticate with mTLS and X-Wafio-Host-Key, never an
 // SSE query string.
 func sseQueryTokenAllowed() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("WAFIO_SSE_QUERY_TOKEN"))) {
@@ -286,7 +286,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	hostEnrollH := &handlers.HostEnrollHandler{Svc: enrollment}
 	app.Post("/api/internal/host-enroll", rateEnrollByIP, hostEnrollH.Enroll)
 
-	// ── Agent ingestion endpoints (authenticated via X-Agent-Key, NOT JWT) ──
+	// ── Agent ingestion endpoints (authenticated via X-Wafio-Host-Key, NOT JWT) ──
 	// Must be registered BEFORE the JWT-protected /api group to avoid JWT middleware interception.
 	// Rate-limited per source IP to prevent bearer-token brute force; the
 	// limiter runs before auth so a flood of invalid keys can't exhaust
@@ -299,18 +299,11 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	ingestAPI := app.Group("/api/internal/host", rateAgentByIP, hostIngest.RequireAgentKey())
 	ingestAPI.Post("/ingest", hostIngest.Ingest)
 
-	// WAF agents pull their app bundle and push decision telemetry here.
-	// RequireAgentKey middleware is shared with the host ingest path; the
-	// agents table carries a `kind` column (host|waf) — handlers ignore
-	// kind for now but it becomes relevant once per-kind quotas land.
 	wafAgent := &handlers.WAFAgentHandler{Repo: repo, OverviewCache: handlers.NewOverviewCache(), GeoEnricher: geoEnricher}
 	if agentServer != nil {
 		wafAgent.AgentServer = agentServer
 	}
 	wafAgent.WarmOverviewCache(1440) // pre-warm with 24h window (common dashboard default)
-	wafAgentAPI := app.Group("/api/internal/waf", rateAgentByIP, hostIngest.RequireAgentKey())
-	wafAgentAPI.Get("/bundle", wafAgent.Bundle)
-	wafAgentAPI.Post("/ingest", wafAgent.Ingest)
 
 	// Public invite info endpoint — must be registered BEFORE the JWT group.
 	inviteH := &handlers.InviteHandler{Repo: repo, Mail: mailSettings}
@@ -436,7 +429,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	hostAPI.Get("/connections", rateReadByUser, hostH.ListConnections)
 	hostAPI.Get("/bandwidth", rateReadByUser, hostH.ListBandwidth)
 	hostAPI.Get("/events", rateReadByUser, hostH.GetEvents)
-	// Port Policy endpoints (enterprise ingress/egress port firewall)
+	// Port Policy endpoints (ingress/egress port firewall)
 	hostAPI.Get("/port-policies", rateReadByUser, hostH.ListPortPolicies)
 	hostAPI.Post("/port-policies", RequireProjectAccess(repo, "member"), rateWriteByUser, hostH.AddPortPolicy)
 	hostAPI.Delete("/port-policies", RequireProjectAccess(repo, "member"), rateWriteByUser, hostH.DeletePortPolicy)
@@ -553,7 +546,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	pViewer.Get("/waf-events/timeline", rateReadByUser, wafAgent.ProjectTimeline)
 	pViewer.Get("/waf-events/top/:dim", rateReadByUser, wafAgent.ProjectTop)
 
-	// ── Hosts (first-class entity for Pro / Enterprise self-hosted fleet) ──
+	// ── Hosts (first-class entity of the self-hosted fleet) ──
 	fleetSvc := &application.HostFleet{Store: repo.HostFleet, ControlPlaneVersion: currentVersion}
 	hostsH := &handlers.HostsHandler{Repo: repo, FleetSvc: fleetSvc}
 	if agentServer != nil {
@@ -658,7 +651,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	// GET /api/users/search was removed: it listed every
 	// account across tenants to any authenticated user and had no caller.
 
-	// ── Fleet-wide agent management (enterprise) ──
+	// ── Fleet-wide agent management ──
 	agentMgrH := &handlers.AgentManagerHandler{Repo: repo}
 	if agentServer != nil {
 		agentMgrH.AgentServer = agentServer

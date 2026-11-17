@@ -355,7 +355,6 @@ var contractSweepSkip = map[string]string{
 	"GET /api/projects/{id}/agent-decisions/stream": "endless SSE stream: decision frames (with and without categories) in handlers/agent_stream_contract_test.go, stream-closed in handlers/stream_guard_test.go, stored in handlers/agent_stream_stored_test.go",
 	"GET /api/projects/{id}/waf/stream":             "endless SSE stream: its only events, agents and stream-closed, in handlers/api_contract_test.go and handlers/stream_guard_test.go",
 	"GET /api/projects/{id}/host/stream":            "endless SSE stream: every event (status, metrics, hostinfo, stats, trace, events, enforcement, connections, bandwidth, stream-closed) from seeded telemetry in handlers/host_stream_contract_db_test.go",
-	"GET /api/internal/waf/bundle":                  "agent ingest route behind RequireAgentKey with an enrolled WAF agent identity; not a dashboard read",
 }
 
 // The sweep: NewFiberApp over the test database with a seeded project, every

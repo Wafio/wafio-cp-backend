@@ -168,8 +168,6 @@ func TestIngestRoutesNotBehindJWT(t *testing.T) {
 	app := newTestFiberApp(t)
 	for _, rt := range []struct{ method, path string }{
 		{http.MethodPost, "/api/internal/host/ingest"},
-		{http.MethodGet, "/api/internal/waf/bundle"},
-		{http.MethodPost, "/api/internal/waf/ingest"},
 		// Host-key enrollment: public, before the JWT group.
 		{http.MethodPost, "/api/internal/host-enroll"},
 	} {

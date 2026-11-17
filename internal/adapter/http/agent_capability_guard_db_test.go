@@ -3,9 +3,7 @@ package httpadapter
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
@@ -14,7 +12,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
-	"github.com/wafio/wafio-cp-backend/internal/adapter/http/handlers"
 	"github.com/wafio/wafio-cp-backend/internal/engine"
 )
 
@@ -453,63 +450,4 @@ func TestDBScriptRuleRefusedWhenEveryAgentCannotRunIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantStatus(t, "app without agent", create(scriptRuleBody("free", true)), fiber.StatusCreated, "")
-}
-
-// GET /api/internal/waf/bundle, which no agent calls, returns rules_json rewritten like a stream bundle,
-// without the v1 keys, body_limit_bytes or exclude_rules. Stored documents are not rewritten.
-func TestDBWAFBundleRouteServesNormalizedRules(t *testing.T) {
-	c := newCapsFixture(t)
-	ctx := context.Background()
-	v1 := []byte(`{"semantic_policies":{"skip_coraza_when_clean":false,"disable_semantic":true,"disable_rule_based":true},` +
-		`"request_body_in_memory_limit":"1M","path_exceptions":[{"path":"/a","match":"exact","disable_rule_based":true}]}`)
-	if err := c.repo.Project.UpsertConfig(ctx, c.project, v1, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.repo.WAF.UpsertAppConfig(ctx, c.appID, v1, 2); err != nil {
-		t.Fatal(err)
-	}
-	app := fiber.New()
-	h := &handlers.WAFAgentHandler{Repo: c.repo}
-	app.Get("/bundle", func(f *fiber.Ctx) error {
-		f.Locals("agent_id", c.agentID)
-		return h.Bundle(f)
-	})
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/bundle", nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("bundle: %d %s", resp.StatusCode, raw)
-	}
-	for _, old := range []string{"skip_coraza_when_clean", "disable_semantic", "disable_rule_based", "request_body_in_memory_limit", "body_limit_bytes", "exclude_rules"} {
-		if strings.Contains(string(raw), old) {
-			t.Errorf("the bundle still has %s: %s", old, raw)
-		}
-	}
-	var got struct {
-		Rules map[string]any `json:"rules_json"`
-		Apps  []struct {
-			Rules map[string]any `json:"rules_json"`
-		} `json:"apps"`
-	}
-	if err := json.Unmarshal(raw, &got); err != nil || len(got.Apps) != 1 {
-		t.Fatalf("bundle shape: %v %s", err, raw)
-	}
-	off := func(rules map[string]any) any {
-		sp, _ := rules["semantic_policies"].(map[string]any)
-		return sp["inspection_off"]
-	}
-	if off(got.Rules) != true || off(got.Apps[0].Rules) != true {
-		t.Errorf("a stored disable_semantic must be served as inspection_off: %s", raw)
-	}
-	var stored map[string]any
-	cfg, err := c.repo.Project.GetConfig(ctx, c.project)
-	if err != nil || json.Unmarshal(cfg.RulesJSON, &stored) != nil {
-		t.Fatalf("stored config: %v", err)
-	}
-	if sp, _ := stored["semantic_policies"].(map[string]any); sp["disable_semantic"] != true {
-		t.Errorf("the stored document must keep its v1 keys: %v", stored)
-	}
 }
