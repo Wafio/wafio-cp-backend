@@ -37,33 +37,6 @@ func DefaultContentScanConfig() *ContentScanConfig {
 	}
 }
 
-// ScannedFile records details and scanning outcome for an uploaded file.
-type ScannedFile struct {
-	Database    *bloom.DatabaseStatus `json:"database,omitempty"`
-	Status      string                `json:"status"`
-	Reason      string                `json:"reason,omitempty"`
-	Source      string                `json:"source,omitempty"`
-	FieldName   string                `json:"field,omitempty"`
-	Filename    string                `json:"filename,omitempty"`
-	Size        int64                 `json:"bytes_read"`
-	ContentType string                `json:"content_type,omitempty"`
-	SHA256      [32]byte              `json:"-"`
-	SHA256Hex   string                `json:"sha256,omitempty"`
-	IsMalware   bool                  `json:"matched,omitempty"`
-	ThreatName  string                `json:"signature,omitempty"`
-}
-
-func FormatContentScanDetail(file *ScannedFile) string {
-	if file == nil {
-		return "malware_hash"
-	}
-	name := file.Filename
-	if name == "" {
-		name = file.FieldName
-	}
-	return fmt.Sprintf("malware_hash:%s (%s, %s, %d bytes)", file.SHA256Hex, file.ThreatName, name, file.Size)
-}
-
 // BuiltinMalwareSignatures contains only the reproducible EICAR antivirus test file.
 // Source: https://www.eicar.org/download-anti-malware-testfile/ (68-byte test string).
 // Unattributed webshell hashes are deliberately excluded from automatic blocking.
@@ -163,14 +136,6 @@ func reloadDefaultMalwareLocked() error {
 	}
 	defaultEngineInfo = info
 	return nil
-}
-
-func SetDefaultMalwareEngine(e *bloom.MalwareHashEngine) {
-	defaultEngineMu.Lock()
-	defer defaultEngineMu.Unlock()
-	defaultEngine = e
-	defaultEnginePath = ""
-	defaultEngineInfo = nil
 }
 
 // prepare validates and compiles project lists once when loading configuration.

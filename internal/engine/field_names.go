@@ -43,6 +43,23 @@ func appendFormUnescape(b []byte, s string) []byte {
 	return b
 }
 
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func unhex(c byte) byte {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0'
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10
+	default:
+		return 0
+	}
+}
+
 // FormKeyMatcher matches form field names against a field (login protection's
 // identifier, path field rules, custom rule conditions) the ways frameworks
 // bind them: case-insensitively (ASP.NET model binding), after

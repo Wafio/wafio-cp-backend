@@ -75,12 +75,10 @@ type WAFRuleContext struct {
 	BodySize      int64             // full request body size in bytes
 	BodyTruncated bool              // true when Body was truncated at the 4KB cap
 	Parsed        *ParsedBody       // content-type-aware body parse (parsed_body.go)
-	// RegexBudget bounds this request's regex condition work; shared
-	// by WithPath copies, so both path readings draw on one budget. nil =
-	// unlimited.
+	// RegexBudget bounds this request's regex condition work. nil = unlimited.
 	RegexBudget *RegexBudget
 
-	// Post-decision (only set before EvalScriptRules)
+	// Post-decision context, read by the score, action and detected conditions.
 	Score    float64
 	Action   string
 	Detected []string
@@ -130,8 +128,8 @@ func CompileScript(script string) error {
 
 // EvalGUIRules returns the first matching enabled GUI rule in stable order
 // (priority asc, created_at asc, id asc), or ("", "") if none matches. It is
-// the match probe of the rule editor's dry run; the request pipeline uses
-// EvalGUIRulesOnPaths, where log and challenge rules do not end evaluation.
+// the match probe of the rule editor's dry run. In the agent's request
+// pipeline, log and challenge rules do not end evaluation.
 func EvalGUIRules(rules []CustomGUIRule, ctx *WAFRuleContext) (action string, ruleID string) {
 	for _, r := range sortByOrder(rules, func(r CustomGUIRule) ruleOrder {
 		return ruleOrder{priority: r.Priority, createdAt: r.CreatedAt, id: r.ID}
@@ -146,71 +144,16 @@ func EvalGUIRules(rules []CustomGUIRule, ctx *WAFRuleContext) (action string, ru
 	return "", ""
 }
 
-// Production wall-clock budget for script rules on the inline request path.
-// The uddin interpreter needs ~3ms cold-start per execution; 5ms per script
-// gives adequate headroom on an unloaded host.
+// Wall-clock budget of script rules in the agent that runs them. It is part of the sandbox
+// contract that SandboxProfile writes out.
 const (
 	DefaultScriptRuleTimeout = 5 * time.Millisecond  // per script
 	DefaultScriptRulesBudget = 15 * time.Millisecond // all script rules of one request
 )
 
-// ScriptBudget bounds the wall-clock time script rules may spend on one
-// request. A script that overruns PerScript is stopped, and rules still
-// pending once Total is spent are skipped; both make the result Incomplete
-// (never a silent "no action"). A zero or negative field falls back to
-// its production default.
-type ScriptBudget struct {
-	PerScript time.Duration
-	Total     time.Duration
-}
-
-// DefaultScriptBudget is the production budget used by EvalScriptRules.
-func DefaultScriptBudget() ScriptBudget {
-	return ScriptBudget{PerScript: DefaultScriptRuleTimeout, Total: DefaultScriptRulesBudget}
-}
-
-// ScriptResult is the outcome of evaluating a request's script rules.
-type ScriptResult struct {
-	// Action is the first decisive verdict ("block", "allow" or "log");
-	// "" when no rule decided.
-	Action string
-	RuleID string
-	// Incomplete reports that at least one enabled rule did not finish:
-	// per-script timeout, sandbox limit, panic, runtime error, or skipped
-	// because the request's script budget ran out. The rule might have
-	// blocked, so callers must not treat the request as script-clean: the
-	// verdict is LOG at worst and coverage gets the flags in Coverage. An
-	// "allow" from a rule after the incomplete one is dropped for the same
-	// reason; "block" and "log" still apply.
-	Incomplete     bool
-	IncompleteRule string
-	// IncompleteReason (first unfinished rule): "timeout", "budget", "busy",
-	// "panic", "error", or a sandbox limit ("op_limit", "call_depth",
-	// "nesting", "value_size", "value_depth", "memory", "regex_size",
-	// "regex_work", "canceled").
-	IncompleteReason string
-	// ContentIncomplete: at least one unfinished rule stopped for a reason
-	// the request itself can cause — a sandbox limit, a runtime error or a
-	// panic — not for load ("timeout", "budget", "busy", "canceled": wall
-	// clock and in-flight cap). Only such a gap may raise a verdict to BLOCK
-	// under semantic_policies.on_uninspected: block; a load-induced
-	// one stays LOG, or any client that keeps the sandbox busy could get
-	// other clients' requests refused.
-	ContentIncomplete bool
-	// Coverage lists the coverage flags of every unfinished rule,
-	// comma-separated: CoverageScriptError for a runtime error,
-	// CoverageScriptTimeout for anything else.
-	Coverage string
-}
-
-// Coverage flags of a verdict whose script rules did not all finish.
-const (
-	CoverageScriptTimeout = "script_timeout" // timeout, sandbox limit, panic or budget
-	CoverageScriptError   = "script_error"   // the script failed with a runtime error
-	// CoverageRegexBudget: the request's regex budget ran out and later
-	// regex conditions of custom GUI and tuning rules were not evaluated.
-	CoverageRegexBudget = "regex_budget"
-)
+// CoverageRegexBudget is the coverage flag of a verdict whose request regex budget ran out: later
+// regex conditions of custom GUI and tuning rules were not evaluated.
+const CoverageRegexBudget = "regex_budget"
 
 func matchGUIRule(r *CustomGUIRule, ctx *WAFRuleContext) bool {
 	if len(r.Conditions) == 0 {

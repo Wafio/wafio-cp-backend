@@ -13,11 +13,9 @@ import (
 // 2. security-data/ja4/ja4.txt
 // 3. Fallback built-in list of known automated tools and scanners
 var (
-	defaultJA4Mu        sync.RWMutex
-	defaultJA4Once      sync.Once
-	defaultJA4List      []string
-	defaultJA4AllowOnce sync.Once
-	defaultJA4AllowList []string
+	defaultJA4Mu   sync.RWMutex
+	defaultJA4Once sync.Once
+	defaultJA4List []string
 )
 
 func loadJA4Blocklist() []string {
@@ -111,73 +109,6 @@ func loadJA4Blocklist() []string {
 	}
 }
 
-func loadJA4Allowlist() []string {
-	candidates := []string{}
-	if p := os.Getenv("WAFIO_JA4_ALLOWLIST_FILE"); p != "" {
-		candidates = append(candidates, filepath.Clean(p))
-	}
-	candidates = append(candidates, filepath.Clean(filepath.Join("security-data", "ja4", "ja4_allowlist.txt")))
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "security-data", "ja4", "ja4_allowlist.txt"))
-	}
-	var f *os.File
-	for _, path := range candidates {
-		var err error
-		f, err = os.Open(path)
-		if err == nil {
-			break
-		}
-		f = nil
-	}
-	if f != nil {
-		defer func() { _ = f.Close() }() // read-only file
-		seen := make(map[string]struct{})
-		var out []string
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 0, 16*1024), 512*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			hash := line
-			if idx := strings.IndexAny(line, " \t"); idx > 0 {
-				hash = line[:idx]
-			}
-			hash = strings.TrimSpace(strings.ToLower(hash))
-			if hash == "" {
-				continue
-			}
-			if _, ok := seen[hash]; !ok {
-				seen[hash] = struct{}{}
-				out = append(out, hash)
-			}
-		}
-		if len(out) > 0 {
-			return out
-		}
-	}
-
-	// Built-in seed signatures for legitimate modern browsers
-	return []string{
-		// Google Chrome & Chromium
-		"t13d1516h2_8daaf6152771_b92d69e0f5f8",
-		"t13d1517h2_8daaf6152771_b92d69e0f5f8",
-		"t13d1516h2_8daaf6152771_b0da82dd1658",
-		"t13d1516h2_8daaf6152771_f569b91c8120",
-		"t13d1516h2_8daaf6152771_cd02fb6d0e88",
-		"t13d1516h2_8daaf6152771_a18f9d0c2e34",
-		// Mozilla Firefox
-		"t13d1715h2_5a787ecb3204_0457b8fb24cf",
-		"t13d1715h2_5a787ecb3204_1740fb876b51",
-		"t13d1715h2_5a787ecb3204_bb193a02fe81",
-		// Apple Safari (WebKit)
-		"t13d2013h2_99c64a594897_83cdad49d794",
-		"t13d2013h2_99c64a594897_7a2f520b1341",
-		"t13d1912h2_99c64a594897_83cdad49d794",
-	}
-}
-
 // DefaultJA4Blocklist returns default JA4 fingerprints for automated bots, scripts, and scanners.
 func DefaultJA4Blocklist() []string {
 	defaultJA4Mu.RLock()
@@ -199,34 +130,11 @@ func DefaultJA4Blocklist() []string {
 	return defaultJA4List
 }
 
-// DefaultJA4Allowlist returns default JA4 fingerprints for legitimate web browsers.
-func DefaultJA4Allowlist() []string {
-	defaultJA4Mu.RLock()
-	list := defaultJA4AllowList
-	defaultJA4Mu.RUnlock()
-	if list != nil {
-		return list
-	}
-
-	defaultJA4AllowOnce.Do(func() {
-		res := loadJA4Allowlist()
-		defaultJA4Mu.Lock()
-		defaultJA4AllowList = res
-		defaultJA4Mu.Unlock()
-	})
-
-	defaultJA4Mu.RLock()
-	defer defaultJA4Mu.RUnlock()
-	return defaultJA4AllowList
-}
-
-// ReloadDefaultJA4 re-reads the JA4 blocklist and allowlist from disk immediately.
+// ReloadDefaultJA4 re-reads the JA4 blocklist from disk immediately.
 func ReloadDefaultJA4() {
 	blockList := loadJA4Blocklist()
-	allowList := loadJA4Allowlist()
 
 	defaultJA4Mu.Lock()
 	defaultJA4List = blockList
-	defaultJA4AllowList = allowList
 	defaultJA4Mu.Unlock()
 }

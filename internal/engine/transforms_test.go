@@ -126,15 +126,3 @@ func TestTransforms_InvalidInputPassthrough(t *testing.T) {
 		})
 	}
 }
-
-func TestApplyTransforms_OrderAndError(t *testing.T) {
-	// ordered application: url_decode then lowercase
-	got, err := engine.ApplyTransforms("%41B", []string{"url_decode", "lowercase"})
-	if err != nil || got != "ab" {
-		t.Errorf("ApplyTransforms chained = (%q, %v), want (\"ab\", nil)", got, err)
-	}
-	// unknown name errors
-	if _, err := engine.ApplyTransforms("x", []string{"lowercase", "nope"}); err == nil {
-		t.Error("ApplyTransforms should error on unknown transform name")
-	}
-}

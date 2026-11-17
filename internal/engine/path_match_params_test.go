@@ -70,9 +70,9 @@ func TestPathExceptionMatrixParams(t *testing.T) {
 // different directory.
 func TestPathExceptionTomcatDotDotSemicolon(t *testing.T) {
 	const (
-		corpusAPI     = "/api/v1/..;/..;/etc/passwd"      // lfi.yaml atk_tomcat_path_param_api
-		corpusWindows = "/public/..;/..;/windows/win.ini" // lfi.yaml atk_tomcat_path_param_windows
-		corpusStatic  = "/static/..;/..;/..;/etc/shadow"  // lfi.yaml atk_tomcat_path_param_static
+		corpusAPI     = "/api/v1/..;/..;/etc/passwd"      // Tomcat path parameter traversal
+		corpusWindows = "/public/..;/..;/windows/win.ini" // Tomcat path parameter traversal
+		corpusStatic  = "/static/..;/..;/..;/etc/shadow"  // Tomcat path parameter traversal
 	)
 	exc := loadPathMatchExceptions(t, `[
 		{"path":"/api/v1","inspection_off":true},
@@ -101,9 +101,9 @@ func TestPathExceptionTomcatDotDotSemicolon(t *testing.T) {
 // the literal reading ("..;" is a plain segment, nginx / Express / PHP) both
 // match, so a "..;" segment can neither walk into an exempted prefix on Tomcat
 // nor out of one on the other backends. A block exception applies when either
-// reading matches. Input: lfi.yaml atk_tomcat_path_param_windows.
+// reading matches. Input: a Tomcat path parameter traversal.
 func TestPathExceptionDotDotSemicolonExemptionBothReadings(t *testing.T) {
-	const corpusWindows = "/public/..;/..;/windows/win.ini" // lfi.yaml atk_tomcat_path_param_windows
+	const corpusWindows = "/public/..;/..;/windows/win.ini" // Tomcat path parameter traversal
 	for _, tc := range []struct {
 		name string
 		rule string
@@ -169,43 +169,5 @@ func TestPathExceptionTraversalNormalizationUnchanged(t *testing.T) {
 		if got := matchedExceptionPath(tc.uri, exc); got != tc.want {
 			t.Errorf("MatchPathException(%q) matched %q, want %q", tc.uri, got, tc.want)
 		}
-	}
-}
-
-// TestMatchPathExceptionWithFieldRulesParamsAndCase checks the field-rule
-// matcher shares the path normalization: parameters stripped, case folded per
-// exception, exceptions without field rules and disabled ones skipped.
-func TestMatchPathExceptionWithFieldRulesParamsAndCase(t *testing.T) {
-	exc := loadPathMatchExceptions(t, `[
-		{"path":"/","field_rules":[{"field":"password","source":"any","action":"mask"}]},
-		{"path":"/uploads","inspection_off":true},
-		{"path":"/api/login","match":"exact","case_insensitive":true,"field_rules":[{"field":"token","source":"any","action":"mask"}]},
-		{"path":"/api/profile","match":"exact","disabled":true,"field_rules":[{"field":"ssn","source":"any","action":"mask"}]}
-	]`)
-	cases := []struct {
-		uri       string
-		wantPath  string
-		wantField string
-	}{
-		// /uploads matches but has no field rules → falls through to "/".
-		{"/uploads;v=1/a.png", "/", "password"},
-		{"/api/login;jsessionid=ABC123", "/api/login", "token"},
-		{"/API/Login;jsessionid=ABC123?next=/", "/api/login", "token"},
-		// Disabled exception skipped → falls through to "/".
-		{"/api/profile", "/", "password"},
-	}
-	for _, tc := range cases {
-		got := engine.MatchPathExceptionWithFieldRules(tc.uri, exc)
-		if got == nil {
-			t.Errorf("MatchPathExceptionWithFieldRules(%q) = nil, want %q", tc.uri, tc.wantPath)
-			continue
-		}
-		if got.Path != tc.wantPath || len(got.FieldRules) == 0 || got.FieldRules[0].Field != tc.wantField {
-			t.Errorf("MatchPathExceptionWithFieldRules(%q) = %q %+v, want %q with field %q",
-				tc.uri, got.Path, got.FieldRules, tc.wantPath, tc.wantField)
-		}
-	}
-	if got := engine.MatchPathExceptionWithFieldRules("/x", nil); got != nil {
-		t.Errorf("nil exceptions: got %+v, want nil", got)
 	}
 }

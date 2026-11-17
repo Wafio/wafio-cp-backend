@@ -2,13 +2,6 @@ package domain
 
 import "time"
 
-// Incident status values.
-const (
-	IncidentOpen         = "open"
-	IncidentAcknowledged = "acknowledged"
-	IncidentResolved     = "resolved"
-)
-
 // HostIncident is a triage unit grouping critical/high runtime-security events
 // by (project, host, MITRE technique, process). It carries persistent triage
 // state (ack/resolve) over the append-only host_security_events telemetry.

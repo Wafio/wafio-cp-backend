@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"strconv"
 	"strings"
 	"unicode"
@@ -50,19 +49,6 @@ var ValidTransforms = map[string]Transform{
 	"sha1":                 sha1Hex,
 	"sha256":               sha256Hex,
 	"length":               func(s string) string { return strconv.Itoa(len(s)) },
-}
-
-// ApplyTransforms applies transforms in order. Unknown names abort with an
-// error (save-time validation path); use applyTransformsSafe for evaluation.
-func ApplyTransforms(input string, names []string) (string, error) {
-	for _, name := range names {
-		t, ok := ValidTransforms[name]
-		if !ok {
-			return input, fmt.Errorf("unknown transform %q", name)
-		}
-		input = t(input)
-	}
-	return input, nil
 }
 
 // applyTransformsSafe applies transforms at evaluation time, silently skipping

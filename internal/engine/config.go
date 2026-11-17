@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -33,12 +32,6 @@ type CategoryMeta struct {
 
 // CategoryConfig is the file format: category name -> meta.
 type CategoryConfig map[string]CategoryMeta
-
-// Thresholds are score limits for BLOCK and LOG decisions (from config).
-type Thresholds struct {
-	Block int `json:"block"` // score >= Block → BLOCK (403)
-	Log   int `json:"log"`   // score >= Log → LOG (200 + log); score < Log → ALLOW
-}
 
 // Default threshold when not present in file.
 const (
@@ -67,9 +60,8 @@ func DefaultRulesJSON() []byte {
 	return []byte(defaultRulesJSON)
 }
 
-// prefixToCategory maps the key of a RuleMap entry to its category, through which the semantic engines
-// read their base score (SemanticScanConfigFrom). 921 ProtocolAttack is the score of the header
-// injection detector. The numbers are only keys.
+// prefixToCategory maps the key of a RuleMap entry to its category. 921 ProtocolAttack is the score of
+// the header injection detector. The numbers are only keys.
 var prefixToCategory = map[int]string{
 	921: "ProtocolAttack",
 	930: "LFI",
@@ -89,13 +81,13 @@ type SIEMConfig struct {
 }
 
 // BlockPolicyConfig is the "block_policy" block in rules.json (optional). E.g. block client 1h after 5 blocks.
-// KeyFields: composite key (AND). Block dihitung per kombinasi nilai; e.g. ["remote_addr", "user_agent"].
-// Field yang didukung: remote_addr, user_agent, host, request_id, header:Nama-Header (case-sensitive).
+// KeyFields: composite key (AND). Blocks are counted per combination of values; e.g. ["remote_addr", "user_agent"].
+// Supported fields: remote_addr, user_agent, host, request_id, header:Header-Name (case-sensitive).
 type BlockPolicyConfig struct {
 	Enabled           bool     `json:"enabled"`
 	BlockAfterNBlocks int      `json:"block_after_n_blocks"` // e.g. 5
 	BlockDurationSec  int      `json:"block_duration_sec"`   // e.g. 3600 (1 hour)
-	KeyField          string   `json:"key_field"`            // deprecated: gunakan key_fields
+	KeyField          string   `json:"key_field"`            // deprecated: use key_fields
 	KeyFields         []string `json:"key_fields"`           // e.g. ["remote_addr", "user_agent"]
 }
 
@@ -105,9 +97,6 @@ type SSRFBlocklistConfig struct {
 	SSRFBlocklistPath string   `json:"ssrf_blocklist_path"` // optional: path to file on server (one host/suffix per line)
 	SSRFBlocklist     []string `json:"ssrf_blocklist"`      // optional: lines from dashboard (host or .suffix per line); preferred over path
 }
-
-// FastScanConfig is a deprecated alias for SSRFBlocklistConfig.
-type FastScanConfig = SSRFBlocklistConfig
 
 // SemanticPoliciesConfig is the "semantic_policies" block in rules.json (optional).
 // Allows per-project tuning of semantic engine evidence thresholds.
@@ -129,7 +118,7 @@ type SemanticPoliciesConfig struct {
 	ProtoPollution *SemanticPolicyJSON `json:"proto_pollution"`
 	// JWT (alg:none / unsigned / jku-x5u / kid traversal, block-tier) and
 	// GraphQL introspection (LOG-tier) read disabled and base_score only
-	// (0–9999, 0 = off, absent = JWTBaseScore / GraphQLBaseScore).
+	// (0–9999, 0 = off, absent = the agent's default).
 	JWT     *SemanticPolicyJSON `json:"jwt"`
 	GraphQL *SemanticPolicyJSON `json:"graphql"`
 	// The four LOG-tier visibility detectors read disabled only: they have no
@@ -199,7 +188,7 @@ type SemanticPolicyJSON struct {
 	// decision-scale score of their block-tier verdicts, independent of the
 	// SQLi/Java categories they used to borrow it from. Their block_threshold
 	// stays on the evidence scale, so there is no legacy fallback for them:
-	// absent = engine default (NoSQLBaseScore etc.), 0 = engine disabled.
+	// absent = the engine's default, 0 = engine disabled.
 	//
 	// SQL, XSS, CMD, PHP, Python, LFI, SSRF and Java read it too: set,
 	// it replaces the base score of the category the engine otherwise falls
@@ -265,17 +254,6 @@ func (j *SemanticPolicyJSON) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ownBaseScore returns the engine's own semantic_policies.<engine>.base_score,
-// clamped at 0 (a negative value is rejected by validation and read as off),
-// or nil when the policy or the key is absent.
-func (j *SemanticPolicyJSON) ownBaseScore() *int {
-	if j == nil || j.BaseScore == nil {
-		return nil
-	}
-	v := max(*j.BaseScore, 0)
-	return &v
-}
-
 // thresholdPolicies returns every engine whose block_threshold/soft_threshold
 // live on the 0-100 evidence scale. LDAP and prototype pollution are excluded
 // deliberately — they are score-scale and validated separately.
@@ -299,142 +277,6 @@ func (s *SemanticPoliciesConfig) thresholdPolicies() map[string]*SemanticPolicyJ
 	}
 }
 
-// ToSQLPolicy converts JSON policy to SQLSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToSQLPolicy() *SQLSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &SQLSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToXSSPolicy converts JSON policy to XSSSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToXSSPolicy() *XSSSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &XSSSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToCMDPolicy converts JSON policy to CMDSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToCMDPolicy() *CMDSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &CMDSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToLFIPolicy converts JSON policy to LFISemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToLFIPolicy() *LFISemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &LFISemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToSSRFPolicy converts JSON policy to SSRFSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToSSRFPolicy() *SSRFSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &SSRFSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToPHPPolicy converts JSON policy to PHPSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToPHPPolicy() *PHPSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &PHPSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToPythonPolicy converts JSON policy to PySemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToPythonPolicy() *PySemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &PySemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToJavaPolicy converts JSON policy to JavaSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToJavaPolicy() *JavaSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &JavaSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-	}
-}
-
-// ToNoSQLPolicy converts JSON policy to NoSQLSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToNoSQLPolicy() *NoSQLSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &NoSQLSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-		BaseScore:      j.BaseScore,
-	}
-}
-
-// ToSSTIPolicy converts JSON policy to SSTISemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToSSTIPolicy() *SSTISemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &SSTISemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-		BaseScore:      j.BaseScore,
-	}
-}
-
-// ToXXEPolicy converts JSON policy to XXESemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToXXEPolicy() *XXESemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &XXESemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-		BaseScore:      j.BaseScore,
-	}
-}
-
-// ToDeserPolicy converts JSON policy to DeserSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToDeserPolicy() *DeserSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &DeserSemanticPolicy{
-		BlockThreshold: j.BlockThreshold,
-		SoftThreshold:  j.SoftThreshold,
-		BaseScore:      j.BaseScore,
-	}
-}
-
 // resolveBaseScore returns the score-scale value for the engines that emit a
 // fixed score. Prefers base_score; falls back to the legacy block_threshold
 // overload so pre-existing project configs keep working (an explicit 0 there
@@ -451,23 +293,6 @@ func (j *SemanticPolicyJSON) resolveBaseScore(def int) int {
 	return def
 }
 
-// ToLDAPPolicy converts JSON policy to LDAPSemanticPolicy. Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToLDAPPolicy() *LDAPSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &LDAPSemanticPolicy{BaseScore: j.resolveBaseScore(LDAPBaseScore)}
-}
-
-// ToProtoPollutionPolicy converts JSON policy to ProtoPollutionSemanticPolicy.
-// Returns nil if j is nil.
-func (j *SemanticPolicyJSON) ToProtoPollutionPolicy() *ProtoPollutionSemanticPolicy {
-	if j == nil {
-		return nil
-	}
-	return &ProtoPollutionSemanticPolicy{BaseScore: j.resolveBaseScore(ProtoPollutionBaseScore)}
-}
-
 // L7FloodConfig is the "l7_flood" block in rules.json (optional). L7 HTTP flood protection: block client when request count in window exceeds limit.
 type L7FloodConfig struct {
 	Enabled     bool     `json:"enabled"`
@@ -478,31 +303,6 @@ type L7FloodConfig struct {
 	// AllowIPs exempts trusted clients (IPs/CIDRs, matched against the client
 	// IP from RemoteAddr) from the flood limit only; every other check applies.
 	AllowIPs []string `json:"allow_ips"`
-
-	compiledAllowNets []net.IPNet // set by the parser; not serialized
-}
-
-// IPExempt reports whether the client in remoteAddr ("ip" or "ip:port") is
-// in AllowIPs. Falls back to string parsing when the parser did not compile
-// the list (config built in code).
-func (f *L7FloodConfig) IPExempt(remoteAddr string) bool {
-	if len(f.AllowIPs) == 0 {
-		return false
-	}
-	clientIP := geo.ParseClientIP(remoteAddr)
-	if f.compiledAllowNets == nil {
-		return geo.IPInList(clientIP, f.AllowIPs)
-	}
-	ip := net.ParseIP(clientIP)
-	if ip == nil {
-		return false
-	}
-	for i := range f.compiledAllowNets {
-		if f.compiledAllowNets[i].Contains(ip) {
-			return true
-		}
-	}
-	return false
 }
 
 // GeoConfig is the "geo" block in rules.json (optional). Per-client geoblocking: country and/or IP.
@@ -516,120 +316,6 @@ type GeoConfig struct {
 	AllowCountries []string `json:"allow_countries"` // whitelist: only these allowed
 	BlockIPs       []string `json:"block_ips"`       // IP or CIDR
 	AllowIPs       []string `json:"allow_ips"`       // bypass: allow even if country blocked
-
-	// Pre-compiled by PrepareGeoConfig; not serialized.
-	compiledAllowNets         []net.IPNet
-	compiledBlockNets         []net.IPNet
-	compiledAllowCountriesSet map[string]struct{}
-	compiledBlockCountriesSet map[string]struct{}
-}
-
-// PrepareGeoConfig pre-compiles IP/CIDR lists and country sets in g so that
-// runtime checks require no parsing or allocation. Call once after parsing config.
-func PrepareGeoConfig(g *GeoConfig) {
-	if g == nil {
-		return
-	}
-	g.compiledAllowNets = parseIPNets(g.AllowIPs)
-	g.compiledBlockNets = parseIPNets(g.BlockIPs)
-	g.compiledAllowCountriesSet = normalizeCountrySet(g.AllowCountries)
-	g.compiledBlockCountriesSet = normalizeCountrySet(g.BlockCountries)
-}
-
-func parseIPNets(list []string) []net.IPNet {
-	out := make([]net.IPNet, 0, len(list))
-	for _, s := range list {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if strings.Contains(s, "/") {
-			_, cidr, err := net.ParseCIDR(s)
-			if err == nil {
-				out = append(out, *cidr)
-			}
-		} else {
-			ip := net.ParseIP(s)
-			if ip != nil {
-				bits := 32
-				if ip.To4() == nil {
-					bits = 128
-				}
-				out = append(out, net.IPNet{IP: ip.Mask(net.CIDRMask(bits, bits)), Mask: net.CIDRMask(bits, bits)})
-			}
-		}
-	}
-	return out
-}
-
-func normalizeCountrySet(list []string) map[string]struct{} {
-	m := make(map[string]struct{}, len(list))
-	for _, c := range list {
-		c = strings.ToUpper(strings.TrimSpace(c))
-		if c != "" {
-			m[c] = struct{}{}
-		}
-	}
-	return m
-}
-
-// IPAllowed reports whether parsedIP is in the pre-compiled AllowIPs list.
-// Falls back to string parsing if PrepareGeoConfig was not called.
-func (g *GeoConfig) IPAllowed(parsedIP net.IP) bool {
-	if g.compiledAllowNets != nil {
-		for i := range g.compiledAllowNets {
-			if g.compiledAllowNets[i].Contains(parsedIP) {
-				return true
-			}
-		}
-		return false
-	}
-	return geo.IPInList(parsedIP.String(), g.AllowIPs)
-}
-
-// IPBlocked reports whether parsedIP is in the pre-compiled BlockIPs list.
-// Falls back to string parsing if PrepareGeoConfig was not called.
-func (g *GeoConfig) IPBlocked(parsedIP net.IP) bool {
-	if g.compiledBlockNets != nil {
-		for i := range g.compiledBlockNets {
-			if g.compiledBlockNets[i].Contains(parsedIP) {
-				return true
-			}
-		}
-		return false
-	}
-	return geo.IPInList(parsedIP.String(), g.BlockIPs)
-}
-
-// CountryAllowListed returns true when AllowCountries is non-empty AND country is in it.
-func (g *GeoConfig) CountryAllowListed(country string) bool {
-	if len(g.AllowCountries) == 0 {
-		return false
-	}
-	if g.compiledAllowCountriesSet != nil {
-		_, ok := g.compiledAllowCountriesSet[country]
-		return ok
-	}
-	for _, c := range g.AllowCountries {
-		if strings.ToUpper(strings.TrimSpace(c)) == country {
-			return true
-		}
-	}
-	return false
-}
-
-// CountryBlocked returns true if country is in the pre-compiled BlockCountries set.
-func (g *GeoConfig) CountryBlocked(country string) bool {
-	if g.compiledBlockCountriesSet != nil {
-		_, ok := g.compiledBlockCountriesSet[country]
-		return ok
-	}
-	for _, c := range g.BlockCountries {
-		if strings.ToUpper(strings.TrimSpace(c)) == country {
-			return true
-		}
-	}
-	return false
 }
 
 // PathSemanticOverride allows per-path semantic engine configuration overrides.
@@ -652,7 +338,7 @@ type PathSemanticOverride struct {
 	// JWT and GraphQL read disabled and base_score only, as in
 	// semantic_policies. Switching them off on a path adds no
 	// engine_disabled coverage flag: no other engine covers either, so there
-	// is no gap to report (see EngineSet).
+	// is no gap to report.
 	JWT     *SemanticPolicyJSON `json:"jwt,omitempty"`
 	GraphQL *SemanticPolicyJSON `json:"graphql,omitempty"`
 	// The four visibility detectors read disabled only (absent = inherit,
@@ -684,116 +370,6 @@ func (ov *PathSemanticOverride) UnmarshalJSON(data []byte) error {
 	}
 	*ov = PathSemanticOverride(value)
 	return nil
-}
-
-// ApplyTo applies path policies without mutating the cached global disabled map.
-func (ov *PathSemanticOverride) ApplyTo(cfg *SemanticConfig) {
-	disabled := make(map[string]bool, len(cfg.DisabledEngines))
-	for key, value := range cfg.DisabledEngines {
-		disabled[key] = value
-	}
-	if ov.SQL != nil {
-		cfg.SQLSemanticPolicy = ov.SQL.ToSQLPolicy()
-		disabled["sql"] = ov.SQL.Disabled
-	}
-	if ov.XSS != nil {
-		cfg.XSSSemanticPolicy = ov.XSS.ToXSSPolicy()
-		disabled["xss"] = ov.XSS.Disabled
-	}
-	if ov.CMD != nil {
-		cfg.CMDSemanticPolicy = ov.CMD.ToCMDPolicy()
-		disabled["cmd"] = ov.CMD.Disabled
-	}
-	if ov.PHP != nil {
-		cfg.PHPSemanticPolicy = ov.PHP.ToPHPPolicy()
-		disabled["php"] = ov.PHP.Disabled
-	}
-	if ov.Python != nil {
-		cfg.PythonSemanticPolicy = ov.Python.ToPythonPolicy()
-		disabled["python"] = ov.Python.Disabled
-	}
-	if ov.LFI != nil {
-		cfg.LFISemanticPolicy = ov.LFI.ToLFIPolicy()
-		disabled["lfi"] = ov.LFI.Disabled
-	}
-	if ov.SSRF != nil {
-		cfg.SSRFSemanticPolicy = ov.SSRF.ToSSRFPolicy()
-		disabled["ssrf"] = ov.SSRF.Disabled
-	}
-	if ov.Java != nil {
-		cfg.JavaSemanticPolicy = ov.Java.ToJavaPolicy()
-		disabled["java"] = ov.Java.Disabled
-	}
-	if ov.NoSQL != nil {
-		cfg.NoSQLSemanticPolicy = ov.NoSQL.ToNoSQLPolicy()
-		disabled["nosql"] = ov.NoSQL.Disabled
-	}
-	if ov.SSTI != nil {
-		cfg.SSTISemanticPolicy = ov.SSTI.ToSSTIPolicy()
-		disabled["ssti"] = ov.SSTI.Disabled
-	}
-	if ov.XXE != nil {
-		cfg.XXESemanticPolicy = ov.XXE.ToXXEPolicy()
-		disabled["xxe"] = ov.XXE.Disabled
-	}
-	if ov.Deser != nil {
-		cfg.DeserSemanticPolicy = ov.Deser.ToDeserPolicy()
-		disabled["deser"] = ov.Deser.Disabled
-	}
-	if ov.LDAP != nil {
-		cfg.LDAPSemanticPolicy = ov.LDAP.ToLDAPPolicy()
-		disabled["ldap"] = ov.LDAP.Disabled
-	}
-	if ov.ProtoPollution != nil {
-		cfg.ProtoPollutionSemanticPolicy = ov.ProtoPollution.ToProtoPollutionPolicy()
-		disabled["proto_pollution"] = ov.ProtoPollution.Disabled
-	}
-	// JWT and GraphQL: an override without base_score keeps the project's
-	// base score, like the engines applyOwnBaseScores covers.
-	if ov.JWT != nil {
-		disabled["jwt"] = ov.JWT.Disabled
-		if b := ov.JWT.ownBaseScore(); b != nil {
-			cfg.JWTPolicyBaseScore = b
-		}
-	}
-	if ov.GraphQL != nil {
-		disabled["graphql"] = ov.GraphQL.Disabled
-		if b := ov.GraphQL.ownBaseScore(); b != nil {
-			cfg.GraphQLPolicyBaseScore = b
-		}
-	}
-	for _, e := range []struct {
-		key    string
-		policy *SemanticPolicyJSON
-	}{
-		{"header_injection", ov.HeaderInjection}, {"open_redirect", ov.OpenRedirect},
-		{"prompt_injection", ov.PromptInjection}, {"anomaly", ov.Anomaly},
-	} {
-		if e.policy != nil {
-			disabled[e.key] = e.policy.Disabled
-		}
-	}
-	applyOwnBaseScores(cfg, ov.SQL, ov.XSS, ov.CMD, ov.PHP, ov.Python, ov.LFI, ov.SSRF, ov.Java)
-	cfg.DisabledEngines = disabled
-}
-
-// applyOwnBaseScores sets the base score of each engine that falls back to a
-// category (SQL, XSS, CMD, PHP, Python, LFI, SSRF, Java) from its own
-// base_score where the policy sets one. An engine whose policy is nil
-// or has no base_score keeps the value already in sc.
-func applyOwnBaseScores(sc *SemanticConfig, sql, xss, cmd, php, python, lfi, ssrf, java *SemanticPolicyJSON) {
-	for _, e := range []struct {
-		policy *SemanticPolicyJSON
-		dst    *int
-	}{
-		{sql, &sc.SQLiBaseScore}, {xss, &sc.XSSBaseScore}, {cmd, &sc.CmdInjectionBaseScore},
-		{php, &sc.PHPBaseScore}, {python, &sc.PythonBaseScore}, {lfi, &sc.LFIBaseScore},
-		{ssrf, &sc.SSRFBaseScore}, {java, &sc.JavaBaseScore},
-	} {
-		if b := e.policy.ownBaseScore(); b != nil {
-			*e.dst = *b
-		}
-	}
 }
 
 // PathRuleOverride allows per-path score overrides: the log and block
@@ -853,7 +429,7 @@ type PathFieldRule struct {
 }
 
 // PathLoginProtection configures brute-force / login-attempt rate limiting for a path.
-// Uses the RateLimitStore (same infrastructure as L7 flood) to track attempts.
+// The WAF agent counts the attempts with the same limiter as L7 flood.
 // Multiple identifier types can be enabled simultaneously; each tracks independently.
 type PathLoginProtection struct {
 	Enabled         bool     `json:"enabled"`
@@ -951,7 +527,7 @@ func (e *PathExceptionConfig) InspectionIsOff() bool {
 // case-insensitive backend (IIS, Express, ASP.NET), while engine-disable /
 // tuning exceptions stay case-sensitive so existing exceptions are not
 // silently widened. The limits of an exception that also exempts are matched
-// on their own, case-folded reading (MatchRequestPathRules).
+// on their own, case-folded reading.
 func (e *PathExceptionConfig) CaseInsensitiveMatch() bool {
 	if e.CaseInsensitive != nil {
 		return *e.CaseInsensitive
@@ -1000,16 +576,6 @@ type LoadResult struct {
 
 // LoadRuleMapFromJSON parses rules from JSON bytes (same format as rules.json). For per-project config from DB.
 func LoadRuleMapFromJSON(data []byte) (*LoadResult, error) {
-	return parseRuleMapJSON(data)
-}
-
-// LoadRuleMapFromFile reads JSON file (thresholds + categories). Returns RuleMap and thresholds.
-// If "thresholds" is missing or invalid, DefaultBlockThreshold and DefaultLogThreshold are used.
-func LoadRuleMapFromFile(path string) (*LoadResult, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	return parseRuleMapJSON(data)
 }
 
@@ -1084,7 +650,6 @@ func parseRuleMapJSON(data []byte) (*LoadResult, error) {
 	if v, ok := raw["geo"]; ok {
 		var g GeoConfig
 		if err := json.Unmarshal(v, &g); err == nil {
-			PrepareGeoConfig(&g)
 			geo = &g
 		}
 		delete(raw, "geo")
@@ -1114,7 +679,6 @@ func parseRuleMapJSON(data []byte) (*LoadResult, error) {
 				})
 			}
 			l7Flood.AllowIPs = valid
-			l7Flood.compiledAllowNets = parseIPNets(valid)
 		}
 		delete(raw, "l7_flood")
 	}
@@ -1314,7 +878,7 @@ func parseRuleMapJSON(data []byte) (*LoadResult, error) {
 						arr[i].compiledRegex = re
 						arr[i].compiledRegexFold = fold
 					}
-					// Limits match case-insensitively (MatchRequestPathRules).
+					// Limits match case-insensitively.
 					if !fold && arr[i].hasLimits() && arr[i].limitCaseInsensitive() {
 						if re, err := regexp.Compile(pathExceptionRegexSource(arr[i].Path, true)); err == nil {
 							arr[i].compiledFoldRegex = re
@@ -1380,8 +944,8 @@ func parseRuleMapJSON(data []byte) (*LoadResult, error) {
 		}
 		if meta.Disabled {
 			// "disabled": true leaves the category out of the RuleMap, and the engine that reads its
-			// base score keeps the default (SemanticScanConfigFrom). An engine is switched off by
-			// base_score 0 or its own policy.
+			// base score keeps the default. An engine is switched off by base_score 0 or its own
+			// policy.
 			continue
 		}
 		out[prefix] = RuleMeta{
@@ -1463,7 +1027,7 @@ func categoriesWithDefaults(user map[string]json.RawMessage, strict bool) (Categ
 
 // parseThresholds reads the "thresholds" block (absent means default,
 // never off). An omitted key keeps its default, so {} is 150/80 and not 0/0.
-// Analyze already mapped a threshold of 0 or less to the default, so this
+// The agent already mapped a threshold of 0 or less to the default, so this
 // changes what LoadResult reports (audit metadata), not the
 // verdict. An omitted log threshold is capped at an explicit block
 // threshold, so a block-only config that validated while the missing log key
@@ -2201,53 +1765,29 @@ func validateSemanticPolicies(policiesConfig *SemanticPoliciesConfig) error {
 // (RequestPathFor: the normalized path plus the decoded-but-unresolved one). Returns nil
 // if no exception matches. Path parameters are stripped from every segment (e.g.
 // /admin;jsessionid=1 matches as /admin), see cleanPathInterpretations.
-//
-// The inline proxy and Analyze use MatchRequestPathException with the RequestPath they
-// already hold, so the path is never re-derived.
 func MatchPathException(uri string, exceptions []PathExceptionConfig) *PathExceptionConfig {
 	if len(exceptions) == 0 {
 		return nil
 	}
-	return firstMatchingPathException(RequestPathFor(uri), exceptions, false)
+	return firstMatchingPathException(RequestPathFor(uri), exceptions)
 }
 
-// MatchRequestPathException returns the first PathExceptionConfig that governs the
-// request whose path readings are rp (see RequestPath and restrictsAccess).
-func MatchRequestPathException(rp RequestPath, exceptions []PathExceptionConfig) *PathExceptionConfig {
-	return firstMatchingPathException(rp, exceptions, false)
-}
-
-// MatchPathExceptionWithFieldRules returns the first PathExceptionConfig that matches
-// the given URI AND has at least one field rule defined. Exceptions that match the URI
-// but carry no field_rules are skipped, allowing a specific path exception used only
-// for response transforms (e.g. "/uploads/") to coexist with a broader exception that
-// carries request-field rules (e.g. "/"). uri is a raw request-target, as for
-// MatchPathException.
-func MatchPathExceptionWithFieldRules(uri string, exceptions []PathExceptionConfig) *PathExceptionConfig {
+// firstMatchingPathException is the matching loop of MatchPathException: disabled exceptions are
+// skipped. An exception that restricts access matches when ANY reading of the path matches; every
+// other one only when ALL readings match and exemptions are allowed at all (RequestPath.NoExemption).
+func firstMatchingPathException(rp RequestPath, exceptions []PathExceptionConfig) *PathExceptionConfig {
 	if len(exceptions) == 0 {
 		return nil
 	}
-	return firstMatchingPathException(RequestPathFor(uri), exceptions, true)
-}
-
-// firstMatchingPathException is the shared matching loop of the Match*PathException*
-// functions: disabled exceptions are skipped, and so are exceptions without field rules
-// when requireFieldRules is set. An exception that restricts access matches when ANY
-// reading of the path matches; every other one only when ALL readings match and
-// exemptions are allowed at all (RequestPath.NoExemption).
-func firstMatchingPathException(rp RequestPath, exceptions []PathExceptionConfig, requireFieldRules bool) *PathExceptionConfig {
-	if len(exceptions) == 0 {
-		return nil
-	}
-	return firstMatchingPathExceptionOn(rp, pathExceptionReadings(rp), exceptions, requireFieldRules)
+	return firstMatchingPathExceptionOn(rp, pathExceptionReadings(rp), exceptions)
 }
 
 // firstMatchingPathExceptionOn is firstMatchingPathException on readings computed
 // by the caller (pathExceptionReadings(rp)).
-func firstMatchingPathExceptionOn(rp RequestPath, readings []pathReading, exceptions []PathExceptionConfig, requireFieldRules bool) *PathExceptionConfig {
+func firstMatchingPathExceptionOn(rp RequestPath, readings []pathReading, exceptions []PathExceptionConfig) *PathExceptionConfig {
 	for i := range exceptions {
 		exc := &exceptions[i]
-		if exc.Disabled || (requireFieldRules && len(exc.FieldRules) == 0) {
+		if exc.Disabled {
 			continue
 		}
 		restricts := exc.restrictsAccess()
@@ -2474,7 +2014,7 @@ func isAllowedBlockKeyField(s string) bool {
 	if allowed[s] {
 		return true
 	}
-	// header:Nama-Header (nama header wajib)
+	// header:Header-Name (the header name is required)
 	if strings.HasPrefix(s, "header:") && len(strings.TrimSpace(s[7:])) > 0 {
 		return true
 	}

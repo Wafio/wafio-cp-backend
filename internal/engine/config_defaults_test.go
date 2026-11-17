@@ -64,27 +64,6 @@ func TestEverySemanticPolicyIsValidated(t *testing.T) {
 	}
 }
 
-// base_score is the field LDAP and prototype pollution should use. Configs
-// written before it existed set block_threshold instead, and must keep working.
-func TestBaseScoreFallsBackToBlockThreshold(t *testing.T) {
-	legacy := &SemanticPolicyJSON{BlockThreshold: 180}
-	if got := legacy.ToLDAPPolicy().BaseScore; got != 180 {
-		t.Errorf("legacy block_threshold: base score = %d, want 180", got)
-	}
-
-	score := 185
-	modern := &SemanticPolicyJSON{BaseScore: &score}
-	if got := modern.ToProtoPollutionPolicy().BaseScore; got != 185 {
-		t.Errorf("base_score: base score = %d, want 185", got)
-	}
-
-	// base_score wins when both are present.
-	both := &SemanticPolicyJSON{BlockThreshold: 4.0, BaseScore: &score}
-	if got := both.ToLDAPPolicy().BaseScore; got != 185 {
-		t.Errorf("base_score should win over block_threshold: got %d, want 185", got)
-	}
-}
-
 // An out-of-range threshold on a previously unvalidated engine must now be
 // rejected rather than silently disabling or over-triggering that engine.
 func TestPreviouslyUnvalidatedEnginesAreBounded(t *testing.T) {
@@ -130,8 +109,5 @@ func TestL7FloodAllowIPsValidation(t *testing.T) {
 	}
 	if got := res.L7Flood.AllowIPs; len(got) != 1 || got[0] != "10.0.0.0/8" {
 		t.Fatalf("allow_ips after parse = %q, want [10.0.0.0/8]", got)
-	}
-	if !res.L7Flood.IPExempt("10.9.9.9:80") || res.L7Flood.IPExempt("11.0.0.1") {
-		t.Fatal("IPExempt does not follow the kept entries")
 	}
 }

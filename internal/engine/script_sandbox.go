@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"runtime"
 	"slices"
 	"strings"
 
@@ -79,13 +78,6 @@ const (
 	scriptMaxRegexProgram = 1024    // compiled instructions per regex pattern
 	scriptMaxRegexWork    = RegexBudgetPerRequest
 )
-
-// scriptMaxInFlight caps script runs whose goroutine has not exited,
-// abandoned (timed-out) runs included, so hostile rules cannot pile up
-// goroutines faster than they stop. A request that finds the cap reached
-// does not run its script rules: each is Incomplete ("busy"), the verdict
-// LOG at worst with coverage script_timeout — never a silent allow.
-var scriptMaxInFlight = int64(max(2*runtime.GOMAXPROCS(0), 4))
 
 // MaxScriptBytes bounds a script rule's source. Larger scripts are refused
 // before parsing (the parser also bounds nesting; see

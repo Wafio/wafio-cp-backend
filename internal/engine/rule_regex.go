@@ -3,7 +3,6 @@ package engine
 import (
 	"errors"
 	"fmt"
-	"log"
 	"regexp"
 	"regexp/syntax"
 	"strings"
@@ -27,18 +26,8 @@ import (
 // at save (400) and dropped at agent load. Typical rule patterns compile to
 // 10–70 instructions and match 4 KiB in well under a millisecond.
 //
-// Compilation happens once per load, cached by pattern:
-//   - PrecompileRuleRegexes adds a config's patterns (called by
-//     application.PrecomputeSemanticConfig and when the agent attaches an
-//     app's custom rules);
-//   - ReplaceRuleRegexes, after the agent applied a bundle, swaps in a cache
-//     holding exactly the live patterns, so edited rules do not accumulate.
-//
-// Only registered patterns are cached, up to maxRuleRegexCacheBytes of
-// estimated program memory. A pattern that is not (the rule editor's dry run
-// on the control plane, a rule of a bundle still being applied, a load past
-// the cap) is compiled per use under the same budget, so request input never
-// grows the cache.
+// The control plane compiles a pattern when a rule is saved and for the rule
+// editor's dry run, under the same budget. Request input never grows a cache.
 
 // MaxRuleRegexProgram is the largest compiled program, in RE2 instructions,
 // a custom-rule regex may have. `^[\p{L} ]{2,100}$` and `[\p{L}\p{N}]{200}`
@@ -169,16 +158,9 @@ var (
 	// ruleRegexCompiles counts pattern compilations (tests assert that the
 	// request path adds none for registered patterns).
 	ruleRegexCompiles atomic.Uint64
-	// ruleRegexRulesDropped counts custom rules dropped at load because a
-	// regex was invalid or over budget.
-	ruleRegexRulesDropped atomic.Uint64
 )
 
 func init() { ruleRegexCache.Store(new(ruleRegexGen)) }
-
-// RuleRegexRulesDroppedCount returns how many custom rules were dropped at
-// load for an unusable regex since process start.
-func RuleRegexRulesDroppedCount() uint64 { return ruleRegexRulesDropped.Load() }
 
 // ruleRegex returns the compiled pattern: from the cache when registered,
 // else compiled for this use only. nil for an invalid or over-budget pattern.
@@ -191,13 +173,6 @@ func ruleRegexLookup(pattern string) ruleRegexEntry {
 	}
 	e, _ := compileRuleRegexEntry(pattern)
 	return e
-}
-
-// RuleRegexSource is one config's custom rules, for ReplaceRuleRegexes.
-type RuleRegexSource struct {
-	GUI    []CustomGUIRule
-	Tuning []TuningRule
-	Paths  []PathExceptionConfig
 }
 
 func targetRegexes(t TuningTarget, fn func(pattern string)) {
@@ -236,34 +211,4 @@ func RuleRegexProblem(conds []RuleCondition, target TuningTarget) string {
 		}
 	})
 	return problem
-}
-
-// DropUnusableRegexRules returns the rules whose every regex compiles within
-// the budget, and logs and counts each dropped one. A rule with an unusable
-// regex never applies at all: a negated regex condition that could not match
-// would otherwise make the rule match everything. The control plane rejects
-// such patterns at save and lists stored ones with regex_error; this catches
-// rules saved before that check.
-func DropUnusableRegexRules(gui []CustomGUIRule, tuning []TuningRule) ([]CustomGUIRule, []TuningRule) {
-	dropped := func(kind, id, problem string) bool {
-		if problem == "" {
-			return false
-		}
-		ruleRegexRulesDropped.Add(1)
-		log.Printf("custom %s rule %s dropped: unusable regex: %s", kind, id, problem)
-		return true
-	}
-	keptGUI := gui[:0:0]
-	for _, r := range gui {
-		if !dropped("gui", r.ID, RuleRegexProblem(r.Conditions, TuningTarget{})) {
-			keptGUI = append(keptGUI, r)
-		}
-	}
-	keptTuning := tuning[:0:0]
-	for _, r := range tuning {
-		if !dropped("tuning", r.ID, RuleRegexProblem(r.Scope.Conditions, r.Target)) {
-			keptTuning = append(keptTuning, r)
-		}
-	}
-	return keptGUI, keptTuning
 }

@@ -1,27 +1,9 @@
-// Package engine: bot protection L1 — request semantic (User-Agent + headers).
-// Fast, in-process; no external calls. Enterprise: use with L2 (JA3) for production-ready detection.
+// Package engine: the "bot_protection" block of rules_json.
 package engine
 
 import (
 	"regexp"
 	"strings"
-)
-
-// Bot protection reason constants (for SIEM/dashboard).
-const (
-	ReasonBotUAEmpty              = "BOT_UA_EMPTY"
-	ReasonBotUABlock              = "BOT_UA_BLOCK"
-	ReasonBotUAAllow              = "BOT_UA_ALLOW" // allowlist hit: do not score
-	ReasonBotHeaders              = "BOT_HEADERS"
-	ReasonBotJA4Block             = "BOT_JA4_BLOCK"
-	ReasonBotJA4Allow             = "BOT_JA4_ALLOW"
-	ReasonBotJA3Block             = "BOT_JA3_BLOCK"
-	ReasonBotJA3Allow             = "BOT_JA3_ALLOW"
-	ReasonBotClientHintsMismatch  = "BOT_CLIENT_HINTS_MISMATCH"
-	ReasonBotMissingClientHints   = "BOT_MISSING_CLIENT_HINTS"
-	ReasonBotHeadless             = "BOT_HEADLESS"
-	ReasonBotBrowserImpersonation = "BOT_BROWSER_IMPERSONATION"
-	ReasonBotAICrawler            = "BOT_AI_CRAWLER"
 )
 
 // BotProtectionConfig is the "bot_protection" block in rules_json (optional).
@@ -48,13 +30,6 @@ type BotProtectionConfig struct {
 	ja4AllowSet               map[string]struct{}
 	ja3BlockSet               map[string]struct{}
 	ja3AllowSet               map[string]struct{}
-}
-
-// BotResult is the result of bot detection (L1 + L2).
-type BotResult struct {
-	Score       int    // 0 = not bot / allowlist hit
-	Reason      string // e.g. ReasonBotUABlock, ReasonBotJA3Block
-	MatchDetail string // for logging: which pattern, which JA3 hash
 }
 
 // PrepareBotProtection compiles regexes and builds sets from config. Call once after loading config.

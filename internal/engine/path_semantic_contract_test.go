@@ -1,39 +1,6 @@
 package engine
 
-import (
-	"encoding/json"
-	"testing"
-)
-
-func TestPathSemanticAdditionalEngines(t *testing.T) {
-	for _, key := range []string{"nosql", "ssti", "xxe", "deser", "ldap", "proto_pollution"} {
-		t.Run(key, func(t *testing.T) {
-			var ov PathSemanticOverride
-			if err := json.Unmarshal([]byte(`{"`+key+`":{"disabled":true,"base_score":27,"block_threshold":99}}`), &ov); err != nil {
-				t.Fatal(err)
-			}
-			cfg := SemanticConfig{}
-			cfg.DisabledEngines = map[string]bool{"sql": true}
-			ov.ApplyTo(&cfg)
-			if !cfg.DisabledEngines[key] || !cfg.DisabledEngines["sql"] {
-				t.Fatalf("path disable not applied: %v", cfg.DisabledEngines)
-			}
-			if key == "ldap" && cfg.LDAPSemanticPolicy.BaseScore != 27 {
-				t.Fatal("LDAP base score lost")
-			}
-			if key == "proto_pollution" && cfg.ProtoPollutionSemanticPolicy.BaseScore != 27 {
-				t.Fatal("prototype base score lost")
-			}
-			if err := json.Unmarshal([]byte(`{"`+key+`":{"disabled":false}}`), &ov); err != nil {
-				t.Fatal(err)
-			}
-			ov.ApplyTo(&cfg)
-			if cfg.DisabledEngines[key] {
-				t.Fatal("path cannot re-enable engine")
-			}
-		})
-	}
-}
+import "testing"
 
 func TestPathSemanticPolicyValidation(t *testing.T) {
 	for _, policy := range []string{`"nosql":{"block_threshold":101}`, `"ldap":{"base_score":-1}`, `"open_redirects":{"disabled":true}`, `"SQL":{"disabled":true}`} {

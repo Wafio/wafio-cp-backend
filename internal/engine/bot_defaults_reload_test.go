@@ -9,30 +9,20 @@ import (
 func TestReloadDefaultJA4(t *testing.T) {
 	tmpDir := t.TempDir()
 	blockFile := filepath.Join(tmpDir, "ja4.txt")
-	allowFile := filepath.Join(tmpDir, "ja4_allowlist.txt")
 
 	err := os.WriteFile(blockFile, []byte("t13d1516h2_custom_test1 custom bot\n"), 0o644)
 	if err != nil {
 		t.Fatalf("write blockFile: %v", err)
 	}
-	err = os.WriteFile(allowFile, []byte("t13d1516h2_custom_allow1 custom browser\n"), 0o644)
-	if err != nil {
-		t.Fatalf("write allowFile: %v", err)
-	}
 
 	t.Setenv("WAFIO_JA4_BLACKLIST_FILE", blockFile)
-	t.Setenv("WAFIO_JA4_ALLOWLIST_FILE", allowFile)
 
 	ReloadDefaultJA4()
 
 	blocks := DefaultJA4Blocklist()
-	allows := DefaultJA4Allowlist()
 
 	if len(blocks) != 1 || blocks[0] != "t13d1516h2_custom_test1" {
 		t.Fatalf("expected 1 custom block, got: %v", blocks)
-	}
-	if len(allows) != 1 || allows[0] != "t13d1516h2_custom_allow1" {
-		t.Fatalf("expected 1 custom allow, got: %v", allows)
 	}
 
 	// Update files and reload

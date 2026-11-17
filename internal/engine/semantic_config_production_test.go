@@ -23,7 +23,7 @@ func TestLegacyMethodRoutePolicyKeysIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g, w := got.SemanticPolicies.SQL.ToSQLPolicy(), want.SemanticPolicies.SQL.ToSQLPolicy(); !reflect.DeepEqual(g, w) {
+	if g, w := got.SemanticPolicies.SQL, want.SemanticPolicies.SQL; !reflect.DeepEqual(g, w) {
 		t.Fatalf("legacy keys changed the SQL policy: %+v, want %+v", g, w)
 	}
 }

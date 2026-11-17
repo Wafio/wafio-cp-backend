@@ -10,8 +10,7 @@ import (
 // control — rate limits, L7 flood, block policy bans, geoblocking, IP
 // reputation, per-path IP rules, login protection — keys on the address
 // ClientIP returns. The socket is the client unless the TCP peer is a
-// trusted proxy. (/v1/analyze and /v1/analyze-nginx take the client address
-// from their local caller and are not covered here.)
+// trusted proxy.
 
 // MaxTrustedProxies caps proxy_config.trusted_proxies.
 const MaxTrustedProxies = 64
@@ -78,17 +77,6 @@ func (pc *ProxyConfig) ClientIP(peer netip.Addr, xff []string, xRealIP string) n
 // TrustsPeer reports whether a TCP peer may supply forwarded headers.
 func (pc *ProxyConfig) TrustsPeer(peer netip.Addr) bool {
 	return pc.TrustForwarded && pc.trustsHop(peer.Unmap())
-}
-
-// IsProxyHop reports whether a is an address this config treats as a proxy
-// rather than a client: a member of trusted_proxies, or, when the list is
-// empty and trust_forwarded is on, a loopback / RFC 1918 / RFC 4193 address.
-// With trust_forwarded off and no list, no address is a proxy hop.
-func (pc *ProxyConfig) IsProxyHop(a netip.Addr) bool {
-	if pc == nil || (!pc.TrustForwarded && len(pc.TrustedProxies) == 0) {
-		return false
-	}
-	return pc.trustsHop(a.Unmap().WithZone(""))
 }
 
 func (pc *ProxyConfig) trustsHop(a netip.Addr) bool {

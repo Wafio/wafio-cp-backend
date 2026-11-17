@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/wafio/wafio-cp-backend/internal/engine"
 )
@@ -38,13 +37,6 @@ func guiRule(id, field, op, val, action string, priority int) engine.CustomGUIRu
 			{Field: field, Operator: op, Value: val},
 		},
 		Action: action,
-	}
-}
-
-func TestDefaultScriptBudget_ProductionValues(t *testing.T) {
-	b := engine.DefaultScriptBudget()
-	if b.PerScript != 5*time.Millisecond || b.Total != 15*time.Millisecond {
-		t.Fatalf("production script budget changed: got %+v, want 5ms per script / 15ms total", b)
 	}
 }
 
@@ -208,7 +200,7 @@ func TestEvalGUIRules_EmptyConditions(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Script Rules — CompileScriptRules + EvalScriptRules
+// Custom rule conditions
 // ---------------------------------------------------------------------------
 
 func TestEvalGUIRules_RegexOperator(t *testing.T) {
