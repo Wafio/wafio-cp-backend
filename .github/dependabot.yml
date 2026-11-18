@@ -1,0 +1,20 @@
+# Dependabot opens weekly pull requests for the Go modules (the root module and shared/) and for the actions used in
+# the workflows. It leaves out the Dockerfile and the compose file, so base image tags are not updated by it.
+
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: gomod
+    directory: /shared
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

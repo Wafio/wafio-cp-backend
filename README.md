@@ -1,4 +1,5 @@
 # wafio-cp-backend
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16869/badge)](https://www.bestpractices.dev/projects/16869) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Wafio/wafio-cp-backend/badge)](https://scorecard.dev/viewer/?uri=github.com/Wafio/wafio-cp-backend)
 
 The Wafio control plane: the HTTP API and gRPC server that agents connect to, the PostgreSQL and TimescaleDB storage behind them, and the decision data the dashboard reads. This repository also holds the Go module `shared/` that both agents compile in and the database migrations. The installers and the release scripts are in wafio-release. The WAF agent is the Rust agent of wafio-agent-waf; this repository holds no WAF agent.
 
