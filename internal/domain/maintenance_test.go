@@ -30,6 +30,8 @@ func TestMaintenanceNormalizeErrors(t *testing.T) {
 		{"end time too far", Maintenance{EndTime: "2027-11-19T10:00:01Z"}, "end_time", "end_time: must be within 365 days"},
 		{"custom html too large", Maintenance{CustomHTML: strings.Repeat("a", 65537)}, "custom_html", "custom_html: must be at most 64 KiB (65,536 bytes)"},
 		{"custom html NUL", Maintenance{CustomHTML: "<p>\x00</p>"}, "custom_html", "custom_html: must not contain NUL characters"},
+		{"custom html repeats the message", Maintenance{CustomHTML: strings.Repeat("{{WAFIO_MESSAGE}}", 17)}, "custom_html", "custom_html: must use {{WAFIO_MESSAGE}} at most 16 times"},
+		{"custom html repeats the end time", Maintenance{CustomHTML: strings.Repeat("{{WAFIO_END_TIME}}", 17)}, "custom_html", "custom_html: must use {{WAFIO_END_TIME}} at most 16 times"},
 		{"too many ips", Maintenance{AllowIPs: numbered("10.0.0.%d", 51)}, "allow_ips", "allow_ips: at most 50 entries"},
 		{"not an ip", Maintenance{AllowIPs: []string{"203.0.113.7", "example.com"}}, "allow_ips", `allow_ips: "example.com" is not an IP address or CIDR range`},
 		{"empty ip", Maintenance{AllowIPs: []string{"1.2.3.4", " "}}, "allow_ips", `allow_ips: "" is not an IP address or CIDR range`},

@@ -17,6 +17,9 @@ const (
 	MaintenanceMaxPaths       = 20
 	MaintenancePathBytes      = 256
 	MaintenanceEndMaxDays     = 365
+	// A placeholder in a custom page is replaced by text that can be much longer than itself, so a
+	// page may use each one only this often. It keeps the filled page near the size that was saved.
+	MaintenancePlaceholderUses = 16
 )
 
 const maintenanceTimeLayout = "2006-01-02T15:04:05Z"
@@ -78,6 +81,11 @@ func (m *Maintenance) Normalize(now time.Time, stored Maintenance) error {
 	}
 	if strings.ContainsRune(m.CustomHTML, 0) {
 		return maintenanceErr("custom_html", "must not contain NUL characters")
+	}
+	for _, placeholder := range []string{"{{WAFIO_MESSAGE}}", "{{WAFIO_END_TIME}}"} {
+		if strings.Count(m.CustomHTML, placeholder) > MaintenancePlaceholderUses {
+			return maintenanceErr("custom_html", "must use %s at most %d times", placeholder, MaintenancePlaceholderUses)
+		}
 	}
 
 	var err error

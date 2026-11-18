@@ -18696,7 +18696,7 @@ components:
           description: Expected end, RFC 3339 (any offset, stored as UTC whole seconds), up to 365 days ahead. It must be in the future when it changes or when the switch goes on. Empty or absent = none.
         custom_html:
           type: string
-          description: Custom HTML page, up to 65,536 bytes, no NUL characters. Empty or white space only = the standard page.
+          description: Custom HTML page, up to 65,536 bytes, no NUL characters. It may use each of the placeholders {{WAFIO_MESSAGE}} and {{WAFIO_END_TIME}} at most 16 times. Empty or white space only = the standard page.
         allow_ips:
           type: array
           description: At most 50 IP addresses or CIDR ranges. A range with prefix length 0 is refused.
