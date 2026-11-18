@@ -31,7 +31,7 @@ step() {
 ai_material() {
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -e .git ] || { echo 'ai check: needs a git checkout' >&2; return 1; }
   # Names are written with a bracket (PORTIN[G]) so that this file does not match its own patterns.
-  local ai_files='(^|/)(AGENTS|CLAUDE|GEMINI)\.md$|(^|/)\.claude/|copilot-instructions|port-statu[s]|PORTIN[G]\.md'
+  local ai_files='(^|/)(CLAUDE|GEMINI)\.md$|/AGENT[S]\.md$|(^|/)\.claude/|copilot-instructions|port-statu[s]|PORTIN[G]\.md'
   local ai_ids='(^|[^A-Za-z0-9_])(K-[0-9]{2,3}|[Ww]ave[- ]?[0-9]+|WP-[0-9]+|DEC-[0-9]+|FSD-[0-9]+|BR-[0-9]+|ADR-[0-9]+|CF-[0-9]+|SP-[0-9]+|TG-[0-9]+|OD-[0-9]+|CU-[0-9]+|RK-[0-9]+|POC-[A-Z]+|GAP-[A-Z]+-[0-9]+|F-[0-9]{2}|SEC-[0-9]{2}|REQ-[0-9]+|INV-[0-9]{1,2})([^0-9]|$)'
   local ai_docs='(^|[^A-Za-z0-9_])(PORTIN[G]|port-statu[s]|docs/(superpowers/)?plan[s]/|[Pp]lan §[0-9]|[Ss]pec §[0-9]|PRD §[0-9])'
   local ai_refs='(AGENT[S]|CLAUDE|GEMINI)\.md'
