@@ -99,12 +99,15 @@ func (h *WAFAgentHandler) admitMaintenance(ctx context.Context, projectID, appID
 			"code": "MAINTENANCE_UNSUPPORTED",
 		}}
 	}
+	row, sent, err := h.Repo.WAF.BundleRowForApp(ctx, appID, mode)
+	if err != nil {
+		return err
+	}
 	name, size, over, err := bundleOverLimit(ctx, h.Repo, h.Bundles, projectID, agentID, func(rows []repository.WAFBundleAppRow) []repository.WAFBundleAppRow {
-		row, ok, err := h.Repo.WAF.BundleRowForApp(ctx, appID, mode)
-		if err != nil || !ok {
-			return rows
+		if sent {
+			rows = append(rows, row)
 		}
-		return append(rows, row)
+		return rows
 	})
 	if err != nil || !over {
 		return err
