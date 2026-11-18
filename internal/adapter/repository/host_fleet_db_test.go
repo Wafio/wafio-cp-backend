@@ -79,7 +79,7 @@ func TestDBFleetQueriesAreTenantScoped(t *testing.T) {
 	gone := f.agent(project, nil, "host", `{}`)
 	f.exec(`UPDATE agents SET deleted_at = now() WHERE id = $1`, gone)
 	f.policy(live, 1, "kill", true)
-	f.policy(live, 2, "block", true)
+	f.policy(live, 2, "kill", true)
 	f.policy(live, 3, "alert", true)
 	f.policy(live, 4, "kill", false)
 	f.incident(project, live, "critical", "open")

@@ -173,7 +173,6 @@ type AgentHostInfo struct {
 	PrimaryInterface string `json:"primary_interface,omitempty"`
 	SELinuxMode      string `json:"selinux_mode,omitempty"`
 	AppArmor         string `json:"apparmor,omitempty"`
-	BPFLSM           string `json:"bpf_lsm,omitempty"`
 	ContainerRuntime string `json:"container_runtime,omitempty"`
 	DiskTotalBytes   uint64 `json:"disk_total_bytes,omitempty"`
 	DiskFreeBytes    uint64 `json:"disk_free_bytes,omitempty"`
