@@ -18167,7 +18167,7 @@ components:
           description: AppArmor state.
         bpf_lsm:
           type: string
-          description: BPF LSM state, sent by older host agents. The control plane stores it and does not use it.
+          description: BPF LSM state as the host reports it. The control plane stores it and does not use it.
         container_runtime:
           type: string
           description: Container runtime.
