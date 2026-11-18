@@ -106,3 +106,24 @@ func TestDBTracePolicyRoutesAnswerStoredRows(t *testing.T) {
 		t.Fatalf("rows after delete: %v %v", rows, err)
 	}
 }
+
+// A block policy the connect blocklist cannot carry is refused enabled on
+// create and on update, and stored disabled.
+func TestDBTracePolicyBlockMustBeEnforceable(t *testing.T) {
+	f := newDBFixture(t)
+	tok := f.tokens["owner"]
+	agentID := f.registerAgent(t, "owner", "trace-block", "host")
+	base := "/api/projects/" + f.project + "/host/trace/policies"
+	q := "?agent_id=" + agentID
+
+	wantStatus(t, "enabled block on a comm", call(t, f.app, http.MethodPost, base+q, tok,
+		map[string]any{"name": "block-nc", "action": "block", "enabled": true, "match_comm": "nc"}), fiber.StatusBadRequest, "BAD_REQUEST")
+	wantStatus(t, "enabled block on an ip", call(t, f.app, http.MethodPost, base+q, tok,
+		map[string]any{"name": "block-ip", "action": "block", "enabled": true, "match_dest_ip": "192.0.2.10"}), fiber.StatusCreated, "")
+	off := call(t, f.app, http.MethodPost, base+q, tok, map[string]any{"name": "block-nc", "action": "block", "enabled": false, "match_comm": "nc"})
+	wantStatus(t, "disabled block on a comm", off, fiber.StatusCreated, "")
+
+	pid := strconv.Itoa(int(off.body["id"].(float64)))
+	wantStatus(t, "enable it", call(t, f.app, http.MethodPut, base+"/"+pid+q, tok,
+		map[string]any{"name": "block-nc", "action": "block", "enabled": true, "match_comm": "nc"}), fiber.StatusBadRequest, "BAD_REQUEST")
+}

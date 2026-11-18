@@ -7356,7 +7356,7 @@ paths:
                 tags:
                   - shell
         '400':
-          description: 'Invalid policy. Codes: BAD_REQUEST (missing name, unknown event type, severity or action, bad match_dest_ip or match_dest_port, match_comm_mode not exact/word/substring, kill policy without a narrowing match and without kill_acknowledged), HOST_TARGET_REQUIRED. May also carry an error from the agent.'
+          description: 'Invalid policy. Codes: BAD_REQUEST (missing name, unknown event type, severity or action, bad match_dest_ip or match_dest_port, match_comm_mode not exact/word/substring, kill policy without a narrowing match and without kill_acknowledged, enabled block policy that is not a connect block on one destination IPv4), HOST_TARGET_REQUIRED. May also carry an error from the agent.'
           content:
             application/json:
               schema:
@@ -20317,7 +20317,7 @@ components:
           format: ipv4
         action:
           type: string
-          description: 'Enforcement action as stored: monitor, alert, kill, simulate, block (the agent normalises aliases; a policy saved while the agent was offline keeps the spelling sent).'
+          description: 'Enforcement action as stored: monitor, alert, kill, simulate, block (the agent normalises aliases; a policy saved while the agent was offline keeps the spelling sent). Only a block policy that sets match_dest_ip and no other match, selects the connect event (or none) and sets no minimum severity is enforced: it denies every outbound connect to that IPv4 address in the kernel. Any other block policy does nothing, and is refused with 400 BAD_REQUEST while enabled.'
           enum:
             - ''
             - monitor
@@ -20509,7 +20509,7 @@ components:
           format: ipv4
         action:
           type: string
-          description: 'Enforcement action. Accepted case-insensitively: monitor, alert, kill, simulate (aliases dryrun, dry-run, shadow), block. Empty means monitor.'
+          description: 'Enforcement action. Accepted case-insensitively: monitor, alert, kill, simulate (aliases dryrun, dry-run, shadow), block. Empty means monitor. Only a block policy that sets match_dest_ip and no other match, selects the connect event (or none) and sets no minimum severity is enforced: it denies every outbound connect to that IPv4 address in the kernel. Any other block policy does nothing, and is refused with 400 BAD_REQUEST while enabled.'
           enum:
             - ''
             - monitor

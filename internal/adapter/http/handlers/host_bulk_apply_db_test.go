@@ -567,6 +567,13 @@ func TestDBBulkTracePolicyCopy(t *testing.T) {
 	if broad.status != fiber.StatusBadRequest || broad.body["code"] != "BAD_REQUEST" || len(rows) != before {
 		t.Fatalf("broad kill: %d %s", broad.status, broad.raw)
 	}
+	// So is an enabled block policy the connect blocklist cannot carry.
+	noop := f.call("POST", "/hosts/apply/trace-policies", map[string]any{"targets": map[string]any{"host_ids": []string{dst}},
+		"policies": []map[string]any{{"name": "block-nc", "enabled": true, "action": "block", "match_comm": "nc"}}})
+	rows, _ = f.repo.EBPF.ListTracePoliciesByAgent(ctx, dstAgent)
+	if noop.status != fiber.StatusBadRequest || noop.body["code"] != "BAD_REQUEST" || len(rows) != before {
+		t.Fatalf("block without dest ip: %d %s", noop.status, noop.raw)
+	}
 	if r := f.call("POST", "/hosts/apply/trace-policies", map[string]any{"targets": map[string]any{"host_ids": []string{dst}},
 		"source": map[string]any{"host_id": src, "policy_ids": []int{99}}}); r.status != fiber.StatusNotFound || r.body["code"] != "POLICY_NOT_FOUND" {
 		t.Fatalf("missing policy: %d %s", r.status, r.raw)

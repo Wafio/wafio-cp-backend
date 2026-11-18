@@ -13,7 +13,7 @@ const (
 	ActionAlert    uint32 = 1 // observe + flag (MUST match TRACE_ACTION_ALERT in wafio_trace.h)
 	ActionKill     uint32 = 2 // SIGKILL via bpf_send_signal() (MUST match TRACE_ACTION_KILL)
 	ActionSimulate uint32 = 3 // userspace-only: dry-run; logs "would-kill" without sending SIGKILL
-	ActionBlock    uint32 = 4 // BPF-LSM proactive execution blocking (-EPERM on bprm_check_security)
+	ActionBlock    uint32 = 4 // denies outbound connects to a blocked IPv4 through BPF-LSM (-EPERM)
 )
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -2157,6 +2157,25 @@ func (h *HostPolicyHandler) ListPolicies(c *fiber.Ctx) error {
 	return c.JSON(out)
 }
 
+// checkBlockPolicy refuses an enabled block policy that the host agent would
+// not enforce. The agent denies a connect in the kernel only for a policy
+// whose one match is a destination IPv4 and that selects every connect to it
+// (connect event or none, no minimum severity); any other block policy does
+// nothing. A disabled policy passes, so one can still be switched off or edited.
+func checkBlockPolicy(p hostpolicy.EnforcementPolicy) error {
+	if !p.Enabled || hostpolicy.ParseActionName(p.Action) != hostpolicy.ActionBlock {
+		return nil
+	}
+	onlyDestIP := strings.TrimSpace(p.MatchDestIP) != "" && p.MatchComm == "" && p.MatchFilename == "" &&
+		p.MatchUID == nil && p.MatchDestPort == ""
+	connect := len(p.EventTypes) == 0 || slices.ContainsFunc(p.EventTypes, func(n string) bool { return strings.EqualFold(n, "connect") })
+	anySeverity := p.MinSeverity == "" || strings.EqualFold(p.MinSeverity, "info")
+	if onlyDestIP && connect && anySeverity {
+		return nil
+	}
+	return errors.New("a block policy only denies outbound connections to one IPv4 address: set match_dest_ip, leave the other matches empty, select the connect event (or none) and no minimum severity; use kill to stop a process")
+}
+
 // CreatePolicy stores a new policy (201 with the stored policy) and pushes
 // the agent's policies over gRPC.
 //
@@ -2171,6 +2190,9 @@ func (h *HostPolicyHandler) CreatePolicy(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid policy body", "code": "BAD_REQUEST"})
 	}
 	if err := hostpolicy.ValidateEnforcementPolicy(requestedPolicy); err != nil {
+		return invalidInput(c, "BAD_REQUEST", err)
+	}
+	if err := checkBlockPolicy(requestedPolicy); err != nil {
 		return invalidInput(c, "BAD_REQUEST", err)
 	}
 	createPolicyUserID, _ := c.Locals("user_id").(string)
@@ -2250,6 +2272,9 @@ func (h *HostPolicyHandler) UpdatePolicy(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid policy body", "code": "BAD_REQUEST"})
 	}
 	if err := hostpolicy.ValidateEnforcementPolicy(requestedPolicy); err != nil {
+		return invalidInput(c, "BAD_REQUEST", err)
+	}
+	if err := checkBlockPolicy(requestedPolicy); err != nil {
 		return invalidInput(c, "BAD_REQUEST", err)
 	}
 	updatePolicyUserID, _ := c.Locals("user_id").(string)
