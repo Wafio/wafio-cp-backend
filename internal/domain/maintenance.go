@@ -188,7 +188,7 @@ func checkMaintenancePath(v string) (string, string) {
 	case !strings.HasPrefix(v, "/"):
 		return "", "must start with /"
 	case len(v) > MaintenancePathBytes:
-		return "", fmt.Sprintf("must be at most %d characters", MaintenancePathBytes)
+		return "", fmt.Sprintf("must be at most %d bytes", MaintenancePathBytes)
 	case strings.ContainsFunc(v, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.IsControl(r) || r == '?' || r == '#' || r == '%'
 	}):
