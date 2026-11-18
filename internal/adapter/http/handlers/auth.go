@@ -172,7 +172,7 @@ type UpdateProfileRequest struct {
 func (h *AuthHandler) UpdateProfile(c *fiber.Ctx) error {
 	userID := c.Locals(auth.UserIDKey).(string)
 	var body UpdateProfileRequest
-	if err := BindJSON(c, &body); err != nil {
+	if ok, err := BindJSON(c, &body); !ok {
 		return err
 	}
 	body.Name = strings.TrimSpace(body.Name)
