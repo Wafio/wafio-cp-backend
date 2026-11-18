@@ -3,9 +3,11 @@ package agentserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
+	"github.com/wafio/wafio-cp-backend/internal/engine"
 )
 
 // projectBundleLoader is the BundleLoader of the control plane. It returns
@@ -64,6 +66,46 @@ func (l *projectBundleLoader) LoadBundle(ctx context.Context, projectID, agentNa
 	if projectID == "" {
 		return nil, 0, fmt.Errorf("missing project_id")
 	}
+	// An agent that is not registered yet gets the empty bundle.
+	agentID, err := l.repo.EBPF.LookupAgentIDByName(ctx, projectID, agentName)
+	if err != nil {
+		agentID = ""
+	}
+	return l.build(ctx, projectID, agentID, nil)
+}
+
+// BundleBytes returns the size of the bundle that is sent to the agent: what LoadBundle builds for
+// it, after the rewrite NormalizeBundle makes. edit, when not nil, changes the application rows
+// the bundle is built from, to measure a bundle that does not exist yet. It never changes the
+// database.
+func (l *projectBundleLoader) BundleBytes(ctx context.Context, projectID, agentID string, edit func([]repository.WAFBundleAppRow) []repository.WAFBundleAppRow) (int, error) {
+	out, _, err := l.build(ctx, projectID, agentID, edit)
+	if err != nil {
+		return 0, err
+	}
+	out, _ = engine.NormalizeBundle(out)
+	return len(out), nil
+}
+
+// bundleSizer is the part of a BundleLoader that can measure a bundle.
+type bundleSizer interface {
+	BundleBytes(ctx context.Context, projectID, agentID string, edit func([]repository.WAFBundleAppRow) []repository.WAFBundleAppRow) (int, error)
+}
+
+// BundleBytes returns the size in bytes of the bundle the agent with this id gets in a
+// ServerMessage, and with edit, of the bundle it would get if its application rows were changed.
+// See engine.MaxAgentBundleBytes for the largest bundle an agent accepts.
+func (s *Server) BundleBytes(ctx context.Context, projectID, agentID string, edit func([]repository.WAFBundleAppRow) []repository.WAFBundleAppRow) (int, error) {
+	sizer, ok := s.BundleLoader.(bundleSizer)
+	if !ok {
+		return 0, errors.New("the bundle loader cannot measure a bundle")
+	}
+	return sizer.BundleBytes(ctx, projectID, agentID, edit)
+}
+
+// build makes the bundle of the agent with this id, and returns it with its generation. An empty
+// agentID gives the empty bundle of an agent that is not registered yet.
+func (l *projectBundleLoader) build(ctx context.Context, projectID, agentID string, edit func([]repository.WAFBundleAppRow) []repository.WAFBundleAppRow) ([]byte, int64, error) {
 	mb := miniBundle{ProjectID: projectID}
 
 	// Project-level config fallback for sensitivity / rules.
@@ -74,10 +116,7 @@ func (l *projectBundleLoader) LoadBundle(ctx context.Context, projectID, agentNa
 		mb.Sensitivity = pc.Sensitivity
 	}
 
-	// Resolve agent_id from (project_id, agent_name).
-	agentID, err := l.repo.EBPF.LookupAgentIDByName(ctx, projectID, agentName)
-	if err != nil || agentID == "" {
-		// Agent not registered yet — return empty bundle.
+	if agentID == "" {
 		out, _ := json.Marshal(&mb)
 		return out, 0, nil
 	}
@@ -86,6 +125,9 @@ func (l *projectBundleLoader) LoadBundle(ctx context.Context, projectID, agentNa
 	rows, err := l.repo.WAF.ListAssignmentsForAgent(ctx, agentID)
 	if err != nil {
 		return nil, 0, err
+	}
+	if edit != nil {
+		rows = edit(rows)
 	}
 
 	mb.Apps = make([]bundleAppLite, 0, len(rows))

@@ -446,7 +446,7 @@ func TestDBScriptRuleRefusedWhenEveryAgentCannotRunIt(t *testing.T) {
 	refused("switch it back on", call(t, c.app, http.MethodPut, rulesURL+"/"+runningID, tok, map[string]any{"enabled": true}))
 
 	// An app that no agent serves has nothing to refuse for.
-	if err := c.repo.WAF.ReplaceAssignment(context.Background(), c.project, c.appID, "", "block"); err != nil {
+	if err := c.repo.WAF.ReplaceAssignment(context.Background(), c.project, c.appID, "", "block", nil); err != nil {
 		t.Fatal(err)
 	}
 	wantStatus(t, "app without agent", create(scriptRuleBody("free", true)), fiber.StatusCreated, "")

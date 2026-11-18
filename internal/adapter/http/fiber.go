@@ -302,6 +302,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	wafAgent := &handlers.WAFAgentHandler{Repo: repo, OverviewCache: handlers.NewOverviewCache(), GeoEnricher: geoEnricher}
 	if agentServer != nil {
 		wafAgent.AgentServer = agentServer
+		wafAgent.Bundles = agentServer
 	}
 	wafAgent.WarmOverviewCache(1440) // pre-warm with 24h window (common dashboard default)
 
@@ -506,6 +507,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	maintenance := &handlers.AppMaintenanceHandler{Repo: repo}
 	if agentServer != nil {
 		maintenance.AgentServer = agentServer
+		maintenance.Bundles = agentServer
 	}
 	pViewer.Get("/apps/:appId/maintenance", RequireAppInProject(repo), rateReadByUser, maintenance.Get)
 	pViewer.Put("/apps/:appId/maintenance", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, maintenance.Put)

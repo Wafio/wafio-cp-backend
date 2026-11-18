@@ -18,6 +18,7 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
 	"github.com/wafio/wafio-cp-backend/internal/application"
 	"github.com/wafio/wafio-cp-backend/internal/domain"
+	"github.com/wafio/wafio-cp-backend/internal/engine"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -37,6 +38,8 @@ type WAFAgentHandler struct {
 	AgentServer   interface{ PushBundleToProject(projectID string) }
 	OverviewCache *OverviewCache
 	GeoEnricher   GeoEnricher // optional; used for country enrichment in overview
+	// Bundles measures the bundle of an agent; nil when no agent can connect.
+	Bundles       BundleSizer
 	overviewGroup singleflight.Group
 }
 
@@ -77,6 +80,43 @@ func (h *WAFAgentHandler) GetAppAgent(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"agent_id": agentID, "mode": mode, "script_rules": scriptRules})
 }
 
+// admitMaintenance decides whether an application whose maintenance object is stored can move to the
+// agent. An application in maintenance mode needs an agent that supports it, and one whose bundle,
+// with the maintenance page of this application added, stays within what an agent accepts. An agent
+// that never connected is let through, as it is when maintenance is turned on.
+func (h *WAFAgentHandler) admitMaintenance(ctx context.Context, projectID, appID, agentID, mode string, stored domain.Maintenance) error {
+	if !stored.Enabled {
+		return nil
+	}
+	supported, err := h.Repo.EBPF.AgentMaintenanceMode(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	if supported != nil && !*supported {
+		return &refusal{status: fiber.StatusConflict, body: fiber.Map{
+			"error": "This application is in maintenance mode, and the WAF agent you chose does not support maintenance mode. " +
+				"Upgrade that agent first, or turn maintenance mode off.",
+			"code": "MAINTENANCE_UNSUPPORTED",
+		}}
+	}
+	name, size, over, err := bundleOverLimit(ctx, h.Repo, h.Bundles, projectID, agentID, func(rows []repository.WAFBundleAppRow) []repository.WAFBundleAppRow {
+		row, ok, err := h.Repo.WAF.BundleRowForApp(ctx, appID, mode)
+		if err != nil || !ok {
+			return rows
+		}
+		return append(rows, row)
+	})
+	if err != nil || !over {
+		return err
+	}
+	return &refusal{status: fiber.StatusConflict, body: fiber.Map{
+		"error": fmt.Sprintf("With this application, which is in maintenance mode, the WAF agent %q would have to receive a configuration of %s bytes, "+
+			"but it can receive at most %s bytes. Use a smaller custom page, turn maintenance mode off, or choose another agent.",
+			shownName(name), groupDigits(size), groupDigits(engine.MaxAgentBundleBytes)),
+		"code": "MAINTENANCE_BUNDLE_TOO_LARGE",
+	}}
+}
+
 func (h *WAFAgentHandler) AssignAppAgent(c *fiber.Ctx) error {
 	userID, _ := c.Locals(auth.UserIDKey).(string)
 	projectID := c.Params("id")
@@ -95,7 +135,14 @@ func (h *WAFAgentHandler) AssignAppAgent(c *fiber.Ctx) error {
 	if mode != "block" && mode != "monitor" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mode"})
 	}
-	if err := h.Repo.WAF.ReplaceAssignment(c.UserContext(), projectID, appID, req.AgentID, mode); err != nil {
+	err := h.Repo.WAF.ReplaceAssignment(c.UserContext(), projectID, appID, req.AgentID, mode, func(stored domain.Maintenance) error {
+		return h.admitMaintenance(c.UserContext(), projectID, appID, req.AgentID, mode, stored)
+	})
+	if err != nil {
+		var refuse *refusal
+		if errors.As(err, &refuse) {
+			return c.Status(refuse.status).JSON(refuse.body)
+		}
 		if isListenAddrTaken(err) {
 			conflict, _ := appUniqueConflict(err)
 			return c.Status(fiber.StatusConflict).JSON(conflict)
@@ -124,7 +171,7 @@ func (h *WAFAgentHandler) UnassignAppAgent(c *fiber.Ctx) error {
 	userID, _ := c.Locals(auth.UserIDKey).(string)
 	projectID := c.Params("id")
 	appID := c.Params("appId")
-	if err := h.Repo.WAF.ReplaceAssignment(c.UserContext(), projectID, appID, "", ""); err != nil {
+	if err := h.Repo.WAF.ReplaceAssignment(c.UserContext(), projectID, appID, "", "", nil); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to unassign"})
 	}
 	if h.AgentServer != nil {

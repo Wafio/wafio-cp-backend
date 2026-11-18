@@ -61,22 +61,33 @@ func (r *WAFRepo) AssignApp(ctx context.Context, agentID, appID, mode string) er
 	return r.bumpBundleGeneration(ctx, agentID)
 }
 
-// ListAssignmentsForAgent returns active (enabled) assignments for an agent,
-// joined with app runtime state (domain + internal port) so the caller can
-// build a bundle without a second round-trip.
-func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) ([]WAFBundleAppRow, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT a.id,
+// The columns of a bundle row, around the mode, which comes from the assignment or from the caller.
+const (
+	bundleRowHead = `SELECT a.id,
 		       COALESCE(NULLIF(a.listen_host,''), ''),
 		       COALESCE(a.listen_port, 0),
-		       COALESCE(NULLIF(a.upstream_url,''), '') AS upstream,
-		       waa.mode,
+		       COALESCE(NULLIF(a.upstream_url,''), '') AS upstream,`
+	bundleRowTail = `
 		       ac.rules_json,
 		       COALESCE(ac.sensitivity, 0),
 		       COALESCE(a.proxy_config, '{}'::jsonb),
 		       COALESCE(a.fcgi_doc_root, ''),
 		       COALESCE(a.fcgi_index, 'index.php'),
-		       COALESCE(a.maintenance, '{}'::jsonb)
+		       COALESCE(a.maintenance, '{}'::jsonb)`
+)
+
+func scanBundleRow(rows pgx.Row, row *WAFBundleAppRow) error {
+	return rows.Scan(&row.AppID, &row.ListenHost, &row.ListenPort, &row.Upstream, &row.Mode,
+		&row.RulesJSON, &row.Sensitivity,
+		&row.ProxyConfig,
+		&row.FCGIDocRoot, &row.FCGIIndex, &row.Maintenance)
+}
+
+// ListAssignmentsForAgent returns active (enabled) assignments for an agent,
+// joined with app runtime state (domain + internal port) so the caller can
+// build a bundle without a second round-trip.
+func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) ([]WAFBundleAppRow, error) {
+	rows, err := r.pool.Query(ctx, bundleRowHead+` waa.mode,`+bundleRowTail+`
 		FROM waf_agent_apps waa
 		JOIN apps a ON a.id = waa.app_id
 		LEFT JOIN app_configs ac ON ac.app_id = a.id
@@ -89,10 +100,7 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 	out := []WAFBundleAppRow{}
 	for rows.Next() {
 		var row WAFBundleAppRow
-		if err := rows.Scan(&row.AppID, &row.ListenHost, &row.ListenPort, &row.Upstream, &row.Mode,
-			&row.RulesJSON, &row.Sensitivity,
-			&row.ProxyConfig,
-			&row.FCGIDocRoot, &row.FCGIIndex, &row.Maintenance); err != nil {
+		if err := scanBundleRow(rows, &row); err != nil {
 			return nil, err
 		}
 		if row.Upstream == "" {
@@ -101,6 +109,20 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// BundleRowForApp returns the row ListAssignmentsForAgent would give for the application if an
+// agent served it in the given mode. ok is false when the application has no upstream, so no
+// bundle would carry it.
+func (r *WAFRepo) BundleRowForApp(ctx context.Context, appID, mode string) (row WAFBundleAppRow, ok bool, err error) {
+	err = scanBundleRow(r.pool.QueryRow(ctx, bundleRowHead+` $2::text,`+bundleRowTail+`
+		FROM apps a
+		LEFT JOIN app_configs ac ON ac.app_id = a.id
+		WHERE a.id = $1`, appID, mode), &row)
+	if err != nil {
+		return row, false, err
+	}
+	return row, row.Upstream != "", nil
 }
 
 // AgentRouteRow is the UI-facing view of a route assigned to an agent.
