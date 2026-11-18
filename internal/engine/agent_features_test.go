@@ -33,8 +33,8 @@ func TestAgentMaintenanceMode(t *testing.T) {
 		features []string
 		want     string // "true", "false" or "unknown"
 	}{
-		{"no features: an agent built before Hello.features", nil, "unknown"},
-		{"empty list", []string{}, "unknown"},
+		{"no features: an agent built before Hello.features", nil, "false"},
+		{"empty list", []string{}, "false"},
 		{"an agent with maintenance mode", []string{FeatureScriptRules, FeatureMaintenanceMode}, "true"},
 		{"maintenance mode alone", []string{FeatureMaintenanceMode}, "true"},
 		{"an agent that sends features without it", []string{FeatureScriptRules}, "false"},

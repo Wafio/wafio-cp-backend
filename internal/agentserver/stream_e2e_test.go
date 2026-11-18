@@ -609,7 +609,7 @@ func TestStreamHostAgentTelemetryOverMTLS(t *testing.T) {
 
 // script_rules is false for an agent that sent no_script_rules, true for one that sent script_rules or
 // any other feature (a v1 agent), and unknown for one that sent none. maintenance_mode is true for an
-// agent that sent maintenance_mode, false for one that sent other features, and unknown for none.
+// agent that sent maintenance_mode and false for every other agent that said Hello, also one that sent none.
 func TestStreamStoresAgentFeaturesFromHello(t *testing.T) {
 	for _, tc := range []struct {
 		name                       string
@@ -621,7 +621,7 @@ func TestStreamStoresAgentFeaturesFromHello(t *testing.T) {
 		{"script_rules and maintenance_mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true"},
 		{"a v1 agent", []string{"semantic_keys_jwt_graphql", "semantic_only"}, "true", "false"},
 		{"a v1 agent, no script rules", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false"},
-		{"no features", nil, "unknown", "unknown"},
+		{"no features", nil, "unknown", "false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newE2EEnv(t)

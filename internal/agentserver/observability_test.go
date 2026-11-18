@@ -199,7 +199,7 @@ func TestStoreAgentFeaturesFromHello(t *testing.T) {
 		{"an agent with maintenance mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true"},
 		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true", "false"},
 		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false"},
-		{"agent without features", nil, "unknown", "unknown"},
+		{"agent without features", nil, "unknown", "false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fw := &fakeHealthWriter{}

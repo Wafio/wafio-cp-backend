@@ -35,12 +35,11 @@ func AgentScriptRules(features []string) *bool {
 const FeatureMaintenanceMode = "maintenance_mode"
 
 // AgentMaintenanceMode says whether the WAF agent that sent these Hello.features supports
-// maintenance mode: true when the list holds FeatureMaintenanceMode, false for any other list, nil
-// when it is empty (an agent built before Hello.features existed cannot be told either way).
+// maintenance mode. It is called for an agent that said Hello: an empty list comes from an agent
+// built before Hello.features existed, which is older than maintenance mode, so the answer is no.
+// Only an agent that never connected stays unknown, and that is the stored NULL, not a value of
+// this function.
 func AgentMaintenanceMode(features []string) *bool {
-	if len(features) == 0 {
-		return nil
-	}
 	can := slices.Contains(features, FeatureMaintenanceMode)
 	return &can
 }
