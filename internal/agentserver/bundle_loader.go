@@ -132,7 +132,7 @@ func (l *projectBundleLoader) build(ctx context.Context, projectID, agentID stri
 
 	mb.Apps = make([]bundleAppLite, 0, len(rows))
 	for _, a := range rows {
-		if a.ListenPort <= 0 || a.Upstream == "" {
+		if !a.InBundle() {
 			continue
 		}
 		app := bundleAppLite{

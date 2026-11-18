@@ -112,9 +112,9 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 }
 
 // BundleRowForApp returns the row ListAssignmentsForAgent would give for the application if an
-// agent served it in the given mode. ok is false when the application has no upstream, so no
-// bundle would carry it.
-func (r *WAFRepo) BundleRowForApp(ctx context.Context, appID, mode string) (row WAFBundleAppRow, ok bool, err error) {
+// agent served it in the given mode. sent is false when the application has no upstream or no
+// listen port, so no bundle would carry it (see InBundle).
+func (r *WAFRepo) BundleRowForApp(ctx context.Context, appID, mode string) (row WAFBundleAppRow, sent bool, err error) {
 	err = scanBundleRow(r.pool.QueryRow(ctx, bundleRowHead+` $2::text,`+bundleRowTail+`
 		FROM apps a
 		LEFT JOIN app_configs ac ON ac.app_id = a.id
@@ -122,8 +122,12 @@ func (r *WAFRepo) BundleRowForApp(ctx context.Context, appID, mode string) (row 
 	if err != nil {
 		return row, false, err
 	}
-	return row, row.Upstream != "", nil
+	return row, row.InBundle(), nil
 }
+
+// InBundle reports whether a bundle carries the row: an application with no upstream or no listen
+// port is left out of it.
+func (row WAFBundleAppRow) InBundle() bool { return row.Upstream != "" && row.ListenPort > 0 }
 
 // AgentRouteRow is the UI-facing view of a route assigned to an agent.
 type AgentRouteRow struct {

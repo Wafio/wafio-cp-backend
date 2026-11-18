@@ -8560,7 +8560,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Name already used in the project (CONFLICT) or listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN).
+          description: Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE). Nothing is saved.
           content:
             application/json:
               schema:
@@ -15360,7 +15360,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN.'
+          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts). Nothing is saved.'
           content:
             application/json:
               schema:

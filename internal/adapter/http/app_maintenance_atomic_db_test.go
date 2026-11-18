@@ -100,9 +100,9 @@ func TestDBAppMaintenanceSavesRunOneAfterTheOther(t *testing.T) {
 	}
 }
 
-// A save holds the bundle of its agent until it commits, so a save of another application on that agent
-// and a move onto it are measured after it: two changes that each fit alone cannot pass the limit
-// together. A save on another agent does not wait.
+// A save holds the bundle of its agent until it commits, so a save of another application on that agent,
+// a route change on it and a move onto it are measured after it: two changes that each fit alone cannot
+// pass the limit together. A save on another agent does not wait.
 func TestDBAppMaintenanceOneAgentIsMeasuredOneChangeAtATime(t *testing.T) {
 	m := newMaintenanceFixture(t)
 	ctx := context.Background()
@@ -152,6 +152,12 @@ func TestDBAppMaintenanceOneAgentIsMeasuredOneChangeAtATime(t *testing.T) {
 			return stored, nil
 		})
 		return err
+	})
+	waits("a route change of another application on the agent", func(reached *atomic.Bool) error {
+		return m.repo.App.UpdateAtomic(ctx, m.project, sameAgent, repository.AppPatch{}, func(domain.Maintenance, string, string) error {
+			reached.Store(true)
+			return nil
+		})
 	})
 	waits("a move onto the agent", func(reached *atomic.Bool) error {
 		return m.repo.WAF.ReplaceAssignment(ctx, m.project, moving, m.agentID, "block", func(domain.Maintenance) error {
@@ -410,6 +416,58 @@ func TestDBAppMaintenanceBundleLimit(t *testing.T) {
 	wantStatus(t, "move the one that is off", move(off), fiber.StatusOK, "")
 	wantStatus(t, "turn the big one off", put(big, map[string]any{"enabled": false, "custom_html": bigPage}), fiber.StatusOK, "")
 	wantStatus(t, "and move it", move(big), fiber.StatusOK, "")
+}
+
+// An application with no listen port or no upstream is not in the bundle, so turning maintenance on for it
+// measures nothing. The route change that gives it both brings its page into the bundle, and is refused
+// when that passes the limit; other route changes are not.
+func TestDBAppMaintenanceRouteChangeThatBringsThePageIn(t *testing.T) {
+	m := newMaintenanceFixture(t)
+	owner := m.tokens["owner"]
+	ctx := context.Background()
+	base := "/api/projects/" + m.project + "/apps/"
+	on := map[string]any{"enabled": true, "custom_html": bigPage}
+	apps := []string{m.appID}
+	for i := 1; i <= 9; i++ {
+		apps = append(apps, m.addRoute(t, m.agentID, fmt.Sprintf("full-%d", i), 19300+i))
+	}
+	for i, app := range apps {
+		wantStatus(t, fmt.Sprintf("enable %d", i), call(t, m.app, http.MethodPut, base+app+"/maintenance", owner, on), fiber.StatusOK, "")
+	}
+
+	r := call(t, m.app, http.MethodPost, "/api/projects/"+m.project+"/apps", owner, map[string]any{"name": "no-route-yet"})
+	wantStatus(t, "create an application without a route", r, fiber.StatusCreated, "")
+	created, _ := r.body["app"].(map[string]any)
+	app, _ := created["id"].(string)
+	wantStatus(t, "assign it", call(t, m.app, http.MethodPut, base+app+"/waf-agent", owner, map[string]string{"agent_id": m.agentID, "mode": "block"}), fiber.StatusOK, "")
+	wantStatus(t, "its page is not in the bundle, so it fits", call(t, m.app, http.MethodPut, base+app+"/maintenance", owner, on), fiber.StatusOK, "")
+
+	update := func(body map[string]any) testResponse { return call(t, m.app, http.MethodPut, base+app, owner, body) }
+	routeURL := "/api/projects/" + m.project + "/agents/" + m.agentID + "/routes/" + app
+	wantStatus(t, "rename", update(map[string]any{"name": "still-no-route"}), fiber.StatusOK, "")
+	wantStatus(t, "a listen port without an upstream", update(map[string]any{"listen_port": 19399}), fiber.StatusOK, "")
+	gen := m.generation(t)
+	for name, send := range map[string]func() testResponse{
+		"application update": func() testResponse { return update(map[string]any{"upstream_url": "http://10.0.0.7:3000"}) },
+		"route update": func() testResponse {
+			return call(t, m.app, http.MethodPut, routeURL, owner, map[string]any{"upstream": "http://10.0.0.7:3000"})
+		},
+	} {
+		r := send()
+		wantStatus(t, name+" that brings the page in", r, fiber.StatusConflict, "MAINTENANCE_BUNDLE_TOO_LARGE")
+		text, _ := r.body["error"].(string)
+		if !strings.HasPrefix(text, fmt.Sprintf(`This application is in maintenance mode. With this route the WAF agent %q starts serving it`, m.agentName)) ||
+			!strings.Contains(text, " bytes, but it can receive at most 4,193,280 bytes. ") {
+			t.Errorf("409 text: %s", r.raw)
+		}
+	}
+	if row, sent, err := m.repo.WAF.BundleRowForApp(ctx, app, "block"); err != nil || sent || row.Upstream != "" || m.generation(t) != gen {
+		t.Errorf("a refused route change was stored: %+v, sent %v, %v", row, sent, err)
+	}
+	wantStatus(t, "turn it off", call(t, m.app, http.MethodPut, base+app+"/maintenance", owner, map[string]any{"enabled": false, "custom_html": bigPage}), fiber.StatusOK, "")
+	wantStatus(t, "the route change goes through", update(map[string]any{"upstream_url": "http://10.0.0.7:3000"}), fiber.StatusOK, "")
+	// Now that it is in the bundle, the switch is measured with it.
+	wantStatus(t, "and turning it on again is measured", call(t, m.app, http.MethodPut, base+app+"/maintenance", owner, on), fiber.StatusConflict, "MAINTENANCE_BUNDLE_TOO_LARGE")
 }
 
 // bundleBytesWith is the size of the bundle of the fixture's agent if the application had this

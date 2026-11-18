@@ -493,6 +493,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	appsH := &handlers.AppsHandler{Repo: repo}
 	if agentServer != nil {
 		appsH.AgentServer = agentServer
+		appsH.Bundles = agentServer
 	}
 	pViewer.Get("/apps", rateReadByUser, appsH.List)
 	pViewer.Post("/apps", RequireProjectAccess(repo, "member"), rateWriteByUser, appsH.Create)

@@ -791,7 +791,12 @@ func (h *WAFAgentHandler) UpdateAgentRoute(c *fiber.Ctx) error {
 		patch.Mode = body.Mode
 	}
 	patch.FCGIDocRoot, patch.FCGIIndex = fcgiPatch(body.FCGIDocRoot, body.FCGIIndex)
-	if err := h.Repo.App.UpdateAtomic(c.UserContext(), projectID, appID, patch); err != nil {
+	if err := h.Repo.App.UpdateAtomic(c.UserContext(), projectID, appID, patch,
+		admitRouteChange(c.UserContext(), h.Repo, h.Bundles, projectID, appID, patch)); err != nil {
+		var refuse *refusal
+		if errors.As(err, &refuse) {
+			return c.Status(refuse.status).JSON(refuse.body)
+		}
 		if conflict, ok := appUniqueConflict(err); ok {
 			return c.Status(fiber.StatusConflict).JSON(conflict)
 		}

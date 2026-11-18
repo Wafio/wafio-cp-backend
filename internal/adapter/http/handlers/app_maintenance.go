@@ -78,6 +78,44 @@ func bundleOverLimit(ctx context.Context, repo *repository.Repository, bundles B
 	return name, size, true, nil
 }
 
+// admitRouteChange refuses a route change of an application in maintenance mode that brings its
+// maintenance page into the bundle of its agent and makes that bundle larger than an agent accepts.
+// An application with no listen port or no upstream is left out of the bundle, so its page counts
+// only from the change that gives it both; the saves and moves that measured the agent before did
+// not count it. It is nil, so nothing is checked, when there is nothing to measure with.
+func admitRouteChange(ctx context.Context, repo *repository.Repository, bundles BundleSizer, projectID, appID string,
+	patch repository.AppPatch) func(stored domain.Maintenance, agentID, mode string) error {
+	if bundles == nil {
+		return nil
+	}
+	return func(stored domain.Maintenance, agentID, mode string) error {
+		if !stored.Enabled || agentID == "" {
+			return nil
+		}
+		row, sent, err := repo.WAF.BundleRowForApp(ctx, appID, mode)
+		if err != nil || sent {
+			return err
+		}
+		patch.ApplyTo(&row)
+		if !row.InBundle() {
+			return nil
+		}
+		name, size, over, err := bundleOverLimit(ctx, repo, bundles, projectID, agentID, func(rows []repository.WAFBundleAppRow) []repository.WAFBundleAppRow {
+			return append(rows, row)
+		})
+		if err != nil || !over {
+			return err
+		}
+		return &refusal{status: fiber.StatusConflict, body: fiber.Map{
+			"error": fmt.Sprintf("This application is in maintenance mode. With this route the WAF agent %q starts serving it, maintenance page included, "+
+				"and would have to receive a configuration of %s bytes, but it can receive at most %s bytes. "+
+				"Use a smaller custom page, turn maintenance mode off, or serve the application from another agent.",
+				shownName(name), groupDigits(size), groupDigits(engine.MaxAgentBundleBytes)),
+			"code": "MAINTENANCE_BUNDLE_TOO_LARGE",
+		}}
+	}
+}
+
 // maintenanceCapability selects the maintenance_mode value of an agent.
 func maintenanceCapability(c repository.AgentCapabilities) *bool { return c.Maintenance }
 
