@@ -52,6 +52,12 @@ const (
 	AuditAppCreated = "app.created"
 	AuditAppUpdated = "app.updated"
 
+	// Maintenance mode of an application: switched on, switched off, or settings changed with the
+	// state unchanged.
+	AuditAppMaintenanceEnabled  = "app.maintenance_enabled"
+	AuditAppMaintenanceDisabled = "app.maintenance_disabled"
+	AuditAppMaintenanceUpdated  = "app.maintenance_updated"
+
 	// WAF (project-level) config
 	AuditWafConfigSaved      = "waf.config_saved"
 	AuditWafAppAssigned      = "waf.app_assigned" //nolint:gosec // audit action name, not a credential

@@ -37,6 +37,8 @@ type WAFBundleAppRow struct {
 	// FastCGI config (migration 000044).
 	FCGIDocRoot string
 	FCGIIndex   string
+	// Maintenance is apps.maintenance (migration 000119), raw JSON.
+	Maintenance []byte
 }
 
 // ── Assignment ────────────────────────────────────────────────────────────
@@ -73,7 +75,8 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 		       COALESCE(ac.sensitivity, 0),
 		       COALESCE(a.proxy_config, '{}'::jsonb),
 		       COALESCE(a.fcgi_doc_root, ''),
-		       COALESCE(a.fcgi_index, 'index.php')
+		       COALESCE(a.fcgi_index, 'index.php'),
+		       COALESCE(a.maintenance, '{}'::jsonb)
 		FROM waf_agent_apps waa
 		JOIN apps a ON a.id = waa.app_id
 		LEFT JOIN app_configs ac ON ac.app_id = a.id
@@ -89,7 +92,7 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 		if err := rows.Scan(&row.AppID, &row.ListenHost, &row.ListenPort, &row.Upstream, &row.Mode,
 			&row.RulesJSON, &row.Sensitivity,
 			&row.ProxyConfig,
-			&row.FCGIDocRoot, &row.FCGIIndex); err != nil {
+			&row.FCGIDocRoot, &row.FCGIIndex, &row.Maintenance); err != nil {
 			return nil, err
 		}
 		if row.Upstream == "" {
@@ -119,6 +122,8 @@ type AgentRouteRow struct {
 	// FastCGI config (migration 000044).
 	FCGIDocRoot string `json:"fcgi_doc_root"`
 	FCGIIndex   string `json:"fcgi_index"`
+	// MaintenanceEnabled is the switch of apps.maintenance (migration 000119).
+	MaintenanceEnabled bool `json:"maintenance_enabled"`
 }
 
 // ListRoutesForAgent returns all enabled app assignments for a WAF agent,
@@ -132,7 +137,8 @@ func (r *WAFRepo) ListRoutesForAgent(ctx context.Context, agentID string) ([]Age
 		       waa.mode,
 		       COALESCE(a.proxy_config, '{}'::jsonb),
 		       COALESCE(a.fcgi_doc_root, ''),
-		       COALESCE(a.fcgi_index, 'index.php')
+		       COALESCE(a.fcgi_index, 'index.php'),
+		       COALESCE((a.maintenance->>'enabled')::boolean, false)
 		FROM waf_agent_apps waa
 		JOIN apps a ON a.id = waa.app_id
 		WHERE waa.agent_id = $1 AND waa.enabled = TRUE
@@ -147,7 +153,7 @@ func (r *WAFRepo) ListRoutesForAgent(ctx context.Context, agentID string) ([]Age
 		if err := rows.Scan(&row.AppID, &row.Name, &row.ListenHost, &row.ListenPort, &row.Upstream,
 			&row.Mode,
 			&row.ProxyConfig,
-			&row.FCGIDocRoot, &row.FCGIIndex); err != nil {
+			&row.FCGIDocRoot, &row.FCGIIndex, &row.MaintenanceEnabled); err != nil {
 			return nil, err
 		}
 		row.ProxyWarnings = domain.ProxyConfigWarnings(row.ProxyConfig)

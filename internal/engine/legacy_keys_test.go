@@ -416,3 +416,26 @@ func TestDashboardShapedDocumentsSaveAndNeedNoRewrite(t *testing.T) {
 		t.Errorf("a stored crs_only reads as default, not as inspection off: %+v", plan)
 	}
 }
+
+// The maintenance object of an app is carried through, whether or not the bundle needed a rewrite.
+func TestNormalizeBundleKeepsMaintenance(t *testing.T) {
+	const maintenance = `{"enabled":true,"message":"Back soon","allow_ips":["203.0.113.7"],"allow_paths":["/healthz"]}`
+	for name, rules := range map[string]string{
+		"rewritten": `"rules_json":{"semantic_policies":{"disable_semantic":true}},`,
+		"unchanged": ``,
+	} {
+		bundle := `{"apps":[{"app_id":"a",` + rules + `"maintenance":` + maintenance + `}]}`
+		out, lines := NormalizeBundle([]byte(bundle))
+		if (name == "rewritten") != (len(lines) > 0) {
+			t.Fatalf("%s: rewrite notes %v", name, lines)
+		}
+		var got struct {
+			Apps []struct {
+				Maintenance json.RawMessage `json:"maintenance"`
+			} `json:"apps"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil || len(got.Apps) != 1 || string(got.Apps[0].Maintenance) != maintenance {
+			t.Errorf("%s: maintenance = %s (%v), want %s", name, out, err, maintenance)
+		}
+	}
+}

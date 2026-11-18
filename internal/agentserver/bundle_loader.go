@@ -52,6 +52,9 @@ type bundleAppLite struct {
 	CustomGUIRules    []json.RawMessage `json:"custom_gui_rules,omitempty"`
 	CustomScriptRules []json.RawMessage `json:"custom_script_rules,omitempty"`
 	CustomTuningRules []json.RawMessage `json:"custom_tuning_rules,omitempty"`
+	// Maintenance is the stored maintenance object, present only while it is switched on
+	// (migration 000119). An agent that does not know the key ignores it.
+	Maintenance json.RawMessage `json:"maintenance,omitempty"`
 }
 
 // LoadBundle returns the bundle for a specific agent. Only apps assigned to
@@ -108,6 +111,9 @@ func (l *projectBundleLoader) LoadBundle(ctx context.Context, projectID, agentNa
 		if a.Sensitivity > 0 {
 			app.Sensitivity = a.Sensitivity
 		}
+		if maintenanceOn(a.Maintenance) {
+			app.Maintenance = json.RawMessage(a.Maintenance)
+		}
 		if guiRules, err := l.repo.WafCustomRules.ListGUIRulesRaw(ctx, a.AppID); err == nil && len(guiRules) > 0 {
 			app.CustomGUIRules = guiRules
 		}
@@ -140,4 +146,12 @@ func (l *projectBundleLoader) LoadBundle(ctx context.Context, projectID, agentNa
 		return nil, 0, err
 	}
 	return out, mb.Generation, nil
+}
+
+// maintenanceOn reports whether a stored maintenance object has its switch on.
+func maintenanceOn(raw []byte) bool {
+	var m struct {
+		Enabled bool `json:"enabled"`
+	}
+	return json.Unmarshal(raw, &m) == nil && m.Enabled
 }

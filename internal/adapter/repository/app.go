@@ -39,6 +39,10 @@ type App struct {
 	FCGIDocRoot string `json:"fcgi_doc_root"`
 	FCGIIndex   string `json:"fcgi_index"`
 
+	// MaintenanceEnabled is the switch of apps.maintenance (migration 000119); the rest of that
+	// object is read with GetMaintenance.
+	MaintenanceEnabled bool `json:"maintenance_enabled"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -68,6 +72,7 @@ func (r *AppRepo) GetByID(ctx context.Context, id string) (*App, error) {
 		       listen_host, listen_port, upstream_url,
 		       COALESCE(proxy_config, '{}'::jsonb),
 		       COALESCE(fcgi_doc_root, ''), COALESCE(fcgi_index, ''),
+		       COALESCE((maintenance->>'enabled')::boolean, false),
 		       created_at, updated_at
 		FROM apps WHERE id = $1`, id,
 	).Scan(
@@ -75,6 +80,7 @@ func (r *AppRepo) GetByID(ctx context.Context, id string) (*App, error) {
 		&a.ListenHost, &a.ListenPort, &a.UpstreamURL,
 		&a.ProxyConfig,
 		&a.FCGIDocRoot, &a.FCGIIndex,
+		&a.MaintenanceEnabled,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
@@ -90,6 +96,7 @@ func (r *AppRepo) ListByProject(ctx context.Context, projectID string) ([]App, e
 		       listen_host, listen_port, upstream_url,
 		       COALESCE(proxy_config, '{}'::jsonb),
 		       COALESCE(fcgi_doc_root, ''), COALESCE(fcgi_index, ''),
+		       COALESCE((maintenance->>'enabled')::boolean, false),
 		       created_at, updated_at
 		FROM apps WHERE project_id = $1 ORDER BY created_at`, projectID)
 	if err != nil {
@@ -105,6 +112,7 @@ func (r *AppRepo) ListByProject(ctx context.Context, projectID string) ([]App, e
 			&a.ListenHost, &a.ListenPort, &a.UpstreamURL,
 			&a.ProxyConfig,
 			&a.FCGIDocRoot, &a.FCGIIndex,
+			&a.MaintenanceEnabled,
 			&a.CreatedAt, &a.UpdatedAt,
 		); err != nil {
 			return nil, err

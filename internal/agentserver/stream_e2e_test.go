@@ -608,18 +608,20 @@ func TestStreamHostAgentTelemetryOverMTLS(t *testing.T) {
 }
 
 // script_rules is false for an agent that sent no_script_rules, true for one that sent script_rules or
-// any other feature (a v1 agent), and unknown for one that sent none.
+// any other feature (a v1 agent), and unknown for one that sent none. maintenance_mode is true for an
+// agent that sent maintenance_mode and false for every other agent that said Hello, also one that sent none.
 func TestStreamStoresAgentFeaturesFromHello(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		features    []string
-		wantScripts string
+		name                       string
+		features                   []string
+		wantScripts, wantMaintMode string
 	}{
-		{"script_rules", []string{engine.FeatureScriptRules}, "true"},
-		{"no_script_rules", []string{engine.FeatureNoScriptRules}, "false"},
-		{"a v1 agent", []string{"semantic_keys_jwt_graphql", "semantic_only"}, "true"},
-		{"a v1 agent, no script rules", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false"},
-		{"no features", nil, "unknown"},
+		{"script_rules", []string{engine.FeatureScriptRules}, "true", "false"},
+		{"no_script_rules", []string{engine.FeatureNoScriptRules}, "false", "false"},
+		{"script_rules and maintenance_mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true"},
+		{"a v1 agent", []string{"semantic_keys_jwt_graphql", "semantic_only"}, "true", "false"},
+		{"a v1 agent, no script rules", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false"},
+		{"no features", nil, "unknown", "false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newE2EEnv(t)
@@ -629,10 +631,10 @@ func TestStreamStoresAgentFeaturesFromHello(t *testing.T) {
 				t.Fatal("no welcome")
 			}
 			waitUntil(t, "features stored", func() bool {
-				return len(env.health.scriptRulesCalls()) == 1
+				return len(env.health.featuresCalls()) == 1
 			})
-			if got, want := env.health.scriptRulesCalls()[0], (scriptRulesCall{e2eProject, e2eAgentID, tc.wantScripts}); got != want {
-				t.Fatalf("stored script rules %+v, want %+v", got, want)
+			if got, want := env.health.featuresCalls()[0], (featuresCall{e2eProject, e2eAgentID, tc.wantScripts, tc.wantMaintMode}); got != want {
+				t.Fatalf("stored features %+v, want %+v", got, want)
 			}
 		})
 	}

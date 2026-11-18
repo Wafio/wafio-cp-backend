@@ -589,7 +589,7 @@ func decisionRowFromEvent(projectID, agentID, countryCode string, dec *agentv1.W
 // health counters. Narrow so ingestion can be tested without a database.
 type wafHealthWriter interface {
 	UpdateAgentWAFHealth(ctx context.Context, projectID, agentID string, h repository.AgentWAFHealth) error
-	UpdateAgentScriptRules(ctx context.Context, projectID, agentID string, scriptRules *bool) error
+	UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance *bool) error
 }
 
 // wafHealthFromHeartbeat extracts the inspection-health fields (5-8, 11-20)
@@ -696,7 +696,8 @@ func (s *Server) storeWAFHealth(projectID, agentName string, hb *agentv1.Heartbe
 	}
 }
 
-// storeAgentFeatures records whether the agent can run script rules, as reported in its Hello.
+// storeAgentFeatures records whether the agent can run script rules and whether it supports
+// maintenance mode, as reported in its Hello.
 // Synchronous; Stream calls it in a goroutine.
 func (s *Server) storeAgentFeatures(projectID, agentID string, features []string) {
 	defer recoverPanic("store-agent-features")
@@ -706,8 +707,8 @@ func (s *Server) storeAgentFeatures(projectID, agentID string, features []string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := w.UpdateAgentScriptRules(ctx, projectID, agentID, engine.AgentScriptRules(features)); err != nil {
-		log.Printf("[agentserver] store script rules failed project=%s agent=%s: %v", projectID, agentID, err)
+	if err := w.UpdateAgentFeatures(ctx, projectID, agentID, engine.AgentScriptRules(features), engine.AgentMaintenanceMode(features)); err != nil {
+		log.Printf("[agentserver] store agent features failed project=%s agent=%s: %v", projectID, agentID, err)
 	}
 }
 
