@@ -18704,7 +18704,7 @@ components:
             type: string
         allow_paths:
           type: array
-          description: At most 20 paths. Each starts with /, has at most 256 bytes, has no spaces, ?, #, %, control characters, and no . or .. segment.
+          description: At most 20 paths. Each starts with /, has at most 256 bytes, has no spaces, ?, #, %, control characters, and no . or .. segment. The path / alone is refused, because it matches every request.
           items:
             type: string
         started_at:

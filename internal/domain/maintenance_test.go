@@ -50,6 +50,7 @@ func TestMaintenanceNormalizeErrors(t *testing.T) {
 		{"path with dot segment", Maintenance{AllowPaths: []string{"/a/./b"}}, "allow_paths", `allow_paths: "/a/./b" must not contain . or .. segments`},
 		{"path with dot dot segment", Maintenance{AllowPaths: []string{"/healthz/../admin"}}, "allow_paths", `allow_paths: "/healthz/../admin" must not contain . or .. segments`},
 		{"path ending in dot dot", Maintenance{AllowPaths: []string{"/a/.."}}, "allow_paths", `allow_paths: "/a/.." must not contain . or .. segments`},
+		{"root path", Maintenance{AllowPaths: []string{"/healthz", " / "}}, "allow_paths", `allow_paths: "/" lets every visitor through; remove it or turn maintenance mode off`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := tc.m

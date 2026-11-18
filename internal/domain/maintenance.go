@@ -199,5 +199,9 @@ func checkMaintenancePath(v string) (string, string) {
 			return "", "must not contain . or .. segments"
 		}
 	}
+	// "/" matches every request, so the maintenance page would never be shown.
+	if v == "/" {
+		return "", "lets every visitor through; remove it or turn maintenance mode off"
+	}
 	return v, ""
 }
