@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/wafio/wafio-cp-backend/internal/apicontract"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -304,3 +305,32 @@ const (
 	agentA2 = "0b4f9a2e-6c1d-4e7a-9f35-2a8d1c7b5e12"
 	agentA3 = "0b4f9a2e-6c1d-4e7a-9f35-2a8d1c7b5e13"
 )
+
+// The firewall and trace status check the agent's map_sizing against its
+// schema: a map without a name or with a negative size fails, a status
+// without map_sizing (an older agent) passes.
+func TestHostStatusMapSizingSchema(t *testing.T) {
+	// A spec of its own, so these synthetic bodies do not count as handler coverage.
+	s, err := apicontract.Load(apicontract.DefaultSpecPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := http.Header{"Content-Type": {"application/json"}}
+	for _, op := range []string{"GET /api/projects/{id}/host/status", "GET /api/projects/{id}/host/trace/status"} {
+		for _, c := range []struct{ sizing, want string }{
+			{``, ""},
+			{`,"map_sizing":{"scale":0.5,"source":"auto","memory_bytes":4294967296,"memory_source":"meminfo","sampled_at":"2026-11-18T08:15:30Z",
+				"maps":[{"name":"wafio_jail","max_entries":32768,"default_max_entries":65536,"entries":12,"full_count":1,"last_full_at":"2026-11-18T08:15:00Z"}]}`, ""},
+			{`,"map_sizing":{"scale":0.5,"maps":[{"max_entries":32768}]}`, "/map_sizing/maps/0"},
+			{`,"map_sizing":{"scale":0.5,"maps":[{"name":"wafio_jail","max_entries":-1}]}`, "/map_sizing/maps/0/max_entries"},
+		} {
+			err := s.Check(op, 200, header, []byte(`{"running":true,"agent_online":true`+c.sizing+`}`))
+			switch {
+			case c.want == "" && err != nil:
+				t.Errorf("%s %s: unexpected error: %v", op, c.sizing, err)
+			case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+				t.Errorf("%s %s: error %v, want one containing %q", op, c.sizing, err, c.want)
+			}
+		}
+	}
+}

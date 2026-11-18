@@ -24411,6 +24411,8 @@ components:
           items:
             type: string
             description: Warning.
+        map_sizing:
+          $ref: '#/components/schemas/HostMapSizing'
         egress_ipv6_supported:
           type: boolean
           description: Egress IPv6 blocking supported (agent-reported).
@@ -24955,6 +24957,81 @@ components:
         total: 0
         limit: 100
         offset: 0
+    HostMapCapacity:
+      type: object
+      description: One BPF map that the host agent sizes from the host memory (agent-reported).
+      properties:
+        name:
+          type: string
+          description: Map name, for example wafio_conntrack or trace_events.
+        max_entries:
+          type: integer
+          description: Size in use. A count of entries, except for the trace_events ring, where it is bytes.
+          minimum: 0
+        default_max_entries:
+          type: integer
+          description: Size the BPF object declares, the most the agent allocates. Same unit as max_entries.
+          minimum: 0
+        entries:
+          type: integer
+          description: Entries in the map, counted every 30 seconds. Absent for the ring and before the first count.
+          minimum: 0
+        full_count:
+          type: integer
+          description: Inserts the map refused since the agent started; for the ring, events lost because it was full. Absent for LRU maps, which evict instead.
+          minimum: 0
+        last_full_at:
+          type: string
+          description: Last time full_count grew. For an LRU map, the last count that found it within one eviction margin of full. Absent when it never was.
+          format: date-time
+      required:
+        - name
+        - max_entries
+      additionalProperties: true
+    HostMapSizing:
+      type: object
+      description: Sizes of the BPF maps that the host agent scales to the host memory, and how full they are (agent-reported). Absent on agents that do not scale their maps.
+      properties:
+        scale:
+          type: number
+          description: Share of the default sizes in use, above 0 and at most 1.
+        source:
+          type: string
+          description: auto when the agent computed the scale from the memory, forced when WAFIO_EBPF_MAP_SCALE or --ebpf-map-scale set it.
+        memory_bytes:
+          type: integer
+          description: Memory the scale was computed from. Absent when it could not be read.
+          minimum: 0
+        memory_source:
+          type: string
+          description: 'Where memory_bytes comes from: meminfo, cgroup (a cgroup v2 memory.max lowered it) or unknown.'
+        sampled_at:
+          type: string
+          description: When the entries were last counted. Absent before the first count.
+          format: date-time
+        maps:
+          type: array
+          description: The scaled maps.
+          items:
+            $ref: '#/components/schemas/HostMapCapacity'
+      additionalProperties: true
+      example:
+        scale: 0.2395
+        source: auto
+        memory_bytes: 2057306112
+        memory_source: meminfo
+        sampled_at: '2026-11-18T08:15:30Z'
+        maps:
+          - name: wafio_conntrack
+            max_entries: 119750
+            default_max_entries: 500000
+            entries: 4210
+          - name: wafio_syn_state
+            max_entries: 47900
+            default_max_entries: 200000
+            entries: 47900
+            full_count: 3
+            last_full_at: '2026-11-18T08:15:00Z'
     HostPortScope:
       type: object
       description: A port scope of an allowlist entry.
@@ -29927,6 +30004,8 @@ components:
         forward_filter:
           type: string
           description: 'Trace forwarding filter state: off, active, too_large, revision_mismatch or invalid (absent on older agents).'
+        map_sizing:
+          $ref: '#/components/schemas/HostMapSizing'
         ingestion:
           type: object
           properties:

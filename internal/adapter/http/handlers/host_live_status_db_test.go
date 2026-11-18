@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/wafio/wafio-cp-backend/internal/apicontract"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -104,5 +106,103 @@ func TestHostStatusReadsRequestLiveStatus(t *testing.T) {
 	}
 	if n := live.statusCount(); n != len(paths) {
 		t.Fatalf("cross-tenant reads asked for status: %v", live.status)
+	}
+}
+
+// The agent's map_sizing (in the firewall and in the trace status) comes back
+// unchanged from GET …/host/status, GET …/host/trace/status and the stream's
+// status frame, and both answers match the contract; a status without it
+// (an older agent) still does.
+func TestHostStatusPassesMapSizingThrough(t *testing.T) {
+	dsn := os.Getenv("TEST_DB_URL")
+	if dsn == "" {
+		t.Skip("TEST_DB_URL not set")
+	}
+	ctx := context.Background()
+	repo, err := repository.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+	project, user := dbfixture.SeedProject(t, repo.DB)
+	if _, err := repo.DB.Exec(ctx, `UPDATE projects SET description = '' WHERE id = $1`, project); err != nil {
+		t.Fatal(err)
+	}
+	agent := uuid.NewString()
+	if _, err := repo.DB.Exec(ctx,
+		`INSERT INTO agents (id, user_id, project_id, name, kind, last_seen) VALUES ($1,$2,$3,$4,'host', now())`,
+		agent, user, project, "agent-"+agent[:8]); err != nil {
+		t.Fatal(err)
+	}
+	hostH := &HostPolicyHandler{Repo: repo, GRPCSrv: &liveCapablePusher{}}
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(auth.UserIDKey, user)
+		c.Locals("user_id", user)
+		return c.Next()
+	})
+	g := app.Group("/api/projects/:id/host")
+	g.Get("/status", hostH.GetStatus)
+	g.Get("/trace/status", hostH.GetTraceStatus)
+	stream := &HostStreamHandler{Repo: repo}
+
+	const firewallMaps = `{"scale":0.2395,"source":"auto","memory_bytes":2057306112,"memory_source":"meminfo",
+		"sampled_at":"2026-11-18T08:15:30Z","maps":[
+		{"name":"wafio_conntrack","max_entries":119750,"default_max_entries":500000,"entries":4210},
+		{"name":"wafio_syn_state","max_entries":47900,"default_max_entries":200000,"entries":47900,"full_count":3,"last_full_at":"2026-11-18T08:15:00Z"}]}`
+	const traceMaps = `{"scale":1,"source":"forced","memory_source":"unknown","maps":[
+		{"name":"trace_events","max_entries":16777216,"default_max_entries":16777216,"full_count":0}]}`
+	same := func(t *testing.T, where string, got any, want string) {
+		t.Helper()
+		var w any
+		if want != "" {
+			if err := json.Unmarshal([]byte(want), &w); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !reflect.DeepEqual(got, w) {
+			t.Fatalf("%s: map_sizing = %v, want %v", where, got, w)
+		}
+	}
+	for _, tc := range []struct{ name, firewall, trace string }{
+		{"with map_sizing", firewallMaps, traceMaps},
+		{"without map_sizing", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ebpf := map[string]any{"running": true, "xdp_attached": true}
+			trace := map[string]any{"running": true, "probes": 3}
+			if tc.firewall != "" {
+				ebpf["map_sizing"] = json.RawMessage(tc.firewall)
+				trace["map_sizing"] = json.RawMessage(tc.trace)
+			}
+			payload, err := json.Marshal(map[string]any{"ebpf": ebpf, "trace": trace})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.EBPF.InsertStatus(ctx, project, agent, payload); err != nil {
+				t.Fatal(err)
+			}
+			for path, want := range map[string]string{"/status": tc.firewall, "/trace/status": tc.trace} {
+				code, body := getJSON(t, app, "/api/projects/"+project+"/host"+path+"?agent_id="+agent)
+				if code != fiber.StatusOK {
+					t.Fatalf("GET %s = %d", path, code)
+				}
+				same(t, "GET "+path, body["map_sizing"], want)
+			}
+			frame, ok := stream.buildStatus(agent)
+			if !ok {
+				t.Fatal("no status frame")
+			}
+			raw, err := json.Marshal(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sections map[string]map[string]any
+			if err := json.Unmarshal(raw, &sections); err != nil {
+				t.Fatal(err)
+			}
+			same(t, "status frame ebpf", sections["ebpf"]["map_sizing"], tc.firewall)
+			same(t, "status frame trace", sections["trace"]["map_sizing"], tc.trace)
+		})
 	}
 }
