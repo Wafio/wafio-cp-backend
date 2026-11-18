@@ -97,7 +97,7 @@ func (r *HostFleetRepo) FleetAgents(ctx context.Context, projectID string, hostI
 		 CROSS JOIN LATERAL (SELECT a.last_status_json->'ebpf' AS e, a.last_status_json->'trace' AS t) s
 		  LEFT JOIN LATERAL (
 		       SELECT count(*) FILTER (WHERE p.enabled) AS enabled,
-		              count(*) FILTER (WHERE p.enabled AND p.action IN ('kill','block')) AS enforcing
+		              count(*) FILTER (WHERE p.enabled AND p.action = 'kill') AS enforcing
 		         FROM ebpf_trace_policies p WHERE p.agent_id = a.id) pc ON a.kind = 'host'
 		 WHERE a.project_id = $1 AND a.deleted_at IS NULL AND a.host_id = ANY($2::uuid[])`,
 		projectID, hostIDs, hostpolicy.BaselineCoverageNotes)

@@ -2157,23 +2157,15 @@ func (h *HostPolicyHandler) ListPolicies(c *fiber.Ctx) error {
 	return c.JSON(out)
 }
 
-// checkBlockPolicy refuses an enabled block policy that the host agent would
-// not enforce. The agent denies a connect in the kernel only for a policy
-// whose one match is a destination IPv4 and that selects every connect to it
-// (connect event or none, no minimum severity); any other block policy does
-// nothing. A disabled policy passes, so one can still be switched off or edited.
-func checkBlockPolicy(p hostpolicy.EnforcementPolicy) error {
-	if !p.Enabled || hostpolicy.ParseActionName(p.Action) != hostpolicy.ActionBlock {
-		return nil
+// errBlockAction answers a policy that names the removed block action. Events
+// and enforcement log rows recorded with it are still read.
+var errBlockAction = errors.New("trace policies no longer have a block action: to block outbound traffic to an address, add it to the firewall egress blocklist (Destination addresses to block); to stop a process, use the kill action")
+
+func refuseBlockAction(p hostpolicy.EnforcementPolicy) error {
+	if hostpolicy.ParseActionName(p.Action) == hostpolicy.ActionBlock {
+		return errBlockAction
 	}
-	onlyDestIP := strings.TrimSpace(p.MatchDestIP) != "" && p.MatchComm == "" && p.MatchFilename == "" &&
-		p.MatchUID == nil && p.MatchDestPort == ""
-	connect := len(p.EventTypes) == 0 || slices.ContainsFunc(p.EventTypes, func(n string) bool { return strings.EqualFold(n, "connect") })
-	anySeverity := p.MinSeverity == "" || strings.EqualFold(p.MinSeverity, "info")
-	if onlyDestIP && connect && anySeverity {
-		return nil
-	}
-	return errors.New("a block policy only denies outbound connections to one IPv4 address: set match_dest_ip, leave the other matches empty, select the connect event (or none) and no minimum severity; use kill to stop a process")
+	return nil
 }
 
 // CreatePolicy stores a new policy (201 with the stored policy) and pushes
@@ -2192,7 +2184,7 @@ func (h *HostPolicyHandler) CreatePolicy(c *fiber.Ctx) error {
 	if err := hostpolicy.ValidateEnforcementPolicy(requestedPolicy); err != nil {
 		return invalidInput(c, "BAD_REQUEST", err)
 	}
-	if err := checkBlockPolicy(requestedPolicy); err != nil {
+	if err := refuseBlockAction(requestedPolicy); err != nil {
 		return invalidInput(c, "BAD_REQUEST", err)
 	}
 	createPolicyUserID, _ := c.Locals("user_id").(string)
@@ -2274,7 +2266,7 @@ func (h *HostPolicyHandler) UpdatePolicy(c *fiber.Ctx) error {
 	if err := hostpolicy.ValidateEnforcementPolicy(requestedPolicy); err != nil {
 		return invalidInput(c, "BAD_REQUEST", err)
 	}
-	if err := checkBlockPolicy(requestedPolicy); err != nil {
+	if err := refuseBlockAction(requestedPolicy); err != nil {
 		return invalidInput(c, "BAD_REQUEST", err)
 	}
 	updatePolicyUserID, _ := c.Locals("user_id").(string)

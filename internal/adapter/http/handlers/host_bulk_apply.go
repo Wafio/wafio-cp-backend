@@ -828,7 +828,7 @@ func (h *HostPolicyHandler) tracePoliciesToCopy(ctx context.Context, projectID s
 		if err := hostpolicy.ValidateEnforcementPolicy(p); err != nil {
 			return nil, "", bulkBadRequest("BAD_REQUEST", err, "The request contains an invalid value.")
 		}
-		if err := checkBlockPolicy(p); err != nil {
+		if err := refuseBlockAction(p); err != nil {
 			return nil, "", bulkBadRequest("BAD_REQUEST", err, "The request contains an invalid value.")
 		}
 	}

@@ -107,23 +107,36 @@ func TestDBTracePolicyRoutesAnswerStoredRows(t *testing.T) {
 	}
 }
 
-// A block policy the connect blocklist cannot carry is refused enabled on
-// create and on update, and stored disabled.
-func TestDBTracePolicyBlockMustBeEnforceable(t *testing.T) {
+// The block action is refused on create and update, enabled or not, with the
+// same answer; nothing is stored.
+func TestDBTracePolicyBlockActionRefused(t *testing.T) {
 	f := newDBFixture(t)
 	tok := f.tokens["owner"]
 	agentID := f.registerAgent(t, "owner", "trace-block", "host")
 	base := "/api/projects/" + f.project + "/host/trace/policies"
 	q := "?agent_id=" + agentID
 
-	wantStatus(t, "enabled block on a comm", call(t, f.app, http.MethodPost, base+q, tok,
-		map[string]any{"name": "block-nc", "action": "block", "enabled": true, "match_comm": "nc"}), fiber.StatusBadRequest, "BAD_REQUEST")
-	wantStatus(t, "enabled block on an ip", call(t, f.app, http.MethodPost, base+q, tok,
-		map[string]any{"name": "block-ip", "action": "block", "enabled": true, "match_dest_ip": "192.0.2.10"}), fiber.StatusCreated, "")
-	off := call(t, f.app, http.MethodPost, base+q, tok, map[string]any{"name": "block-nc", "action": "block", "enabled": false, "match_comm": "nc"})
-	wantStatus(t, "disabled block on a comm", off, fiber.StatusCreated, "")
+	for name, body := range map[string]map[string]any{
+		"enabled on a comm":   {"name": "block-nc", "action": "block", "enabled": true, "match_comm": "nc"},
+		"enabled on an ip":    {"name": "block-ip", "action": "block", "enabled": true, "match_dest_ip": "192.0.2.10"},
+		"disabled on an ip":   {"name": "block-off", "action": "block", "enabled": false, "match_dest_ip": "192.0.2.10"},
+		"upper case on an ip": {"name": "block-up", "action": "BLOCK", "enabled": true, "match_dest_ip": "192.0.2.10"},
+	} {
+		r := call(t, f.app, http.MethodPost, base+q, tok, body)
+		wantStatus(t, name, r, fiber.StatusBadRequest, "BAD_REQUEST")
+		if msg, _ := r.body["error"].(string); !strings.Contains(msg, "egress blocklist") || !strings.Contains(msg, "kill") {
+			t.Fatalf("%s: message %q does not name the replacements", name, msg)
+		}
+	}
+	ok := call(t, f.app, http.MethodPost, base+q, tok, map[string]any{"name": "watch-ip", "action": "alert", "enabled": true, "match_dest_ip": "192.0.2.10"})
+	wantStatus(t, "alert on an ip", ok, fiber.StatusCreated, "")
 
-	pid := strconv.Itoa(int(off.body["id"].(float64)))
-	wantStatus(t, "enable it", call(t, f.app, http.MethodPut, base+"/"+pid+q, tok,
-		map[string]any{"name": "block-nc", "action": "block", "enabled": true, "match_comm": "nc"}), fiber.StatusBadRequest, "BAD_REQUEST")
+	pid := strconv.Itoa(int(ok.body["id"].(float64)))
+	wantStatus(t, "update to block", call(t, f.app, http.MethodPut, base+"/"+pid+q, tok,
+		map[string]any{"name": "watch-ip", "action": "block", "enabled": true, "match_dest_ip": "192.0.2.10"}), fiber.StatusBadRequest, "BAD_REQUEST")
+
+	rows, err := f.repo.EBPF.ListTracePoliciesByAgent(context.Background(), agentID)
+	if err != nil || len(rows) != 1 || rows[0].Action != "alert" {
+		t.Fatalf("stored policies after the refusals: %+v %v", rows, err)
+	}
 }

@@ -7356,7 +7356,7 @@ paths:
                 tags:
                   - shell
         '400':
-          description: 'Invalid policy. Codes: BAD_REQUEST (missing name, unknown event type, severity or action, bad match_dest_ip or match_dest_port, match_comm_mode not exact/word/substring, kill policy without a narrowing match and without kill_acknowledged, enabled block policy that is not a connect block on one destination IPv4), HOST_TARGET_REQUIRED. May also carry an error from the agent.'
+          description: 'Invalid policy. Codes: BAD_REQUEST (missing name, unknown event type, severity or action, bad match_dest_ip or match_dest_port, match_comm_mode not exact/word/substring, kill policy without a narrowing match and without kill_acknowledged, action block, which trace policies no longer have: block outbound traffic to an address with the firewall egress blocklist, stop a process with the action kill), HOST_TARGET_REQUIRED. May also carry an error from the agent.'
           content:
             application/json:
               schema:
@@ -7655,7 +7655,7 @@ paths:
     get:
       operationId: HostPolicyHandler_GetEnforcementLog
       summary: Recent trace enforcement log entries
-      description: Returns the entries of actions that trace policies took (kill, block, alert ...), newest first.
+      description: Returns the entries of actions that trace policies took (kill, alert ...), newest first. Entries recorded by an earlier agent under the removed action block are still returned.
       tags:
         - Runtime security
       x-rate-limiter: rateReadByUser
@@ -18167,7 +18167,7 @@ components:
           description: AppArmor state.
         bpf_lsm:
           type: string
-          description: BPF LSM state.
+          description: BPF LSM state as the host reports it. The control plane stores it and does not use it.
         container_runtime:
           type: string
           description: Container runtime.
@@ -20441,7 +20441,7 @@ components:
           description: Policy name at the time.
         action:
           type: string
-          description: Action taken, for example kill, block, alert.
+          description: Action taken, for example kill or alert. Rows recorded by an earlier agent can say block.
         success:
           type: boolean
           description: The action took effect. A kill counts as successful only when the signal was accepted.
@@ -20576,11 +20576,11 @@ components:
           description: Destination ports for connect, bind and listen, comma-separated, each 1..65535. Empty matches any.
         match_dest_ip:
           type: string
-          description: Single IPv4 destination address of connect or sendto events. A policy that sets only this can be enforced in the kernel by the BPF-LSM connect blocklist.
+          description: Single IPv4 destination address of connect or sendto events.
           format: ipv4
         action:
           type: string
-          description: 'Enforcement action as stored: monitor, alert, kill, simulate, block (the agent normalises aliases; a policy saved while the agent was offline keeps the spelling sent). Only a block policy that sets match_dest_ip and no other match, selects the connect event (or none) and sets no minimum severity is enforced: it denies every outbound connect to that IPv4 address in the kernel. Any other block policy does nothing, and is refused with 400 BAD_REQUEST while enabled.'
+          description: 'Enforcement action as stored: monitor, alert, kill, simulate (the agent normalises aliases; a policy saved while the agent was offline keeps the spelling sent). A policy that was stored with the removed action block became alert when the control plane was upgraded.'
           enum:
             - ''
             - monitor
@@ -20590,7 +20590,6 @@ components:
             - dryrun
             - dry-run
             - shadow
-            - block
         kill_acknowledged:
           type: boolean
           description: Operator confirmation that a kill policy without a narrowing match is intended. Required for such a kill policy (otherwise 400 BAD_REQUEST); persisted. UID 0, a "/" path, bare system directories (/usr/, /tmp/) and terms shorter than 3 characters do not narrow.
@@ -20768,11 +20767,11 @@ components:
           description: Destination ports for connect, bind and listen, comma-separated, each 1..65535. Empty matches any.
         match_dest_ip:
           type: string
-          description: Single IPv4 destination address of connect or sendto events. A policy that sets only this can be enforced in the kernel by the BPF-LSM connect blocklist.
+          description: Single IPv4 destination address of connect or sendto events.
           format: ipv4
         action:
           type: string
-          description: 'Enforcement action. Accepted case-insensitively: monitor, alert, kill, simulate (aliases dryrun, dry-run, shadow), block. Empty means monitor. Only a block policy that sets match_dest_ip and no other match, selects the connect event (or none) and sets no minimum severity is enforced: it denies every outbound connect to that IPv4 address in the kernel. Any other block policy does nothing, and is refused with 400 BAD_REQUEST while enabled.'
+          description: 'Enforcement action. Accepted case-insensitively: monitor, alert, kill, simulate (aliases dryrun, dry-run, shadow). Empty means monitor. The action block no longer exists and is refused with 400 BAD_REQUEST: to block outbound traffic to an address use the firewall egress blocklist, to stop a process use kill.'
           enum:
             - ''
             - monitor
@@ -20782,7 +20781,6 @@ components:
             - dryrun
             - dry-run
             - shadow
-            - block
         kill_acknowledged:
           type: boolean
           description: Operator confirmation that a kill policy without a narrowing match is intended. Required for such a kill policy (otherwise 400 BAD_REQUEST); persisted. UID 0, a "/" path, bare system directories (/usr/, /tmp/) and terms shorter than 3 characters do not narrow.
@@ -29747,7 +29745,7 @@ components:
           description: Human-readable summary of the event.
         action:
           type: integer
-          description: 'Enforcement action taken: 0 monitor, 1 alert, 2 kill, 3 simulate, 4 block; see action_name.'
+          description: 'Enforcement action taken: 0 monitor, 1 alert, 2 kill, 3 simulate, 4 block (recorded by earlier agents; the action no longer exists); see action_name.'
         action_name:
           type: string
           description: Enforcement action name; empty when no policy acted on the event.
@@ -29773,7 +29771,7 @@ components:
           format: int32
         activity_outcome:
           type: string
-          description: 'Outcome of the traced activity: attempt unless success or failure evidence exists (exec_exit and connect_exit events carry it); blocked when a block policy denied it.'
+          description: 'Outcome of the traced activity: attempt unless success or failure evidence exists (exec_exit and connect_exit events carry it); blocked when the activity was denied (recorded by earlier agents; no current policy action denies activity).'
           enum:
             - attempt
             - success
