@@ -7,7 +7,7 @@ toolchain go1.26.11
 require (
 	github.com/bonkzero404/uddin-lang v1.0.1-0.20261025112914-14b95667ce68
 	github.com/fasthttp/websocket v1.5.12
-	github.com/getkin/kin-openapi v0.149.0
+	github.com/getkin/kin-openapi v0.153.0
 	github.com/go-playground/validator/v10 v10.30.1
 	github.com/goccy/go-json v0.10.5
 	github.com/gofiber/fiber/v2 v2.52.14
@@ -36,8 +36,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.22.5 // indirect
 	github.com/go-openapi/swag/jsonname v0.25.5 // indirect
 	github.com/molecule-man/go-brrr v1.0.1 // indirect
-	github.com/oasdiff/yaml v0.1.1 // indirect
-	github.com/oasdiff/yaml3 v0.0.14 // indirect
 	github.com/oschwald/geoip2-golang v1.13.0 // indirect
 	github.com/oschwald/maxminddb-golang v1.13.0 // indirect
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20251217145700-e62f690e4a54 // indirect
@@ -46,6 +44,7 @@ require (
 	github.com/savsgio/gotils v0.0.0-20240704082632-aef3928b8a38 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 )
