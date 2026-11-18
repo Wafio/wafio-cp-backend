@@ -21,7 +21,7 @@ require (
 	github.com/valyala/fasthttp v1.74.0
 	github.com/valyala/fastjson v1.6.10
 	golang.org/x/crypto v0.58.0
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	google.golang.org/grpc v1.85.0-dev.0.20260825072537-93e31b48545e
