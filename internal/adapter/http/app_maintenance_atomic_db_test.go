@@ -100,6 +100,88 @@ func TestDBAppMaintenanceSavesRunOneAfterTheOther(t *testing.T) {
 	}
 }
 
+// A save holds the bundle of its agent until it commits, so a save of another application on that agent
+// and a move onto it are measured after it: two changes that each fit alone cannot pass the limit
+// together. A save on another agent does not wait.
+func TestDBAppMaintenanceOneAgentIsMeasuredOneChangeAtATime(t *testing.T) {
+	m := newMaintenanceFixture(t)
+	ctx := context.Background()
+	sameAgent := m.addRoute(t, m.agentID, "same-agent", 19201)
+	elsewhere := m.registerAgent(t, "owner", "elsewhere-"+uuid.NewString()[:8], "waf")
+	otherAgent := m.addRoute(t, elsewhere, "other-agent", 19202)
+	moving := m.addRoute(t, elsewhere, "moving", 19203)
+	keep := func(stored domain.Maintenance) (domain.Maintenance, error) { return stored, nil }
+
+	// hold runs a save of the fixture's application that stays inside apply until release is called.
+	hold := func() (release func(), done <-chan error) {
+		entered, free, result := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		go func() {
+			_, _, err := m.repo.App.UpdateMaintenance(ctx, m.project, m.appID, func(stored domain.Maintenance) (domain.Maintenance, error) {
+				close(entered)
+				<-free
+				return stored, nil
+			})
+			result <- err
+		}()
+		<-entered
+		return func() { close(free) }, result
+	}
+	// waits checks that change does not reach its check while a save holds the agent, and does after.
+	waits := func(name string, change func(reached *atomic.Bool) error) {
+		t.Helper()
+		release, held := hold()
+		var reached atomic.Bool
+		result := make(chan error, 1)
+		go func() { result <- change(&reached) }()
+		time.Sleep(500 * time.Millisecond)
+		if reached.Load() {
+			t.Errorf("%s was checked while a save of another application held the agent", name)
+		}
+		release()
+		if err := <-held; err != nil {
+			t.Fatal(err)
+		}
+		if err := <-result; err != nil || !reached.Load() {
+			t.Errorf("%s after the save: %v, checked %v", name, err, reached.Load())
+		}
+	}
+
+	waits("a save of another application on the agent", func(reached *atomic.Bool) error {
+		_, _, err := m.repo.App.UpdateMaintenance(ctx, m.project, sameAgent, func(stored domain.Maintenance) (domain.Maintenance, error) {
+			reached.Store(true)
+			return stored, nil
+		})
+		return err
+	})
+	waits("a move onto the agent", func(reached *atomic.Bool) error {
+		return m.repo.WAF.ReplaceAssignment(ctx, m.project, moving, m.agentID, "block", func(domain.Maintenance) error {
+			reached.Store(true)
+			return nil
+		})
+	})
+
+	release, held := hold()
+	defer func() {
+		release()
+		if err := <-held; err != nil {
+			t.Fatal(err)
+		}
+	}()
+	other := make(chan error, 1)
+	go func() {
+		_, _, err := m.repo.App.UpdateMaintenance(ctx, m.project, otherAgent, keep)
+		other <- err
+	}()
+	select {
+	case err := <-other:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("a save on another agent waited for the save that holds this one")
+	}
+}
+
 // Several saves at once give one "enabled" audit row, the others "updated", and one started_at.
 func TestDBAppMaintenanceConcurrentPuts(t *testing.T) {
 	m := newMaintenanceFixture(t)

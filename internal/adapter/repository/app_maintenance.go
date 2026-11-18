@@ -35,7 +35,9 @@ func decodeMaintenance(raw []byte) (domain.Maintenance, error) {
 // UpdateMaintenance reads the maintenance object of an application, lets apply turn it into the
 // new one, stores that and bumps the bundle generation of the agent that serves the application,
 // all in one transaction that holds the application row. Two saves at once therefore run one after
-// the other: the second sees what the first stored. apply gets the stored value; its error is
+// the other: the second sees what the first stored. The bundle of the serving agent is locked as
+// well (lockAgentBundle), so saves of two applications on one agent are measured one after the
+// other. apply gets the stored value; its error is
 // returned as it is and nothing is written. The new value must be normalized. It returns the
 // value that was replaced and the value that was stored, and pgx.ErrNoRows when the application
 // is not in the project.
@@ -55,8 +57,16 @@ func (r *AppRepo) UpdateMaintenance(ctx context.Context, projectID, appID string
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var raw []byte
-	if err = tx.QueryRow(ctx, `SELECT maintenance FROM apps WHERE id = $1 AND project_id = $2 FOR UPDATE`, appID, projectID).Scan(&raw); err != nil {
+	var agentID string
+	if err = tx.QueryRow(ctx, `SELECT a.maintenance,
+		COALESCE((SELECT waa.agent_id::text FROM waf_agent_apps waa WHERE waa.app_id = a.id AND waa.enabled = TRUE LIMIT 1), '')
+		FROM apps a WHERE a.id = $1 AND a.project_id = $2 FOR UPDATE`, appID, projectID).Scan(&raw, &agentID); err != nil {
 		return stored, saved, err
+	}
+	if agentID != "" {
+		if err = lockAgentBundle(ctx, tx, agentID); err != nil {
+			return stored, saved, err
+		}
 	}
 	if stored, err = decodeMaintenance(raw); err != nil {
 		return stored, saved, err

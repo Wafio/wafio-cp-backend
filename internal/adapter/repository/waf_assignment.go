@@ -14,8 +14,9 @@ import (
 //
 // The application row is locked, so a move and a maintenance save (UpdateMaintenance) run one
 // after the other. When agentID is set and is not the agent that serves the application now,
-// admit is called with the stored maintenance object, before anything is written; an error from
-// it is returned as it is and the move does not happen. A nil admit checks nothing.
+// admit is called with the stored maintenance object, before anything is written and with the
+// bundle of the new agent locked (lockAgentBundle); an error from it is returned as it is and the
+// move does not happen. A nil admit checks nothing.
 func (r *WAFRepo) ReplaceAssignment(ctx context.Context, projectID, appID, agentID, mode string, admit func(stored domain.Maintenance) error) error {
 	if admit != nil {
 		leave, err := enterNestedTx(ctx)
@@ -47,6 +48,9 @@ func (r *WAFRepo) ReplaceAssignment(ctx context.Context, projectID, appID, agent
 			if current != agentID {
 				stored, err := decodeMaintenance(rawMaintenance)
 				if err != nil {
+					return err
+				}
+				if err := lockAgentBundle(ctx, tx, agentID); err != nil {
 					return err
 				}
 				if err := admit(stored); err != nil {
