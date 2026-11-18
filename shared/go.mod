@@ -6,7 +6,7 @@ toolchain go1.26.11
 
 require (
 	github.com/goccy/go-json v0.10.5
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/oschwald/maxminddb-golang v1.13.0
 	google.golang.org/grpc v1.85.0-dev.0.20260825072537-93e31b48545e
