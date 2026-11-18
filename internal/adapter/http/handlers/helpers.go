@@ -99,7 +99,8 @@ func ResolveDBError(err error, context string) APIError {
 // ── Request body parsing ─────────────────────────────────────────────────
 
 // BindJSON parses the request body into dst and runs struct validation in one
-// step, writing the 400 response itself when either fails.
+// step, writing the 400 response itself when either fails. ok is false then, and
+// the handler must stop and return err, which is the result of writing the 400.
 //
 // Parsing and validation used to be two independent calls, and fifteen call
 // sites across eight files performed the first without the second. Whether a
@@ -107,28 +108,28 @@ func ResolveDBError(err error, context string) APIError {
 // line. Binding the two together makes the safe path the shortest one:
 //
 //	var body createFooRequest
-//	if err := BindJSON(c, &body); err != nil {
+//	if ok, err := BindJSON(c, &body); !ok {
 //	    return err
 //	}
 //
 // The parse error is logged rather than returned: encoding/json reports the Go
 // package, struct and field type it failed on, which tells a caller about
 // internal layout it has no business knowing.
-func BindJSON[T any](c *fiber.Ctx, dst *T) error {
+func BindJSON[T any](c *fiber.Ctx, dst *T) (ok bool, err error) {
 	if err := c.BodyParser(dst); err != nil {
 		slog.Debug("body_parse_failed", "path", c.Path(), "err", err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		return false, c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "invalid body",
 			"code":  "BAD_REQUEST",
 		})
 	}
 	if err := validate.Struct(dst); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		return false, c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": ValidationMessage(err),
 			"code":  "VALIDATION_FAILED",
 		})
 	}
-	return nil
+	return true, nil
 }
 
 // ValidationMessage renders validator errors as a caller-facing sentence.

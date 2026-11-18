@@ -33,7 +33,7 @@ func TestAssignmentMoveResetAndInviteIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, agent := range []string{agent1, agent2} {
-		if err := waf.ReplaceAssignment(ctx, project, app.ID, agent, "monitor"); err != nil {
+		if err := waf.ReplaceAssignment(ctx, project, app.ID, agent, "monitor", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -49,7 +49,7 @@ func TestAssignmentMoveResetAndInviteIsolation(t *testing.T) {
 	if err != nil || cfg.Sensitivity != 3 {
 		t.Fatal("move lost override")
 	}
-	if err := waf.ReplaceAssignment(ctx, uuid.NewString(), app.ID, agent1, "block"); err == nil {
+	if err := waf.ReplaceAssignment(ctx, uuid.NewString(), app.ID, agent1, "block", nil); err == nil {
 		t.Fatal("cross-project move accepted")
 	}
 	if err := waf.ResetAppConfig(ctx, project, app.ID); err != nil {

@@ -13,27 +13,54 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/wafio/wafio-cp-backend/internal/adapter/http/handlers"
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
 	"github.com/wafio/wafio-cp-backend/internal/agentserver"
+	"github.com/wafio/wafio-cp-backend/internal/config"
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 	"github.com/wafio/wafio-cp-backend/internal/engine"
 )
 
-// maintenanceFixture is a project with one app served by one WAF agent.
+// maintenanceFixture is a project with one app served by one WAF agent, and the agent gRPC server
+// the HTTP app measures bundles with.
 type maintenanceFixture struct {
 	*dbFixture
+	srv                            *agentserver.Server
 	agentID, agentName, appID, url string
 }
 
 func newMaintenanceFixture(t *testing.T) *maintenanceFixture {
 	t.Helper()
 	f := newDBFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv := agentserver.NewServer(f.repo, agentserver.NewProjectBundleLoaderWithGoodBot(f.repo, nil), agentserver.NewDecisionBroker())
+	t.Cleanup(srv.StopDecisionWriter)
+	cfg := &config.Config{}
+	cfg.JWT.Secret = secret
+	cfg.JWT.ExpireHours = 1
+	cfg.Server.FrontendPath = t.TempDir()
+	f.app = NewFiberApp(ctx, cfg, f.repo, nil, nil, nil, srv, &handlers.SecurityDataHandler{}, "test")
 	name := "mnt-" + uuid.NewString()[:8]
 	agentID, appID := createTestRoute(t, f, name, 18084, nil)
 	return &maintenanceFixture{
-		dbFixture: f, agentID: agentID, agentName: name + "-edge", appID: appID,
+		dbFixture: f, srv: srv, agentID: agentID, agentName: name + "-edge", appID: appID,
 		url: "/api/projects/" + f.project + "/apps/" + appID + "/maintenance",
 	}
+}
+
+// addRoute adds an application to the agent and returns its id.
+func (m *maintenanceFixture) addRoute(t *testing.T, agentID, name string, port int) string {
+	t.Helper()
+	r := call(t, m.app, http.MethodPost, "/api/projects/"+m.project+"/agents/"+agentID+"/routes", m.tokens["owner"],
+		map[string]any{"name": name, "listen_host": "0.0.0.0", "listen_port": port, "upstream": "http://10.0.0.7:3000"})
+	wantStatus(t, "create route "+name, r, fiber.StatusCreated, "")
+	route, _ := r.body["route"].(map[string]any)
+	appID, _ := route["app_id"].(string)
+	if appID == "" {
+		t.Fatalf("no route.app_id in %s", r.raw)
+	}
+	return appID
 }
 
 // features stores what the agent said in Hello: script rules and maintenance mode.
@@ -42,6 +69,14 @@ func (m *maintenanceFixture) features(t *testing.T, maintenance *bool) {
 	if err := m.repo.EBPF.UpdateAgentFeatures(context.Background(), m.project, m.agentID, nil, maintenance); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// store writes a maintenance object as it is, with no checks.
+func (m *maintenanceFixture) store(project string, value domain.Maintenance) error {
+	_, _, err := m.repo.App.UpdateMaintenance(context.Background(), project, m.appID, func(domain.Maintenance) (domain.Maintenance, error) {
+		return value, nil
+	})
+	return err
 }
 
 func (m *maintenanceFixture) generation(t *testing.T) int64 {
@@ -129,8 +164,8 @@ func TestDBAppMaintenanceReadAndAccess(t *testing.T) {
 	wantStatus(t, "member of both projects writes a foreign app", call(t, m.app, http.MethodPut, foreignURL, m.tokens["memberB"], body), fiber.StatusNotFound, "")
 	// The store refuses a write across projects as well.
 	before := m.generation(t)
-	if err := m.repo.App.SetMaintenance(context.Background(), m.other, m.appID, domain.Maintenance{Enabled: true}); !errors.Is(err, pgx.ErrNoRows) {
-		t.Errorf("SetMaintenance across projects = %v, want pgx.ErrNoRows", err)
+	if err := m.store(m.other, domain.Maintenance{Enabled: true}); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("UpdateMaintenance across projects = %v, want pgx.ErrNoRows", err)
 	}
 	if stored, _ := m.repo.App.GetMaintenance(context.Background(), m.project, m.appID); stored.Enabled || m.generation(t) != before {
 		t.Errorf("a refused write changed the application or the bundle: %+v", stored)
@@ -211,7 +246,7 @@ func TestDBAppMaintenanceAgentSupport(t *testing.T) {
 	}
 
 	// An application with no agent has nobody to refuse it.
-	if err := m.repo.WAF.ReplaceAssignment(ctx, m.project, m.appID, "", "block"); err != nil {
+	if err := m.repo.WAF.ReplaceAssignment(ctx, m.project, m.appID, "", "block", nil); err != nil {
 		t.Fatal(err)
 	}
 	r = call(t, m.app, http.MethodPut, m.url, owner, on)
@@ -334,10 +369,9 @@ func TestDBAppMaintenanceLifecycle(t *testing.T) {
 func TestDBAppMaintenancePastEndTimeCanBeTurnedOff(t *testing.T) {
 	m := newMaintenanceFixture(t)
 	owner := m.tokens["owner"]
-	ctx := context.Background()
 	past := futureTime(-time.Hour)
 	// A switch that went on with an end time that has since passed, as the control plane stored it.
-	if err := m.repo.App.SetMaintenance(ctx, m.project, m.appID, domain.Maintenance{
+	if err := m.store(m.project, domain.Maintenance{
 		Enabled: true, EndTime: past, StartedAt: futureTime(-3 * time.Hour), AllowIPs: []string{}, AllowPaths: []string{},
 	}); err != nil {
 		t.Fatal(err)

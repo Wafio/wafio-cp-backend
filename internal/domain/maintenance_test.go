@@ -30,6 +30,8 @@ func TestMaintenanceNormalizeErrors(t *testing.T) {
 		{"end time too far", Maintenance{EndTime: "2027-11-19T10:00:01Z"}, "end_time", "end_time: must be within 365 days"},
 		{"custom html too large", Maintenance{CustomHTML: strings.Repeat("a", 65537)}, "custom_html", "custom_html: must be at most 64 KiB (65,536 bytes)"},
 		{"custom html NUL", Maintenance{CustomHTML: "<p>\x00</p>"}, "custom_html", "custom_html: must not contain NUL characters"},
+		{"custom html repeats the message", Maintenance{CustomHTML: strings.Repeat("{{WAFIO_MESSAGE}}", 17)}, "custom_html", "custom_html: must use {{WAFIO_MESSAGE}} at most 16 times"},
+		{"custom html repeats the end time", Maintenance{CustomHTML: strings.Repeat("{{WAFIO_END_TIME}}", 17)}, "custom_html", "custom_html: must use {{WAFIO_END_TIME}} at most 16 times"},
 		{"too many ips", Maintenance{AllowIPs: numbered("10.0.0.%d", 51)}, "allow_ips", "allow_ips: at most 50 entries"},
 		{"not an ip", Maintenance{AllowIPs: []string{"203.0.113.7", "example.com"}}, "allow_ips", `allow_ips: "example.com" is not an IP address or CIDR range`},
 		{"empty ip", Maintenance{AllowIPs: []string{"1.2.3.4", " "}}, "allow_ips", `allow_ips: "" is not an IP address or CIDR range`},
@@ -41,7 +43,9 @@ func TestMaintenanceNormalizeErrors(t *testing.T) {
 		{"too many paths", Maintenance{AllowPaths: numbered("/p%d", 21)}, "allow_paths", "allow_paths: at most 20 entries"},
 		{"path without slash", Maintenance{AllowPaths: []string{"healthz"}}, "allow_paths", `allow_paths: "healthz" must start with /`},
 		{"empty path", Maintenance{AllowPaths: []string{""}}, "allow_paths", `allow_paths: "" must start with /`},
-		{"path too long", Maintenance{AllowPaths: []string{"/" + strings.Repeat("a", 256)}}, "allow_paths", `allow_paths: "/` + strings.Repeat("a", 63) + `" must be at most 256 characters`},
+		{"path too long", Maintenance{AllowPaths: []string{"/" + strings.Repeat("a", 256)}}, "allow_paths", `allow_paths: "/` + strings.Repeat("a", 63) + `" must be at most 256 bytes`},
+		// 101 characters, 301 bytes: the limit counts bytes.
+		{"path of three-byte characters over the limit", Maintenance{AllowPaths: []string{"/" + strings.Repeat("€", 100)}}, "allow_paths", `allow_paths: "/` + strings.Repeat("€", 21) + `" must be at most 256 bytes`},
 		{"path with space", Maintenance{AllowPaths: []string{"/a b"}}, "allow_paths", `allow_paths: "/a b" must not contain spaces, ?, #, % or control characters`},
 		{"path with query", Maintenance{AllowPaths: []string{"/a?x=1"}}, "allow_paths", `allow_paths: "/a?x=1" must not contain spaces, ?, #, % or control characters`},
 		{"path with fragment", Maintenance{AllowPaths: []string{"/a#x"}}, "allow_paths", `allow_paths: "/a#x" must not contain spaces, ?, #, % or control characters`},
@@ -85,6 +89,11 @@ func TestMaintenanceNormalizeLimitsPass(t *testing.T) {
 	}
 	if err := m.Normalize(maintenanceNow, Maintenance{}); err != nil {
 		t.Fatalf("a value at every limit must pass: %v", err)
+	}
+	// 86 characters of three bytes and the slash make 256 bytes.
+	multibyte := Maintenance{AllowPaths: []string{"/" + strings.Repeat("€", 85)}}
+	if err := multibyte.Normalize(maintenanceNow, Maintenance{}); err != nil {
+		t.Fatalf("a path of 256 bytes must pass: %v", err)
 	}
 }
 

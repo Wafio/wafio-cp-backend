@@ -24,6 +24,9 @@ func TestFrontendMaintenanceFixture(t *testing.T) {
 		AllowPaths     int `json:"allow_paths"`
 		PathBytes      int `json:"path_bytes"`
 		EndTimeMaxDays int `json:"end_time_max_days"`
+		// AgentBundleBytes is the largest bundle an agent accepts; the custom pages of all applications
+		// of one agent count toward it.
+		AgentBundleBytes int `json:"agent_bundle_bytes"`
 	}
 	jsonfixture.Check(t, "../../test/frontend-fixtures/maintenance.json", struct {
 		DefaultMessage string `json:"default_message"`
@@ -31,6 +34,6 @@ func TestFrontendMaintenanceFixture(t *testing.T) {
 		Limits         limits `json:"limits"`
 	}{DefaultMaintenanceMessage, StockMaintenanceHTML, limits{
 		domain.MaintenanceMessageChars, domain.MaintenanceCustomHTMLSize, domain.MaintenanceMaxIPs,
-		domain.MaintenanceMaxPaths, domain.MaintenancePathBytes, domain.MaintenanceEndMaxDays,
+		domain.MaintenanceMaxPaths, domain.MaintenancePathBytes, domain.MaintenanceEndMaxDays, MaxAgentBundleBytes,
 	}})
 }

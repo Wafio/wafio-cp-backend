@@ -395,6 +395,19 @@ func (r *EBPFRepo) AgentScriptRules(ctx context.Context, agentID string) (*bool,
 	return scriptRules, err
 }
 
+// AgentMaintenanceMode returns what UpdateAgentFeatures stored for the agent: whether it supports
+// maintenance mode. nil when unknown (it never connected), when the agent is a host agent, or when it
+// does not exist.
+func (r *EBPFRepo) AgentMaintenanceMode(ctx context.Context, agentID string) (*bool, error) {
+	var maintenance *bool
+	err := r.pool.QueryRow(ctx,
+		`SELECT maintenance_mode FROM agents WHERE deleted_at IS NULL AND id = $1`, agentID).Scan(&maintenance)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = nil
+	}
+	return maintenance, err
+}
+
 // AgentWithHostInfo is defined in domain; the alias keeps this package's API.
 type AgentWithHostInfo = domain.AgentWithHostInfo
 

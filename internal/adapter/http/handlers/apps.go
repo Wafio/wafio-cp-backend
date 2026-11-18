@@ -25,6 +25,8 @@ var errResponseSent = errors.New("response sent")
 type AppsHandler struct {
 	Repo        *repository.Repository
 	AgentServer interface{ PushBundleToProject(projectID string) }
+	// Bundles measures the bundle of an agent; nil when no agent can connect.
+	Bundles BundleSizer
 }
 
 // ── List ──────────────────────────────────────────────────────────────────
@@ -202,7 +204,12 @@ func (h *AppsHandler) Update(c *fiber.Ctx) error {
 		patch.Upstream = &body.UpstreamURL
 	}
 	patch.FCGIDocRoot, patch.FCGIIndex = fcgiPatch(body.FCGIDocRoot, body.FCGIIndex)
-	if err := h.Repo.App.UpdateAtomic(c.UserContext(), app.ProjectID, app.ID, patch); err != nil {
+	if err := h.Repo.App.UpdateAtomic(c.UserContext(), app.ProjectID, app.ID, patch,
+		admitRouteChange(c.UserContext(), h.Repo, h.Bundles, app.ProjectID, app.ID, patch)); err != nil {
+		var refuse *refusal
+		if errors.As(err, &refuse) {
+			return c.Status(refuse.status).JSON(refuse.body)
+		}
 		if conflict, ok := appUniqueConflict(err); ok {
 			return c.Status(fiber.StatusConflict).JSON(conflict)
 		}

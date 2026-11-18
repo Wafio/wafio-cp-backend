@@ -8560,7 +8560,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Name already used in the project (CONFLICT) or listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN).
+          description: Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE). Nothing is saved.
           content:
             application/json:
               schema:
@@ -9189,7 +9189,7 @@ paths:
     get:
       operationId: AppMaintenanceHandler_Get
       summary: Get the maintenance mode of an application
-      description: Returns the stored maintenance settings of the application, whether the WAF agent that serves it supports maintenance mode (agent_supported), the caller's address as the control plane sees it (client_ip), the default message and the standard page (stock_html). While maintenance mode is on, the WAF agent answers every request with a 503 maintenance page, except requests from allowed IP addresses or to allowed paths. The format of the answer follows the Accept header of the visitor (HTML, JSON or XML); only the HTML page can be customised.
+      description: 'Returns the stored maintenance settings of the application, whether the WAF agent that serves it supports maintenance mode (agent_supported), the caller''s address as the control plane sees it (client_ip), the default message and the standard page (stock_html). While maintenance mode is on, the WAF agent answers every request with a 503 maintenance page, except requests from allowed IP addresses or to allowed paths. The format of the answer follows the Accept header of the visitor (HTML, JSON or XML); only the HTML page can be customised. The agent decides from the request head, before it reads the body, so an upload of any size gets the 503 too (never a 413). When the request has a body, or asks for 100-continue, the 503 carries Connection: close and the agent closes the connection after it; no 100 Continue is sent. When maintenance mode goes on, or the allowed addresses or paths change, the agent closes the open WebSocket connections of the application whose client is not allowed (close code 1001, reason Maintenance) and ends its event streams (Content-Type text/event-stream) for such clients; downloads and other streamed answers that are already running finish. A connection of an allowed client keeps running. Turning maintenance mode off changes no connection. A browser application on another origin can read the answer: it carries Vary: Origin, and for a valid Origin also Access-Control-Allow-Origin with that Origin, Access-Control-Allow-Credentials: true and Access-Control-Expose-Headers: Retry-After. A preflight request (OPTIONS with Access-Control-Request-Method) is answered with 204 and no credentials permission, so a request that sends cookies and needs a preflight still fails in the browser during maintenance. Requests that bypass maintenance, and applications that are not in maintenance mode, are not changed. An agent built before these behaviours reports maintenance_mode too and receives the same bundle; it reads the request body before the answer, sends no CORS headers and leaves open connections running until it is upgraded.'
       tags:
         - Applications
         - WAF agents
@@ -9243,7 +9243,7 @@ paths:
     put:
       operationId: AppMaintenanceHandler_Put
       summary: Set the maintenance mode of an application
-      description: 'Replaces the whole maintenance object: the switch and the settings. The body is checked on every save, whether the switch is on or off; the first field that is not valid is answered with INVALID_MAINTENANCE and the name of the field. started_at is ignored: the server sets it when the switch goes on and keeps it while the switch stays on. An absent list means an empty list. Turning the switch on is refused with MAINTENANCE_UNSUPPORTED when the WAF agent that serves the application reports that it does not support maintenance mode; an agent that never reported is let through. Saves the settings, pushes a new bundle to the project agents and writes an audit entry (app.maintenance_enabled, app.maintenance_disabled, or app.maintenance_updated when the switch did not change). Maintenance mode never ends by itself: end_time is only shown to visitors and sent as Retry-After.'
+      description: 'Replaces the whole maintenance object: the switch and the settings. The body is checked on every save, whether the switch is on or off; the first field that is not valid is answered with INVALID_MAINTENANCE and the name of the field. started_at is ignored: the server sets it when the switch goes on and keeps it while the switch stays on. An absent list means an empty list. Turning the switch on is refused with MAINTENANCE_UNSUPPORTED when the WAF agent that serves the application reports that it does not support maintenance mode; an agent that never reported is let through. Turning the switch on, or saving while it is on, is also refused with MAINTENANCE_BUNDLE_TOO_LARGE when the bundle of that agent, with these settings, would be larger than the agent accepts (4,193,280 bytes; the custom pages of all applications on one agent count toward it, and each of the characters < > and & takes six bytes in the bundle); turning the switch off is never refused. The stored value is read and written under a lock on the application and on the bundle of its WAF agent, so two saves at once, of one application or of two applications on one agent, run one after the other. Saves the settings, pushes a new bundle to the project agents and writes an audit entry (app.maintenance_enabled, app.maintenance_disabled, or app.maintenance_updated when the switch did not change). Maintenance mode never ends by itself: end_time is only shown to visitors and sent as Retry-After.'
       tags:
         - Applications
         - WAF agents
@@ -9318,7 +9318,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'The switch is on and the WAF agent that serves the application does not support maintenance mode. Code: MAINTENANCE_UNSUPPORTED.'
+          description: 'The switch is on and the WAF agent that serves the application does not support maintenance mode (MAINTENANCE_UNSUPPORTED), or the bundle of that agent with these settings would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE; the answer carries field custom_html when the save holds a custom page). Nothing is saved.'
           content:
             application/json:
               schema:
@@ -9377,7 +9377,7 @@ paths:
     put:
       operationId: WAFAgentHandler_AssignAppAgent
       summary: Assign an application to a WAF agent
-      description: Replaces the assignment of the application with the given WAF agent and mode (default block). Pushes a new bundle to the project agents and writes an audit entry (waf.app_assigned).
+      description: Replaces the assignment of the application with the given WAF agent and mode (default block). While the application is in maintenance mode, it can only move to a different agent that supports maintenance mode (an agent that never reported is let through) and whose bundle, with this application added, stays within the 4,193,280 bytes an agent accepts; otherwise the answer is 409 and the assignment does not change. Changing only the mode on the agent that serves the application is not a move. Pushes a new bundle to the project agents and writes an audit entry (waf.app_assigned).
       tags:
         - Applications
         - WAF agents
@@ -9465,7 +9465,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Another application on the agent already uses the listen address. Code: LISTEN_HOST_TAKEN.'
+          description: 'Another application on the agent already uses the listen address (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the agent does not support it (MAINTENANCE_UNSUPPORTED), or its bundle with this application would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE).'
           content:
             application/json:
               schema:
@@ -15360,7 +15360,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN.'
+          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts). Nothing is saved.'
           content:
             application/json:
               schema:
@@ -18655,7 +18655,7 @@ components:
           pattern: ^$|^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$
         custom_html:
           type: string
-          description: Your own page for visitors that accept HTML, up to 65,536 bytes. {{WAFIO_MESSAGE}} is replaced with the message and {{WAFIO_END_TIME}} with the expected end in UTC, empty when there is none. Empty = the standard page.
+          description: Your own page for visitors that accept HTML, up to 65,536 bytes; it counts toward the 4,193,280 bytes of configuration an agent accepts, with each of the characters < > and & taking six bytes. {{WAFIO_MESSAGE}} is replaced with the message and {{WAFIO_END_TIME}} with the expected end in UTC, empty when there is none. Empty = the standard page.
         allow_ips:
           type: array
           description: IP addresses and CIDR ranges (canonical form, at most 50) that reach the site while maintenance is on. Matched against the client address after trusted-proxy handling.
@@ -18696,7 +18696,7 @@ components:
           description: Expected end, RFC 3339 (any offset, stored as UTC whole seconds), up to 365 days ahead. It must be in the future when it changes or when the switch goes on. Empty or absent = none.
         custom_html:
           type: string
-          description: Custom HTML page, up to 65,536 bytes, no NUL characters. Empty or white space only = the standard page.
+          description: Custom HTML page, up to 65,536 bytes, no NUL characters. It may use each of the placeholders {{WAFIO_MESSAGE}} and {{WAFIO_END_TIME}} at most 16 times. Empty or white space only = the standard page.
         allow_ips:
           type: array
           description: At most 50 IP addresses or CIDR ranges. A range with prefix length 0 is refused.

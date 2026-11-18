@@ -66,7 +66,7 @@ func memberNotFound(c *fiber.Ctx) error {
 func (h *ProjectMembersHandler) AddMember(c *fiber.Ctx) error {
 	projectID := c.Params("id")
 	var body addMemberRequest
-	if err := BindJSON(c, &body); err != nil {
+	if ok, err := BindJSON(c, &body); !ok {
 		return err
 	}
 	ev := memberEvent(c, projectID, repository.AuditMemberAdded, body.UserID, map[string]any{"role": body.Role})
@@ -95,7 +95,7 @@ func (h *ProjectMembersHandler) UpdateMemberRole(c *fiber.Ctx) error {
 	projectID := c.Params("id")
 	targetUserID := c.Params("userId")
 	var body updateMemberRoleRequest
-	if err := BindJSON(c, &body); err != nil {
+	if ok, err := BindJSON(c, &body); !ok {
 		return err
 	}
 	ev := memberEvent(c, projectID, repository.AuditMemberRoleChanged, targetUserID, map[string]any{"role": body.Role})
