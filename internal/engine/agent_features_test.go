@@ -26,3 +26,27 @@ func TestAgentScriptRules(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentMaintenanceMode(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features []string
+		want     string // "true", "false" or "unknown"
+	}{
+		{"no features: an agent built before Hello.features", nil, "unknown"},
+		{"empty list", []string{}, "unknown"},
+		{"an agent with maintenance mode", []string{FeatureScriptRules, FeatureMaintenanceMode}, "true"},
+		{"maintenance mode alone", []string{FeatureMaintenanceMode}, "true"},
+		{"an agent that sends features without it", []string{FeatureScriptRules}, "false"},
+		{"a v1 agent", []string{"semantic_keys_jwt_graphql", "semantic_only", FeatureNoScriptRules}, "false"},
+		{"a name that only contains it", []string{"maintenance_mode_v2"}, "false"},
+	} {
+		got := "unknown"
+		if v := AgentMaintenanceMode(tc.features); v != nil {
+			got = map[bool]string{true: "true", false: "false"}[*v]
+		}
+		if got != tc.want {
+			t.Errorf("%s: AgentMaintenanceMode(%v) = %s, want %s", tc.name, tc.features, got, tc.want)
+		}
+	}
+}

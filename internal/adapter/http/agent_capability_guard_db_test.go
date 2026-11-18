@@ -73,7 +73,7 @@ func TestDBAgentScriptRulesInAgentReads(t *testing.T) {
 		{"no script rules", &no, "false"},
 		{"replaced by an old agent", nil, "null"},
 	} {
-		if err := f.repo.EBPF.UpdateAgentScriptRules(ctx, f.project, agentID, tc.store); err != nil {
+		if err := f.repo.EBPF.UpdateAgentFeatures(ctx, f.project, agentID, tc.store, nil); err != nil {
 			t.Fatal(err)
 		}
 		for read, got := range reads() {
@@ -121,7 +121,7 @@ func (c *capsFixture) fresh(t *testing.T) map[string]any {
 
 func (c *capsFixture) setScripts(t *testing.T, v *bool) {
 	t.Helper()
-	if err := c.repo.EBPF.UpdateAgentScriptRules(context.Background(), c.project, c.agentID, v); err != nil {
+	if err := c.repo.EBPF.UpdateAgentFeatures(context.Background(), c.project, c.agentID, v, nil); err != nil {
 		t.Fatal(err)
 	}
 }

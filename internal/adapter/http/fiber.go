@@ -503,6 +503,12 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	pViewer.Get("/apps/:appId/waf-agent", RequireAppInProject(repo), rateReadByUser, wafAgent.GetAppAgent)
 	pViewer.Put("/apps/:appId/waf-agent", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, wafAgent.AssignAppAgent)
 	pViewer.Delete("/apps/:appId/waf-agent", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, wafAgent.UnassignAppAgent)
+	maintenance := &handlers.AppMaintenanceHandler{Repo: repo}
+	if agentServer != nil {
+		maintenance.AgentServer = agentServer
+	}
+	pViewer.Get("/apps/:appId/maintenance", RequireAppInProject(repo), rateReadByUser, maintenance.Get)
+	pViewer.Put("/apps/:appId/maintenance", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, maintenance.Put)
 	// Per-app WAF dashboard (decisions + counters pushed by the WAF agents)
 	pViewer.Get("/apps/:appId/waf/decisions", RequireAppInProject(repo), rateReadByUser, wafAgent.AppDecisions)
 	feedbackH := &handlers.WAFFeedbackHandler{Repo: repo, SummarySvc: &application.FeedbackSummary{Store: repo.WAF}}

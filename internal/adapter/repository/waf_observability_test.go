@@ -320,6 +320,12 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 		}
 	}
 
+	// 000119 adds agents.maintenance_mode, which UpdateAgentFeatures writes. This schema has no apps
+	// table, so only the agents column is added here; the migration itself runs in the round-trip test.
+	if _, err := pool.Exec(ctx, `ALTER TABLE agents ADD COLUMN maintenance_mode BOOLEAN`); err != nil {
+		t.Fatalf("maintenance_mode column: %v", err)
+	}
+
 	// 000117 adds waf_decisions.status.
 	up117 := readMigration(t, "000117_waf_decisions_status.up.sql")
 	for i := 0; i < 2; i++ {
@@ -402,10 +408,10 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 		t.Fatalf("an agent that never reported script rules must read NULL: %+v", got)
 	}
 	no := false
-	if err := ebpf.UpdateAgentScriptRules(ctx, projectID, wafID, &no); err != nil {
+	if err := ebpf.UpdateAgentFeatures(ctx, projectID, wafID, &no, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := ebpf.UpdateAgentScriptRules(ctx, otherProject, oldID, &no); err != nil {
+	if err := ebpf.UpdateAgentFeatures(ctx, otherProject, oldID, &no, nil); err != nil {
 		t.Fatal(err)
 	}
 	if sr, err := ebpf.AgentScriptRules(ctx, wafID); err != nil || sr == nil || *sr {

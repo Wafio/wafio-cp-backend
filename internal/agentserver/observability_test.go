@@ -123,12 +123,12 @@ type fakeHealthWriter struct {
 		projectID, agentID string
 		h                  repository.AgentWAFHealth
 	}
-	scriptRules []scriptRulesCall
+	features []featuresCall
 }
 
-// scriptRulesCall is one UpdateAgentScriptRules call; value is "true", "false"
-// or "unknown".
-type scriptRulesCall struct{ projectID, agentID, value string }
+// featuresCall is one UpdateAgentFeatures call; scripts and maintenance are "true", "false" or
+// "unknown".
+type featuresCall struct{ projectID, agentID, scripts, maintenance string }
 
 func tristate(v *bool) string {
 	if v == nil {
@@ -137,17 +137,17 @@ func tristate(v *bool) string {
 	return strconv.FormatBool(*v)
 }
 
-func (f *fakeHealthWriter) UpdateAgentScriptRules(_ context.Context, projectID, agentID string, scriptRules *bool) error {
+func (f *fakeHealthWriter) UpdateAgentFeatures(_ context.Context, projectID, agentID string, scriptRules, maintenance *bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.scriptRules = append(f.scriptRules, scriptRulesCall{projectID, agentID, tristate(scriptRules)})
+	f.features = append(f.features, featuresCall{projectID, agentID, tristate(scriptRules), tristate(maintenance)})
 	return nil
 }
 
-func (f *fakeHealthWriter) scriptRulesCalls() []scriptRulesCall {
+func (f *fakeHealthWriter) featuresCalls() []featuresCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]scriptRulesCall(nil), f.scriptRules...)
+	return append([]featuresCall(nil), f.features...)
 }
 
 func (f *fakeHealthWriter) UpdateAgentWAFHealth(_ context.Context, projectID, agentID string, h repository.AgentWAFHealth) error {
@@ -190,29 +190,30 @@ func TestStoreWAFHealthResolvesAgentAndStores(t *testing.T) {
 
 func TestStoreAgentFeaturesFromHello(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		features []string
-		want     string
+		name                 string
+		features             []string
+		wantScripts, wantMnt string
 	}{
-		{"an agent that runs scripts", []string{engine.FeatureScriptRules}, "true"},
-		{"an agent without scripts", []string{engine.FeatureNoScriptRules}, "false"},
-		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true"},
-		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false"},
-		{"agent without features", nil, "unknown"},
+		{"an agent that runs scripts", []string{engine.FeatureScriptRules}, "true", "false"},
+		{"an agent without scripts", []string{engine.FeatureNoScriptRules}, "false", "false"},
+		{"an agent with maintenance mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true"},
+		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true", "false"},
+		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false"},
+		{"agent without features", nil, "unknown", "unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fw := &fakeHealthWriter{}
 			s := &Server{wafHealth: fw}
 			s.storeAgentFeatures("proj-1", "agent-uuid", tc.features)
-			if got := fw.scriptRulesCalls(); len(got) != 1 || got[0] != (scriptRulesCall{"proj-1", "agent-uuid", tc.want}) {
-				t.Fatalf("stored script rules %+v, want %s for agent-uuid", got, tc.want)
+			if got := fw.featuresCalls(); len(got) != 1 || got[0] != (featuresCall{"proj-1", "agent-uuid", tc.wantScripts, tc.wantMnt}) {
+				t.Fatalf("stored features %+v, want scripts %s and maintenance %s for agent-uuid", got, tc.wantScripts, tc.wantMnt)
 			}
 		})
 	}
 	fw := &fakeHealthWriter{}
 	(&Server{wafHealth: fw}).storeAgentFeatures("proj-1", "", []string{engine.FeatureScriptRules})
-	if scripts := fw.scriptRulesCalls(); len(scripts) != 0 {
-		t.Fatalf("an unresolved agent must store nothing, got %+v", scripts)
+	if stored := fw.featuresCalls(); len(stored) != 0 {
+		t.Fatalf("an unresolved agent must store nothing, got %+v", stored)
 	}
 }
 

@@ -25,6 +25,7 @@ const appsProxyDDL = `CREATE TABLE apps (
 	proxy_config  jsonb NOT NULL DEFAULT '{}'::jsonb,
 	fcgi_doc_root text,
 	fcgi_index    text,
+	maintenance   jsonb NOT NULL DEFAULT '{}'::jsonb,
 	created_at    timestamptz NOT NULL DEFAULT now(),
 	updated_at    timestamptz NOT NULL DEFAULT now()
 )`

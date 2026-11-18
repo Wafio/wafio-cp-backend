@@ -72,6 +72,9 @@ func TestDBStorageSettingsAudited(t *testing.T) {
 		}
 		got = append(got, x)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 3 {
 		t.Fatalf("audit rows %+v", got)
 	}

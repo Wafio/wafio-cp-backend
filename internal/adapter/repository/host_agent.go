@@ -369,20 +369,21 @@ func (r *EBPFRepo) UpdateAgentWAFHealth(ctx context.Context, projectID, agentID 
 	return err
 }
 
-// UpdateAgentScriptRules stores whether the WAF agent can run script rules, as
-// it reported in Hello (engine.AgentScriptRules); nil = unknown. Written on
-// every connect, so an agent replaced by an older build goes back to unknown.
-func (r *EBPFRepo) UpdateAgentScriptRules(ctx context.Context, projectID, agentID string, scriptRules *bool) error {
+// UpdateAgentFeatures stores what the WAF agent reported in Hello: whether it can run script rules
+// (engine.AgentScriptRules) and whether it supports maintenance mode (engine.AgentMaintenanceMode);
+// nil = unknown. Written on every connect, so an agent replaced by an older build goes back to
+// unknown or false.
+func (r *EBPFRepo) UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance *bool) error {
 	if r == nil || r.pool == nil {
 		return nil
 	}
 	_, err := r.pool.Exec(ctx,
-		`UPDATE agents SET script_rules = $3 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
-		agentID, projectID, scriptRules)
+		`UPDATE agents SET script_rules = $3, maintenance_mode = $4 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
+		agentID, projectID, scriptRules, maintenance)
 	return err
 }
 
-// AgentScriptRules returns what UpdateAgentScriptRules stored for the agent:
+// AgentScriptRules returns what UpdateAgentFeatures stored for the agent:
 // nil when unknown, when the agent is a host agent, or when it does not exist.
 func (r *EBPFRepo) AgentScriptRules(ctx context.Context, agentID string) (*bool, error) {
 	var scriptRules *bool
