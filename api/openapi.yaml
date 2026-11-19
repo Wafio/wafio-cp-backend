@@ -15145,7 +15145,7 @@ paths:
     post:
       operationId: WAFAgentHandler_CreateAgentRoute
       summary: Create a route on a WAF agent
-      description: 'Creates an application and assigns it to the agent in one call: the app record, its listen address and upstream, optional reverse-proxy and FastCGI settings, and the agent assignment. Anything that fails after the app was created removes it again. The new bundle is pushed to the project''s connected agents. Writes the audit entry app.route_created. The response route repeats what was sent plus the defaults; fcgi_doc_root and fcgi_index are returned empty and fcgi_keep_conn false even when sent (read the route again for the stored values).'
+      description: 'Creates an application and assigns it to the agent in one call: the app record, its listen address and upstream, optional reverse-proxy and FastCGI settings, and the agent assignment. Anything that fails after the app was created removes it again. The new bundle is pushed to the project''s connected agents. Writes the audit entry app.route_created. The response route repeats what was sent plus the defaults; fcgi_doc_root and fcgi_index are returned empty even when sent (read the route again for the stored values).'
       tags:
         - WAF agents
       parameters:

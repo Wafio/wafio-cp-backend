@@ -714,6 +714,7 @@ func (h *WAFAgentHandler) CreateAgentRoute(c *fiber.Ctx) error {
 			Mode:          mode,
 			ProxyConfig:   json.RawMessage(body.ProxyConfig),
 			ProxyWarnings: domain.ProxyConfigWarnings(body.ProxyConfig),
+			FCGIKeepConn:  keepConn,
 		},
 	})
 }

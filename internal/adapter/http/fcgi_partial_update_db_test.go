@@ -3,6 +3,7 @@ package httpadapter
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -73,4 +74,19 @@ func TestDBFastCGIPartialUpdateKeepsOtherField(t *testing.T) {
 	check("app update that turns keep-alive off", "/srv/www", "index.php", false)
 	wantStatus(t, "route update that turns keep-alive on", call(t, f.app, http.MethodPut, routeURL, tok, map[string]any{"fcgi_keep_conn": true}), fiber.StatusOK, "")
 	check("route update that turns keep-alive on", "/srv/www", "index.php", true)
+}
+
+// The 201 body of a route create states the keep-alive switch that was stored, on or off.
+func TestDBRouteCreateAnswersKeepConn(t *testing.T) {
+	f := newDBFixture(t)
+	for i, on := range []bool{true, false} {
+		name := "fcgi-answer-" + strconv.Itoa(i)
+		agentID := f.registerAgent(t, "owner", name, "waf")
+		body := map[string]any{"name": name, "listen_host": "0.0.0.0", "listen_port": 8190 + i, "upstream": "fcgi:127.0.0.1:9000", "fcgi_keep_conn": on}
+		created := call(t, f.app, http.MethodPost, "/api/projects/"+f.project+"/agents/"+agentID+"/routes", f.tokens["owner"], body)
+		wantStatus(t, "create route "+name, created, fiber.StatusCreated, "")
+		if rt, _ := created.body["route"].(map[string]any); rt["fcgi_keep_conn"] != any(on) {
+			t.Fatalf("fcgi_keep_conn sent as %v, answered %v in %s", on, rt["fcgi_keep_conn"], created.raw)
+		}
+	}
 }
