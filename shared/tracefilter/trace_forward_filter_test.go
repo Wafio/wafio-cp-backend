@@ -201,6 +201,10 @@ var traceForwardGolden = map[int]string{
 	// no result: a known client probing its own credential path is no access.
 	// The corpus has no open with a result.
 	3: "7826bd64c96bb724b14d0ec3161617ff34cfa76608405d2c170284c39db8191c",
+	// 4 reads an open with O_DIRECTORY as a listing (never escalated), the
+	// login.defs read as a public identity read and README under the
+	// Let's Encrypt live directory as system information.
+	4: "6c5eb4baaeedfc097a2e5a2c976c8b8b004901ebb53184c1e074cf0e1dfb92f3",
 }
 
 // TestTraceForwardRevisionGolden fails when ingest's decisions on the

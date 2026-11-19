@@ -3,7 +3,7 @@ package tracefilter
 import "testing"
 
 func TestRuntimePublicIdentityRead(t *testing.T) {
-	for _, filename := range []string{"/etc/passwd", "/etc/group", "/etc/nsswitch.conf"} {
+	for _, filename := range []string{"/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/login.defs"} {
 		t.Run(filename, func(t *testing.T) {
 			event := TraceEventPayload{EventName: "openat", Comm: "custom-app", Filename: filename, Flags: 0, Severity: 3, SeverityName: "high"}
 			applyLineageContext(&event)

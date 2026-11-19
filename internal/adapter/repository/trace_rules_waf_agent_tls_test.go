@@ -27,8 +27,10 @@ var tlsKeyMigrationUpdates = []string{
 
 // beforeUIDRequirement is the description and the conditions JSON of r as the
 // migration that created it wrote them: without the real UID 0 condition that
-// migration 000121 added to the rules in tlsKeyMigrationUpdates.
+// migration 000121 added to the rules in tlsKeyMigrationUpdates, and without
+// what migration 000122 changed afterwards.
 func beforeUIDRequirement(r domain.DetectionRule) (description, conditions string) {
+	r = beforeExpectedReaders(r)
 	encoded, _ := json.Marshal(r.Conditions)
 	description, conditions = r.Description, string(encoded)
 	if slices.Contains(tlsKeyMigrationUpdates, r.Name) {
@@ -260,6 +262,8 @@ func TestWAFAgentTLSKeyMigrationMatchesBuiltins(t *testing.T) {
 			t.Errorf("%s is not seeded", name)
 			continue
 		}
+		// Migration 000122 changed one of these rules afterwards.
+		r = beforeExpectedReaders(r)
 		conds, _ := json.Marshal(r.Conditions)
 		oldDesc, oldConds := beforeUIDRequirement(r)
 		if oldConds == string(conds) || oldDesc == r.Description {

@@ -98,6 +98,9 @@ func TestIdentityMigrationMatchesBuiltins(t *testing.T) {
 	for _, r := range runtimeNoiseRules("p") {
 		later[r.Name] = true
 	}
+	for _, r := range expectedReaderRules("p") {
+		later[r.Name] = true
+	}
 	for _, r := range builtinRules("p", "h") {
 		if later[r.Name] {
 			continue
@@ -189,6 +192,10 @@ func TestIdentityMigrationPreservesEnabledState(t *testing.T) {
 	// 000121 changes four of these rules again; a host holds both.
 	if _, err := pool.Exec(ctx, string(tlsKeyUp(t))); err != nil {
 		t.Fatalf("000121 up: %v", err)
+	}
+	// 000122 changes the sshd host key rule again.
+	if _, err := pool.Exec(ctx, string(expectedReadersUp(t))); err != nil {
+		t.Fatalf("000122 up: %v", err)
 	}
 	rules, err := repo.ListRulesUncached(ctx, projectID, hostID)
 	if err != nil {
