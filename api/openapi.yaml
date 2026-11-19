@@ -8307,6 +8307,7 @@ paths:
                       trust_forwarded: false
                     fcgi_doc_root: ''
                     fcgi_index: ''
+                    fcgi_keep_conn: false
                     maintenance_enabled: false
                     created_at: '2026-10-01T09:30:00Z'
                     updated_at: '2026-10-02T11:00:00Z'
@@ -8380,6 +8381,7 @@ paths:
                   upstream_url: null
                   fcgi_doc_root: ''
                   fcgi_index: ''
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
                   created_at: '2026-10-01T09:30:00Z'
                   updated_at: '2026-10-01T09:30:00Z'
@@ -8462,6 +8464,7 @@ paths:
                     trust_forwarded: false
                   fcgi_doc_root: ''
                   fcgi_index: ''
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
                   created_at: '2026-10-01T09:30:00Z'
                   updated_at: '2026-10-02T11:00:00Z'
@@ -8532,6 +8535,7 @@ paths:
                     trust_forwarded: false
                   fcgi_doc_root: ''
                   fcgi_index: ''
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
                   created_at: '2026-10-01T09:30:00Z'
                   updated_at: '2026-10-02T11:00:00Z'
@@ -15107,6 +15111,7 @@ paths:
                       reject_invalid_path_encoding: true
                     fcgi_doc_root: ''
                     fcgi_index: index.php
+                    fcgi_keep_conn: false
                     maintenance_enabled: false
                 total: 1
                 limit: 100
@@ -15140,7 +15145,7 @@ paths:
     post:
       operationId: WAFAgentHandler_CreateAgentRoute
       summary: Create a route on a WAF agent
-      description: 'Creates an application and assigns it to the agent in one call: the app record, its listen address and upstream, optional reverse-proxy and FastCGI settings, and the agent assignment. Anything that fails after the app was created removes it again. The new bundle is pushed to the project''s connected agents. Writes the audit entry app.route_created. The response route repeats what was sent plus the defaults; fcgi_doc_root and fcgi_index are returned empty even when sent (read the route again for the stored values).'
+      description: 'Creates an application and assigns it to the agent in one call: the app record, its listen address and upstream, optional reverse-proxy and FastCGI settings, and the agent assignment. Anything that fails after the app was created removes it again. The new bundle is pushed to the project''s connected agents. Writes the audit entry app.route_created. The response route repeats what was sent plus the defaults; fcgi_doc_root and fcgi_index are returned empty and fcgi_keep_conn false even when sent (read the route again for the stored values).'
       tags:
         - WAF agents
       parameters:
@@ -15184,6 +15189,9 @@ paths:
                 fcgi_index:
                   type: string
                   description: FastCGI index script; an empty string stores index.php. On update, absent keeps the stored value.
+                fcgi_keep_conn:
+                  type: boolean
+                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only when PHP is 8.2.36, 8.3.37, 8.4.28, 8.5.13 or newer (CVE-2026-129289). On update, absent keeps the stored value.'
               required:
                 - name
                 - listen_port
@@ -15222,6 +15230,7 @@ paths:
                     reject_invalid_path_encoding: true
                   fcgi_doc_root: ''
                   fcgi_index: index.php
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
         '400':
           description: 'Validation failed. Codes: ROUTE_FIELDS_REQUIRED, INVALID_PORT, INVALID_HOST, INVALID_UPSTREAM, INVALID_PROXY_CONFIG. A body that is not JSON answers 400 ''invalid body''.'
@@ -15322,6 +15331,9 @@ paths:
                 fcgi_index:
                   type: string
                   description: FastCGI index script; an empty string stores index.php. On update, absent keeps the stored value.
+                fcgi_keep_conn:
+                  type: boolean
+                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only when PHP is 8.2.36, 8.3.37, 8.4.28, 8.5.13 or newer (CVE-2026-129289). On update, absent keeps the stored value.'
               additionalProperties: false
             example:
               upstream: http://10.0.0.6:8080
@@ -18351,6 +18363,9 @@ components:
         fcgi_index:
           type: string
           description: FastCGI index script (default index.php).
+        fcgi_keep_conn:
+          type: boolean
+          description: 'true when the agent keeps the FastCGI connection open between requests (upstream fcgi: only). false closes it after each reply. Always present.'
         maintenance_enabled:
           type: boolean
           description: true while maintenance mode is on for the application (see the Maintenance tab). Always present.
@@ -18363,6 +18378,7 @@ components:
         - mode
         - fcgi_doc_root
         - fcgi_index
+        - fcgi_keep_conn
         - maintenance_enabled
       additionalProperties: false
     AgentSecurityComponent:
@@ -18441,6 +18457,9 @@ components:
         fcgi_index:
           type: string
           description: FastCGI index script; empty string when unset (the agent defaults to index.php).
+        fcgi_keep_conn:
+          type: boolean
+          description: 'true when the agent keeps the FastCGI connection open between requests (upstream fcgi: only). false closes it after each reply. Always present.'
         maintenance_enabled:
           type: boolean
           description: true while maintenance mode is on for the application. The rest of the maintenance settings are read with GET /api/projects/{id}/apps/{appId}/maintenance. Always present.
@@ -18461,6 +18480,7 @@ components:
         - upstream_url
         - fcgi_doc_root
         - fcgi_index
+        - fcgi_keep_conn
         - maintenance_enabled
         - created_at
         - updated_at
@@ -18633,6 +18653,9 @@ components:
           type: string
           description: FastCGI index script. Omitted keeps the stored value; empty string resets it to index.php.
           maxLength: 128
+        fcgi_keep_conn:
+          type: boolean
+          description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Omitted keeps the stored value; false closes the connection after each reply. Turn it on only when PHP is 8.2.36, 8.3.37, 8.4.28, 8.5.13 or newer (CVE-2026-129289).'
         proxy_config:
           allOf:
             - $ref: '#/components/schemas/ProxyConfig'
@@ -27887,7 +27910,7 @@ components:
           maximum: 600000
         idle_conn_ms:
           type: integer
-          description: Idle upstream connection lifetime, 0-600000 ms (default 10000). On a fcgi upstream every open connection keeps one PHP-FPM worker busy, so idle connections are closed once they pass this lifetime.
+          description: Idle upstream connection lifetime, 0-600000 ms (default 10000). On a fcgi upstream with fcgi_keep_conn on, every open connection keeps one PHP-FPM worker busy, so idle connections are closed once they pass this lifetime. With fcgi_keep_conn off the agent closes each connection after the reply and this value does not apply.
           minimum: 0
           maximum: 600000
         host_header:

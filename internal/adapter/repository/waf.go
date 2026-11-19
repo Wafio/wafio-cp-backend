@@ -37,6 +37,8 @@ type WAFBundleAppRow struct {
 	// FastCGI config (migration 000044).
 	FCGIDocRoot string
 	FCGIIndex   string
+	// FCGIKeepConn is apps.fcgi_keep_conn (migration 000123).
+	FCGIKeepConn bool
 	// Maintenance is apps.maintenance (migration 000119), raw JSON.
 	Maintenance []byte
 }
@@ -73,6 +75,7 @@ const (
 		       COALESCE(a.proxy_config, '{}'::jsonb),
 		       COALESCE(a.fcgi_doc_root, ''),
 		       COALESCE(a.fcgi_index, 'index.php'),
+		       a.fcgi_keep_conn,
 		       COALESCE(a.maintenance, '{}'::jsonb)`
 )
 
@@ -80,7 +83,7 @@ func scanBundleRow(rows pgx.Row, row *WAFBundleAppRow) error {
 	return rows.Scan(&row.AppID, &row.ListenHost, &row.ListenPort, &row.Upstream, &row.Mode,
 		&row.RulesJSON, &row.Sensitivity,
 		&row.ProxyConfig,
-		&row.FCGIDocRoot, &row.FCGIIndex, &row.Maintenance)
+		&row.FCGIDocRoot, &row.FCGIIndex, &row.FCGIKeepConn, &row.Maintenance)
 }
 
 // ListAssignmentsForAgent returns active (enabled) assignments for an agent,
@@ -148,6 +151,8 @@ type AgentRouteRow struct {
 	// FastCGI config (migration 000044).
 	FCGIDocRoot string `json:"fcgi_doc_root"`
 	FCGIIndex   string `json:"fcgi_index"`
+	// FCGIKeepConn is apps.fcgi_keep_conn (migration 000123).
+	FCGIKeepConn bool `json:"fcgi_keep_conn"`
 	// MaintenanceEnabled is the switch of apps.maintenance (migration 000119).
 	MaintenanceEnabled bool `json:"maintenance_enabled"`
 }
@@ -164,6 +169,7 @@ func (r *WAFRepo) ListRoutesForAgent(ctx context.Context, agentID string) ([]Age
 		       COALESCE(a.proxy_config, '{}'::jsonb),
 		       COALESCE(a.fcgi_doc_root, ''),
 		       COALESCE(a.fcgi_index, 'index.php'),
+		       a.fcgi_keep_conn,
 		       COALESCE((a.maintenance->>'enabled')::boolean, false)
 		FROM waf_agent_apps waa
 		JOIN apps a ON a.id = waa.app_id
@@ -179,7 +185,7 @@ func (r *WAFRepo) ListRoutesForAgent(ctx context.Context, agentID string) ([]Age
 		if err := rows.Scan(&row.AppID, &row.Name, &row.ListenHost, &row.ListenPort, &row.Upstream,
 			&row.Mode,
 			&row.ProxyConfig,
-			&row.FCGIDocRoot, &row.FCGIIndex, &row.MaintenanceEnabled); err != nil {
+			&row.FCGIDocRoot, &row.FCGIIndex, &row.FCGIKeepConn, &row.MaintenanceEnabled); err != nil {
 			return nil, err
 		}
 		row.ProxyWarnings = domain.ProxyConfigWarnings(row.ProxyConfig)

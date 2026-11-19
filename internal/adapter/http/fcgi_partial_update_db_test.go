@@ -35,37 +35,42 @@ func createTestRoute(t *testing.T, f *dbFixture, name string, port int, extra ma
 	return agentID, appID
 }
 
-// A partial route/app update patches only the FastCGI fields it carries.
+// A partial route/app update patches only the FastCGI fields it carries, the keep-alive switch
+// included.
 func TestDBFastCGIPartialUpdateKeepsOtherField(t *testing.T) {
 	f := newDBFixture(t)
 	tok := f.tokens["owner"]
 	base := "/api/projects/" + f.project
 	agentID, appID := createTestRoute(t, f, "fcgi-app", 8181, map[string]any{
-		"upstream": "fcgi:127.0.0.1:9000", "fcgi_doc_root": "/var/www/app", "fcgi_index": "app.php",
+		"upstream": "fcgi:127.0.0.1:9000", "fcgi_doc_root": "/var/www/app", "fcgi_index": "app.php", "fcgi_keep_conn": true,
 	})
-	check := func(what, root, index string) {
+	check := func(what, root, index string, keepConn bool) {
 		t.Helper()
 		a, err := f.repo.App.GetByID(context.Background(), appID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if a.FCGIDocRoot != root || a.FCGIIndex != index {
-			t.Fatalf("%s: stored (%q, %q), want (%q, %q)", what, a.FCGIDocRoot, a.FCGIIndex, root, index)
+		if a.FCGIDocRoot != root || a.FCGIIndex != index || a.FCGIKeepConn != keepConn {
+			t.Fatalf("%s: stored (%q, %q, %v), want (%q, %q, %v)", what, a.FCGIDocRoot, a.FCGIIndex, a.FCGIKeepConn, root, index, keepConn)
 		}
 	}
-	check("created", "/var/www/app", "app.php")
+	check("created", "/var/www/app", "app.php", true)
 
 	routeURL := base + "/agents/" + agentID + "/routes/" + appID
 	wantStatus(t, "route update without fcgi fields", call(t, f.app, http.MethodPut, routeURL, tok, map[string]any{"listen_port": 8182}), fiber.StatusOK, "")
-	check("route update without fcgi fields", "/var/www/app", "app.php")
+	check("route update without fcgi fields", "/var/www/app", "app.php", true)
 	wantStatus(t, "route update of the index", call(t, f.app, http.MethodPut, routeURL, tok, map[string]any{"fcgi_index": "main.php"}), fiber.StatusOK, "")
-	check("route update of the index", "/var/www/app", "main.php")
+	check("route update of the index", "/var/www/app", "main.php", true)
 
 	appURL := base + "/apps/" + appID
 	wantStatus(t, "app update of the doc root", call(t, f.app, http.MethodPut, appURL, tok, map[string]any{"fcgi_doc_root": "/srv/www"}), fiber.StatusOK, "")
-	check("app update of the doc root", "/srv/www", "main.php")
+	check("app update of the doc root", "/srv/www", "main.php", true)
 	wantStatus(t, "app update of the name", call(t, f.app, http.MethodPut, appURL, tok, map[string]any{"name": "fcgi-app-2"}), fiber.StatusOK, "")
-	check("app update of the name", "/srv/www", "main.php")
+	check("app update of the name", "/srv/www", "main.php", true)
 	wantStatus(t, "app update with an empty index", call(t, f.app, http.MethodPut, appURL, tok, map[string]any{"fcgi_index": ""}), fiber.StatusOK, "")
-	check("app update with an empty index", "/srv/www", "index.php")
+	check("app update with an empty index", "/srv/www", "index.php", true)
+	wantStatus(t, "app update that turns keep-alive off", call(t, f.app, http.MethodPut, appURL, tok, map[string]any{"fcgi_keep_conn": false}), fiber.StatusOK, "")
+	check("app update that turns keep-alive off", "/srv/www", "index.php", false)
+	wantStatus(t, "route update that turns keep-alive on", call(t, f.app, http.MethodPut, routeURL, tok, map[string]any{"fcgi_keep_conn": true}), fiber.StatusOK, "")
+	check("route update that turns keep-alive on", "/srv/www", "index.php", true)
 }

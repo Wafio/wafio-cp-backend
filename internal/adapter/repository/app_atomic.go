@@ -14,6 +14,7 @@ import (
 type AppPatch struct {
 	Name, ListenHost, Upstream, FCGIDocRoot, FCGIIndex *string
 	ListenPort                                         *int
+	FCGIKeepConn                                       *bool
 	ProxyConfig                                        json.RawMessage
 	AgentID, Mode                                      string
 }
@@ -31,6 +32,9 @@ func (p AppPatch) ApplyTo(row *WAFBundleAppRow) {
 	}
 	if p.FCGIIndex != nil {
 		row.FCGIIndex = *p.FCGIIndex
+	}
+	if p.FCGIKeepConn != nil {
+		row.FCGIKeepConn = *p.FCGIKeepConn
 	}
 	if p.ListenPort != nil {
 		row.ListenPort = *p.ListenPort
@@ -90,8 +94,10 @@ func (r *AppRepo) UpdateAtomic(ctx context.Context, projectID, appID string, pat
 	result, err := tx.Exec(ctx, `UPDATE apps SET name=COALESCE($3,name), listen_host=COALESCE($4,listen_host),
  listen_port=COALESCE($5,listen_port), upstream_url=COALESCE($6,upstream_url),
  fcgi_doc_root=COALESCE($7,fcgi_doc_root), fcgi_index=COALESCE($8,fcgi_index),
- proxy_config=COALESCE($9::jsonb,proxy_config), updated_at=NOW() WHERE id=$1 AND project_id=$2`,
-		appID, projectID, patch.Name, patch.ListenHost, patch.ListenPort, patch.Upstream, patch.FCGIDocRoot, patch.FCGIIndex, proxy)
+ proxy_config=COALESCE($9::jsonb,proxy_config), fcgi_keep_conn=COALESCE($10,fcgi_keep_conn),
+ updated_at=NOW() WHERE id=$1 AND project_id=$2`,
+		appID, projectID, patch.Name, patch.ListenHost, patch.ListenPort, patch.Upstream, patch.FCGIDocRoot, patch.FCGIIndex, proxy,
+		patch.FCGIKeepConn)
 	if err != nil {
 		return err
 	}
