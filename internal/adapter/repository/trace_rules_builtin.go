@@ -18,8 +18,11 @@ import (
 // must also require exe_verified — the kernel saw the process in the
 // agent-verified protected set. A rule that can only name the process is a
 // downgrade that keeps the event and tags it unverified-identity, never a
-// suppress. Existing hosts get the same library from migrations 000093,
-// 000106, 000111, 000113, 000114 and 000118.
+// suppress. A verified process is not always root: the WAF agent runs as an
+// unprivileged user and is verified too, and it can name any of its threads
+// as it likes. So a rule that trusts a root daemon's name and exe_verified
+// also requires uid 0. Existing hosts get the same library from migrations
+// 000093, 000106, 000111, 000113, 000114, 000118 and 000121.
 func builtinRules(projectID, hostID string) []domain.DetectionRule {
 	sev := func(n int) *int { return &n }
 	verified := domain.RuleCondition{Field: "exe_verified", Op: "eq", Value: true}
@@ -154,6 +157,32 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 			Priority: 16,
 			Tags:     []string{"wafio", "false-positive", "unverified-identity"},
 		},
+		{
+			// The WAF agent runs as an unprivileged user, so the process x file
+			// matrix rates its reads of its own TLS keys CRITICAL: at start, on
+			// reload and on its 30 s certificate poll. The names are the process
+			// (wafio-waf-agent) and the tokio worker and blocking threads
+			// (tokio's default thread name, which is exactly 15 bytes). A process
+			// picks its own thread names, so the rule also needs exe_verified and
+			// a non-root uid, and it covers only the two key directories (ingest
+			// has already cleaned the path).
+			ProjectID:         projectID,
+			Name:              "Downgrade verified WAF agent TLS key reads",
+			Description:       "The WAF agent reads its own TLS keys under /etc/ssl/private and /etc/letsencrypt/live at start, on reload and on a poll, as an unprivileged user. Only for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A write, any other file, an unverified reader and any other name keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "openat"},
+				{Field: "filename", Op: "starts_with_any", Value: []string{"/etc/ssl/private/", "/etc/letsencrypt/live/"}},
+				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+			},
+			Priority: 62,
+			Tags:     []string{"wafio", "tls", "expected"},
+		},
 
 		// ── System Services (priority 20–30) ────────────────────────────────
 		{
@@ -174,12 +203,13 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 			// it runs the service: in the protected set by fork inheritance.
 			ProjectID:   projectID,
 			Name:        "Suppress systemd service start execve",
-			Description: "systemd calls execve to start services. These are not process injection. Only for a process the agent verified as the systemd host binary (or its child before exec); the name alone is not enough.",
+			Description: "systemd calls execve to start services. These are not process injection. Only for a root process the agent verified as the systemd host binary (or its child before exec); the name alone is not enough.",
 			Enabled:     true,
 			Action:      domain.RuleActionSuppress,
 			Conditions: []domain.RuleCondition{
 				{Field: "comm", Op: "eq", Value: "systemd"},
 				{Field: "event_name", Op: "eq", Value: "execve"},
+				{Field: "uid", Op: "eq", Value: 0},
 				verified,
 			},
 			Priority: 21,
@@ -247,12 +277,13 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 		{
 			ProjectID:   projectID,
 			Name:        "Suppress dockerd network management",
-			Description: "dockerd creating/managing network sockets is normal container networking. Only for a process the agent verified as the dockerd host binary; a process renamed to dockerd is kept.",
+			Description: "dockerd creating/managing network sockets is normal container networking. Only for a root process the agent verified as the dockerd host binary; a process renamed to dockerd is kept.",
 			Enabled:     true,
 			Action:      domain.RuleActionSuppress,
 			Conditions: []domain.RuleCondition{
 				{Field: "comm", Op: "eq", Value: "dockerd"},
 				{Field: "category", Op: "eq", Value: "network"},
+				{Field: "uid", Op: "eq", Value: 0},
 				verified,
 			},
 			Priority: 26,
@@ -511,7 +542,7 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade sshd host key reads",
-			Description:       "sshd loads its own host keys on every connection. Reading /etc/ssh/* is the daemon doing its job. Only for a process the agent verified as the sshd host binary.",
+			Description:       "sshd loads its own host keys on every connection. Reading /etc/ssh/* is the daemon doing its job. Only for a root process the agent verified as the sshd host binary.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SkipSeverityGuard: true,
@@ -521,6 +552,7 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 				{Field: "parent_comm", Op: "eq", Value: "sshd"},
 				{Field: "event_name", Op: "eq", Value: "openat"},
 				{Field: "filename", Op: "starts_with", Value: "/etc/ssh/"},
+				{Field: "uid", Op: "eq", Value: 0},
 				verified,
 			},
 			Priority: 5,
@@ -529,7 +561,7 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade sshd account database reads",
-			Description:       "sshd reads the account database during authentication and session setup. Only for a process the agent verified as the sshd host binary: a process and parent renamed to sshd reading /etc/shadow stay HIGH.",
+			Description:       "sshd reads the account database during authentication and session setup. Only for a root process the agent verified as the sshd host binary: a process and parent renamed to sshd reading /etc/shadow stay HIGH.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SkipSeverityGuard: true,
@@ -539,6 +571,7 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 				{Field: "parent_comm", Op: "eq", Value: "sshd"},
 				{Field: "event_name", Op: "eq", Value: "openat"},
 				{Field: "filename", Op: "in", Value: []string{"/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow", "/etc/nsswitch.conf"}},
+				{Field: "uid", Op: "eq", Value: 0},
 				verified,
 			},
 			Priority: 7,
@@ -688,7 +721,7 @@ func authSessionRules(projectID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade verified auth daemon account database reads",
-			Description:       "sshd-session and the systemd user-session setup read /etc/shadow through PAM (pam_unix account checks) on every login. Only for a process the kernel saw in the agent-verified protected set; any other reader keeps HIGH or is escalated.",
+			Description:       "sshd-session and the systemd user-session setup read /etc/shadow through PAM (pam_unix account checks) on every login. Only for a root process the kernel saw in the agent-verified protected set; any other reader keeps HIGH or is escalated.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SeverityOverride:  sev(1),
@@ -697,6 +730,7 @@ func authSessionRules(projectID string) []domain.DetectionRule {
 				{Field: "comm", Op: "in", Value: []string{"sshd", "sshd-session", "sshd-auth", "(systemd)", "(sd-pam)"}},
 				{Field: "event_name", Op: "eq", Value: "openat"},
 				{Field: "filename", Op: "in", Value: []string{"/etc/shadow", "/etc/gshadow"}},
+				{Field: "uid", Op: "eq", Value: 0},
 				verified,
 			},
 			Priority: 17,

@@ -55,6 +55,11 @@ func TestBuiltinRulePredicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	migration = append(migration, noiseMigration...)
+	tlsKeyMigration, err := os.ReadFile("../../../migrations/000121_waf_agent_tls_key_reads.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration = append(migration, tlsKeyMigration...)
 	for _, rule := range builtinRules("project", "host") {
 		if err := rule.Validate(); err != nil {
 			t.Errorf("%s: %v", rule.Name, err)
