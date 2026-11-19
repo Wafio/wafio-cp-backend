@@ -32,19 +32,20 @@ func (r *AppRepo) SetInlineProxy(ctx context.Context, appID, listenHost string, 
 	return err
 }
 
-// SetFCGIConfig persists the FastCGI document root and index file for an app
-// (migration 000044). Empty strings are stored as empty (not NULL) to allow
-// clearing previously set values.
-func (r *AppRepo) SetFCGIConfig(ctx context.Context, appID, docRoot, index string) error {
+// SetFCGIConfig persists the FastCGI document root, index file and keep-alive
+// choice for an app (migrations 000044, 000123). Empty strings are stored as
+// empty (not NULL) to allow clearing previously set values.
+func (r *AppRepo) SetFCGIConfig(ctx context.Context, appID, docRoot, index string, keepConn bool) error {
 	if index == "" {
 		index = "index.php"
 	}
 	_, err := r.pool.Exec(ctx, `
 		UPDATE apps
-		   SET fcgi_doc_root = $2,
-		       fcgi_index    = $3,
-		       updated_at    = NOW()
-		 WHERE id = $1`, appID, docRoot, index)
+		   SET fcgi_doc_root  = $2,
+		       fcgi_index     = $3,
+		       fcgi_keep_conn = $4,
+		       updated_at     = NOW()
+		 WHERE id = $1`, appID, docRoot, index, keepConn)
 	return err
 }
 

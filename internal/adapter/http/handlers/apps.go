@@ -157,9 +157,10 @@ type updateAppBody struct {
 	UpstreamURL string `json:"upstream_url" validate:"omitempty,max=512"`
 	// FastCGI fields are patched one by one: nil (absent) keeps the stored
 	// value, "" clears the doc root or resets the index to index.php.
-	FCGIDocRoot *string         `json:"fcgi_doc_root" validate:"omitempty,max=512"`
-	FCGIIndex   *string         `json:"fcgi_index"    validate:"omitempty,max=128"`
-	ProxyConfig json.RawMessage `json:"proxy_config"`
+	FCGIDocRoot  *string         `json:"fcgi_doc_root" validate:"omitempty,max=512"`
+	FCGIIndex    *string         `json:"fcgi_index"    validate:"omitempty,max=128"`
+	FCGIKeepConn *bool           `json:"fcgi_keep_conn"`
+	ProxyConfig  json.RawMessage `json:"proxy_config"`
 }
 
 func (h *AppsHandler) Update(c *fiber.Ctx) error {
@@ -204,6 +205,7 @@ func (h *AppsHandler) Update(c *fiber.Ctx) error {
 		patch.Upstream = &body.UpstreamURL
 	}
 	patch.FCGIDocRoot, patch.FCGIIndex = fcgiPatch(body.FCGIDocRoot, body.FCGIIndex)
+	patch.FCGIKeepConn = body.FCGIKeepConn
 	if err := h.Repo.App.UpdateAtomic(c.UserContext(), app.ProjectID, app.ID, patch,
 		admitRouteChange(c.UserContext(), h.Repo, h.Bundles, app.ProjectID, app.ID, patch)); err != nil {
 		var refuse *refusal
@@ -225,7 +227,7 @@ func (h *AppsHandler) Update(c *fiber.Ctx) error {
 		ProjectID: app.ProjectID, ActorUserID: userID,
 		Action: repository.AuditAppUpdated, TargetType: "app", TargetID: app.ID, TargetName: app.Name,
 		IP: c.IP(), UserAgent: string(c.Request().Header.UserAgent()),
-		MetadataJSON: withProxyTrust(map[string]any{"name": body.Name, "listen_host": body.ListenHost, "listen_port": body.ListenPort, "upstream_url": domain.StripURLUserinfo(body.UpstreamURL)}, body.ProxyConfig),
+		MetadataJSON: withFCGIKeepConn(withProxyTrust(map[string]any{"name": body.Name, "listen_host": body.ListenHost, "listen_port": body.ListenPort, "upstream_url": domain.StripURLUserinfo(body.UpstreamURL)}, body.ProxyConfig), body.FCGIKeepConn),
 	})
 	return c.JSON(fiber.Map{"app": fresh})
 }
@@ -329,6 +331,14 @@ func fcgiPatch(docRoot, index *string) (*string, *string) {
 		index = &def
 	}
 	return docRoot, index
+}
+
+// withFCGIKeepConn records the keep-alive choice in an audit entry only when the request sent it.
+func withFCGIKeepConn(meta map[string]any, keepConn *bool) map[string]any {
+	if keepConn != nil {
+		meta["fcgi_keep_conn"] = *keepConn
+	}
+	return meta
 }
 
 // derefString returns *p, or "" for nil.

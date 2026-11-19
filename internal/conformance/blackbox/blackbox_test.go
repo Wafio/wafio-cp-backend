@@ -109,9 +109,14 @@ func (fx *fixture) bundle(gen int64, addedHeader string) []byte {
 			"limits": map[string]int{"max_text_bytes": 1024},
 		}}, nil),
 	}
+	// The recordings come from the Go agent, which always keeps FastCGI connections open; the option gives the Rust agent the same behaviour.
 	fc := fx.app("fcgi", "fcgi://"+fx.fcgi.addr, "block", nil, map[string]any{"idle_conn_ms": 300})
-	fc["fcgi_doc_root"], fc["fcgi_index"] = "/srv/www", "index.php"
-	apps = append(apps, fc)
+	fc["fcgi_doc_root"], fc["fcgi_index"], fc["fcgi_keep_conn"] = "/srv/www", "index.php", true
+	return bundleOf(gen, append(apps, fc))
+}
+
+// bundleOf renders a bundle of the given apps.
+func bundleOf(gen int64, apps []map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{
 		"agent_id":   "agent-blackbox",
 		"project_id": "proj-blackbox",
@@ -903,11 +908,7 @@ func caseFastCGI(t *testing.T, b *bb) {
 	if n := u.accepted.Load() - base; n != 1 {
 		t.Errorf("3 sequential requests opened %d FastCGI connections, want 1 (pooled, FCGI_KEEP_CONN)", n)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for u.open.Load() != 0 && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if n := u.open.Load(); n != 0 {
+	if n := waitClosed(u, 5*time.Second); n != 0 {
 		t.Errorf("%d FastCGI connections still open after idle_conn_ms=300", n)
 	}
 	r := b.do(t, "after-idle", "fcgi", "POST", "/index.php", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, "k=v")
@@ -917,6 +918,15 @@ func caseFastCGI(t *testing.T, b *bb) {
 	}
 	b.rec.add(map[string]any{"phase": b.phase, "case": "fcgi-connections", "accepted": u.accepted.Load() - base})
 	b.cp.barrier(t)
+}
+
+// waitClosed waits up to d for the responder's open connections to reach 0 and returns how many are left.
+func waitClosed(u *fcgiUpstream, d time.Duration) int64 {
+	deadline := time.Now().Add(d)
+	for u.open.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	return u.open.Load()
 }
 
 func casePing(t *testing.T, b *bb) {
