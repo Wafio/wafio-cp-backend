@@ -83,7 +83,7 @@ internal/                 adapter, agentserver, apicontract, application, certut
                           dashboard, domain, engine, fairshare, fsstat, installertest, keyauth, lru, otp,
                           setup, testutil, updater, validate (internal/README.md describes them)
 shared/                   Go module github.com/wafio/wafio-cp-backend/shared (see below)
-migrations/               000001 to 000120, up and down
+migrations/               000001 to 000121, up and down
 api/openapi.yaml          HTTP contract
 config/                   config.example.yaml
 deploy/                   the backup units (systemd/) and an nginx example for the HTTP API
@@ -99,7 +99,7 @@ docker-compose.yml        services db (TimescaleDB) and api (the control plane i
 
 ## Migrations
 
-Files are `golang-migrate` pairs, `NNNNNN_name.up.sql` and `.down.sql`: 111 pairs, the latest is 000120, and 000066 to 000072, 000088 and 000092 are unused numbers. A new migration is numbered above every one already applied, or `golang-migrate` never runs it. `wafio migrate up`, `down [--steps N]` and `fresh` (development only, drops everything) run them; the applied version is in `SELECT version, dirty FROM schema_migrations`; `wafio serve --migrate` applies pending ones at boot. The migrations ship in the control plane bundle.
+Files are `golang-migrate` pairs, `NNNNNN_name.up.sql` and `.down.sql`: 112 pairs, the latest is 000121, and 000066 to 000072, 000088 and 000092 are unused numbers. A new migration is numbered above every one already applied, or `golang-migrate` never runs it. `wafio migrate up`, `down [--steps N]` and `fresh` (development only, drops everything) run them; the applied version is in `SELECT version, dirty FROM schema_migrations`; `wafio serve --migrate` applies pending ones at boot. The migrations ship in the control plane bundle.
 
 ## HTTP contract tests
 

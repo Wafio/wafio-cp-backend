@@ -224,7 +224,9 @@ func TestAuthSessionMigrationMatchesBuiltins(t *testing.T) {
 			continue
 		}
 		tags, _ := json.Marshal(r.Tags)
-		want := regexp.QuoteMeta("SELECT s.project_id, s.host_id, '"+q(r.Name)+"', '"+q(r.Description)+"', true, '"+r.Action+"', '"+q(string(conds))+"'::jsonb, ") +
+		// Migration 000121 changed one of these rules afterwards.
+		desc, oldConds := beforeUIDRequirement(r)
+		want := regexp.QuoteMeta("SELECT s.project_id, s.host_id, '"+q(r.Name)+"', '"+q(desc)+"', true, '"+r.Action+"', '"+q(oldConds)+"'::jsonb, ") +
 			`\d+, ` + regexp.QuoteMeta(strconv.Itoa(r.Priority)+", ARRAY(SELECT jsonb_array_elements_text('"+q(string(tags))+"'::jsonb))")
 		if !regexp.MustCompile(want).MatchString(string(up)) {
 			t.Errorf("%s: up does not insert the seeded definition", r.Name)

@@ -101,6 +101,10 @@ func TestAuthSessionMigrationReplay(t *testing.T) {
 		if _, err := pool.Exec(ctx, string(up)); err != nil {
 			t.Fatalf("up run %d: %v", run, err)
 		}
+		// 000121 changes one of these rules again; a host holds both.
+		if _, err := pool.Exec(ctx, string(tlsKeyUp(t))); err != nil {
+			t.Fatalf("000121 up run %d: %v", run, err)
+		}
 		after := snapshotBuiltins(t, pool, hostID)
 		if len(after) != len(builtinRules(projectID, hostID)) {
 			t.Fatalf("run %d: %d built-ins, want %d", run, len(after), len(builtinRules(projectID, hostID)))

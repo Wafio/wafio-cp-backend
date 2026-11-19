@@ -80,8 +80,9 @@ func TestIdentityMigrationMatchesBuiltins(t *testing.T) {
 	// TestSystemServiceMigrationMatchesBuiltins; 000113:
 	// TestJITRuntimeMigrationMatchesBuiltins; 000114:
 	// TestAlreadyRootMigrationMatchesBuiltins; 000118:
-	// TestRuntimeNoiseMigrationMatchesBuiltins).
-	later := map[string]bool{}
+	// TestRuntimeNoiseMigrationMatchesBuiltins; 000121:
+	// TestWAFAgentTLSKeyMigrationMatchesBuiltins).
+	later := map[string]bool{tlsKeyRuleName: true}
 	for _, r := range authSessionRules("p") {
 		later[r.Name] = true
 	}
@@ -114,12 +115,13 @@ func TestIdentityMigrationMatchesBuiltins(t *testing.T) {
 			continue
 		}
 		updated++
-		conds, _ := json.Marshal(r.Conditions)
+		// Migration 000121 changed some of these rules afterwards.
+		desc, conds := beforeUIDRequirement(r)
 		tags, _ := json.Marshal(r.Tags)
 		for _, want := range []string{
 			"action = '" + r.Action + "'",
-			"conditions = '" + strings.ReplaceAll(string(conds), "'", "''") + "'::jsonb",
-			"description = '" + strings.ReplaceAll(r.Description, "'", "''") + "'",
+			"conditions = '" + strings.ReplaceAll(conds, "'", "''") + "'::jsonb",
+			"description = '" + strings.ReplaceAll(desc, "'", "''") + "'",
 			"jsonb_array_elements_text('" + string(tags) + "'::jsonb)",
 		} {
 			if !strings.Contains(line, want) {
@@ -183,6 +185,10 @@ func TestIdentityMigrationPreservesEnabledState(t *testing.T) {
 
 	if _, err := pool.Exec(ctx, string(up)); err != nil {
 		t.Fatalf("up: %v", err)
+	}
+	// 000121 changes four of these rules again; a host holds both.
+	if _, err := pool.Exec(ctx, string(tlsKeyUp(t))); err != nil {
+		t.Fatalf("000121 up: %v", err)
 	}
 	rules, err := repo.ListRulesUncached(ctx, projectID, hostID)
 	if err != nil {
