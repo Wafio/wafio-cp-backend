@@ -50,8 +50,9 @@ type bundleAppLite struct {
 	// FastCGI config (migration 000044).
 	FCGIDocRoot string `json:"fcgi_doc_root,omitempty"`
 	FCGIIndex   string `json:"fcgi_index,omitempty"`
-	// FCGIKeepConn is present only when true (migration 000123): the agent closes the FastCGI
-	// connection after each reply unless it is set. An agent that does not know the key ignores it.
+	// FCGIKeepConn is present only when true (migration 000123). An agent that reads it closes the
+	// FastCGI connection after each reply unless it is set. One that does not know the key ignores
+	// it: before 2.1.1 it keeps the connection open, 2.1.1 closes it.
 	FCGIKeepConn bool `json:"fcgi_keep_conn,omitempty"`
 	// Per-app custom WAF rules.
 	CustomGUIRules    []json.RawMessage `json:"custom_gui_rules,omitempty"`

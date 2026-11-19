@@ -27910,7 +27910,7 @@ components:
           maximum: 600000
         idle_conn_ms:
           type: integer
-          description: Idle upstream connection lifetime, 0-600000 ms (default 10000). On a fcgi upstream with fcgi_keep_conn on, every open connection keeps one PHP-FPM worker busy, so idle connections are closed once they pass this lifetime. With fcgi_keep_conn off the agent closes each connection after the reply and this value does not apply.
+          description: Idle upstream connection lifetime, 0-600000 ms (default 10000). On a fcgi upstream with fcgi_keep_conn on, every open connection keeps one PHP-FPM worker busy, so idle connections are closed once they pass this lifetime. From agent 2.1.1, with fcgi_keep_conn off the agent closes each connection after the reply and this value does not apply. Earlier agents keep FastCGI connections open whatever the setting.
           minimum: 0
           maximum: 600000
         host_header:
