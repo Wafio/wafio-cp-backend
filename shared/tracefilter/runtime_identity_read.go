@@ -13,7 +13,7 @@ func IsPublicIdentityRead(t *TraceEventPayload) bool {
 		return true
 	}
 	switch t.Filename {
-	case "/etc/passwd", "/etc/group", "/etc/nsswitch.conf":
+	case "/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/login.defs":
 		return true
 	default:
 		return false

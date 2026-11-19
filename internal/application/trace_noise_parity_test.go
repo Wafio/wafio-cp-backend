@@ -66,7 +66,7 @@ func TestAgentReportNamesMatchControlPlane(t *testing.T) {
 // of /etc/passwd by any user would fill the ring and lose execs); their
 // writes, and reads of credential files, stay exempt.
 func TestPublicIdentityReadsAreNotShedExempt(t *testing.T) {
-	for _, path := range []string{"/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/root/.ssh/authorized_keys", "/home/u/.ssh/authorized_keys"} {
+	for _, path := range []string{"/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/login.defs", "/root/.ssh/authorized_keys", "/home/u/.ssh/authorized_keys"} {
 		p := TraceEventPayload{EventName: "openat", Filename: path}
 		if !tracefilter.IsPublicIdentityRead(&p) {
 			t.Fatalf("%s: no longer a public identity read at ingest; revisit traceKeepBuiltin", path)

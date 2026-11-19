@@ -48,7 +48,7 @@ var TraceKeepBuiltin = map[string]uint8{
 	"private": TraceKeepDir, ".aws": TraceKeepDir, ".azure": TraceKeepDir, ".docker": TraceKeepDir,
 	"mem": TraceKeepName,
 	// auth. Reads of the public identity files (passwd, group,
-	// nsswitch.conf, authorized_keys) are what every id, ls -l, sudo and
+	// nsswitch.conf, login.defs, authorized_keys) are what every id, ls -l, sudo and
 	// login does, and ingest lowers them to INFO and drops them
 	// (isPublicIdentityRead): keep only their writes, or a read loop of
 	// /etc/passwd by any user fills the ring past shedding (demo:
@@ -56,7 +56,7 @@ var TraceKeepBuiltin = map[string]uint8{
 	// 150 of 150 concurrent execs delivered).
 	"passwd": TraceKeepWrite, "group": TraceKeepWrite, "nsswitch.conf": TraceKeepWrite,
 	"authorized_keys": TraceKeepWrite,
-	"sudoers":         TraceKeepName, "login.defs": TraceKeepName,
+	"sudoers":         TraceKeepName, "login.defs": TraceKeepWrite,
 	"environ":   TraceKeepName,
 	"sudoers.d": TraceKeepDir, "pam.d": TraceKeepDir, "security": TraceKeepDir,
 	// persistence
