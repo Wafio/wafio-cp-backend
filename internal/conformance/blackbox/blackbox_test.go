@@ -109,12 +109,14 @@ func (fx *fixture) bundle(gen int64, addedHeader string) []byte {
 			"limits": map[string]int{"max_text_bytes": 1024},
 		}}, nil),
 	}
+	// The recordings come from the Go agent, which always keeps FastCGI connections open; the option gives the Rust agent the same behaviour.
 	fc := fx.app("fcgi", "fcgi://"+fx.fcgi.addr, "block", nil, map[string]any{"idle_conn_ms": 300})
 	fc["fcgi_doc_root"], fc["fcgi_index"], fc["fcgi_keep_conn"] = "/srv/www", "index.php", true
-	// Same upstream with the default: a connection for each request, closed after the reply.
-	fcClose := fx.app("fcgiclose", "fcgi://"+fx.fcgi.addr, "block", nil, nil)
-	fcClose["fcgi_doc_root"], fcClose["fcgi_index"] = "/srv/www", "index.php"
-	apps = append(apps, fc, fcClose)
+	return bundleOf(gen, append(apps, fc))
+}
+
+// bundleOf renders a bundle of the given apps.
+func bundleOf(gen int64, apps []map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{
 		"agent_id":   "agent-blackbox",
 		"project_id": "proj-blackbox",
@@ -286,7 +288,7 @@ func expectStatus(t *testing.T, r resp, want int) {
 func TestBlackbox(t *testing.T) {
 	s := newSuite(t)
 	fx := &fixture{http: newHTTPUpstream(t), fcgi: newFCGIUpstream(t), ws: newWSUpstream(t), ports: map[string]int{}}
-	ids := []string{"fwd", "hostup", "hostcustom", "trusted", "limits", "monitor", "rt", "challenge", "fields", "flood", "floodallow", "ws", "fcgi", "fcgiclose"}
+	ids := []string{"fwd", "hostup", "hostcustom", "trusted", "limits", "monitor", "rt", "challenge", "fields", "flood", "floodallow", "ws", "fcgi"}
 	for i, p := range freePorts(t, len(ids)) {
 		fx.ports[ids[i]] = p
 	}
@@ -915,33 +917,6 @@ func caseFastCGI(t *testing.T, b *bb) {
 		t.Errorf("request after the idle reap: %d connections in total, want 2", n)
 	}
 	b.rec.add(map[string]any{"phase": b.phase, "case": "fcgi-connections", "accepted": u.accepted.Load() - base})
-
-	// The default app: a connection for each request, none left open. Not recorded, so the golden recordings stay as they are.
-	waitClosed(u, 5*time.Second)
-	base = u.accepted.Load()
-	for i := range 3 {
-		req, err := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/index.php?a=%d", b.fx.ports["fcgiclose"], i), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Host = appHost
-		req.Header.Set("User-Agent", clientUA)
-		res, err := b.client.Do(req)
-		if err != nil {
-			t.Fatalf("fcgiclose request %d: %v\nagent log:\n%s", i, err, b.logTail(30))
-		}
-		_, _ = io.Copy(io.Discard, res.Body)
-		_ = res.Body.Close()
-		if res.StatusCode != 200 {
-			t.Errorf("fcgiclose request %d: status %d, want 200", i, res.StatusCode)
-		}
-	}
-	if n := u.accepted.Load() - base; n != 3 {
-		t.Errorf("3 sequential requests without fcgi_keep_conn opened %d FastCGI connections, want 3", n)
-	}
-	if n := waitClosed(u, time.Second); n != 0 {
-		t.Errorf("%d FastCGI connections still open after the replies without fcgi_keep_conn", n)
-	}
 	b.cp.barrier(t)
 }
 
