@@ -4,13 +4,13 @@
 
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade verified web server TLS key reads';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade web server key reads in certbot reloads';
-DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade verified systemd-networkd sockets and BPF';
+DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade verified systemd-networkd ICMPv6 raw socket';
+DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade verified systemd-networkd LLDP packet socket';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade debconf account database reads in package runs';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade dracut root account read';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade needrestart process environment reads';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade needrestart hook environment reads';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade pg_ctlcluster account database read at start';
-DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade PostgreSQL server key read at start';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade dpkg-deb control extraction chown';
 DELETE FROM trace_detection_rules WHERE built_in = true AND name = 'Downgrade dracut initramfs copy chown';
 UPDATE trace_detection_rules SET description = 'sshd loads its own host keys on every connection. Reading /etc/ssh/* is the daemon doing its job. Only for a root process the agent verified as the sshd host binary.', conditions = '[{"field":"comm","op":"eq","value":"sshd"},{"field":"parent_comm","op":"eq","value":"sshd"},{"field":"event_name","op":"eq","value":"openat"},{"field":"filename","op":"starts_with","value":"/etc/ssh/"},{"field":"uid","op":"eq","value":0},{"field":"exe_verified","op":"eq","value":true},{"field":"event_name","op":"eq","value":"openat"},{"field":"flags","op":"bit_none","value":579}]'::jsonb WHERE built_in = true AND name = 'Downgrade sshd host key reads';

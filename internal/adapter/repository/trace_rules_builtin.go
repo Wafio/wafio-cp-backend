@@ -1025,6 +1025,10 @@ func alreadyRootRules(projectID string) []domain.DetectionRule {
 	}
 }
 
+// rawSocket matches the type argument of a SOCK_RAW socket(), with or without
+// SOCK_NONBLOCK and SOCK_CLOEXEC.
+var rawSocket = domain.RuleCondition{Field: "detail", Op: "in", Value: []any{3, 2051, 524291, 526339}}
+
 // runtimeNoiseRules calibrate what an ordinary Ubuntu workstation produced in
 // 15 minutes on a preview control plane (migration 000118): sudo and cron
 // reading /etc/shadow as CRITICAL, a desktop tool reading /proc/<pid>/environ
@@ -1050,7 +1054,6 @@ func runtimeNoiseRules(projectID string) []domain.DetectionRule {
 	sev := func(n int) *int { return &n }
 	verified := domain.RuleCondition{Field: "exe_verified", Op: "eq", Value: true}
 	rootUID := domain.RuleCondition{Field: "uid", Op: "eq", Value: 0}
-	rawSocket := domain.RuleCondition{Field: "detail", Op: "in", Value: []any{3, 2051, 524291, 526339}}
 	runtimeParents := []string{"runc", "containerd-shim", "containerd-shim-runc-v2"}
 	daemonChown := []domain.RuleCondition{
 		{Field: "event_name", Op: "eq", Value: "chown"},
@@ -1328,14 +1331,19 @@ func runtimeNoiseRules(projectID string) []domain.DetectionRule {
 // Two kinds of identity, as in authSessionRules:
 //   - A daemon the agent can verify is lowered to LOW only with exe_verified
 //     and the UID it runs as: nginx (root), systemd-networkd (its own user).
-//     An unverified process with the same name keeps its severity.
+//     An unverified process with the same name keeps its severity. The mark
+//     is shared by every verified process, and each of them can rename a
+//     thread, so a rule for a verified non-root daemon also names the exact
+//     call shapes that daemon makes.
 //   - A helper that is exec'd cannot be verified. It is lowered to MEDIUM
 //     (stored, no incident), tagged unverified-identity, and only for root,
-//     the exact name, the exact lineage and the exact file: a name is set by
-//     the process, so the lineage and the file carry the identity. The one
-//     exception is PostgreSQL's server key read: the kernel let a non-root
-//     process open a key that only a group may read, and the agent reported
-//     the open as completed (ret_val of at least 1, a descriptor).
+//     the exact name, the exact lineage and the exact file: an unprivileged
+//     process cannot show a root UID, and the lineage and the file narrow
+//     what a root process gains by naming itself. No rule accepts a non-root
+//     process on names alone. PostgreSQL's read of its server key at start
+//     stays an incident for that reason: its account is in the ssl-cert
+//     group on Debian and Ubuntu, and any process the account starts can take
+//     the same names.
 //
 // Every rule downgrades, never suppresses: the event stays stored and visible
 // in Runtime Security. Open rules keep the read-only guard the factory adds.
@@ -1400,22 +1408,49 @@ func expectedReaderRules(projectID string) []domain.DetectionRule {
 		},
 		{
 			// comm is cut at 15 bytes: systemd-networkd reaches here as
-			// systemd-network.
+			// systemd-network. The WAF agent is verified and unprivileged too and
+			// can name a thread the same way, so the socket shape is part of the
+			// match. A BPF load carries no such shape and stays HIGH.
 			ProjectID:         projectID,
-			Name:              "Downgrade verified systemd-networkd sockets and BPF",
-			Description:       "systemd-networkd runs as its own unprivileged user and opens raw ICMPv6 and packet sockets (router discovery, LLDP) and loads BPF programs when it starts. Kept at LOW and tagged, only for a non-root process the agent verified as the systemd-networkd binary of its own unit. An unverified process with that name, root and any other event keep their severity.",
+			Name:              "Downgrade verified systemd-networkd ICMPv6 raw socket",
+			Description:       "systemd-networkd runs as its own unprivileged user and opens a raw ICMPv6 socket for router discovery when it starts. Kept at LOW and tagged, only for a non-root process the agent verified as the systemd-networkd binary of its own unit, and only for that socket (AF_INET6, SOCK_RAW, protocol 58). An unverified process with that name, root, any other socket and a BPF program load keep their severity.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SkipSeverityGuard: true,
 			SkipWriteGuard:    true,
 			SeverityOverride:  sev(1),
 			Conditions: []domain.RuleCondition{
-				{Field: "event_name", Op: "in", Value: []string{"socket", "bpf"}},
+				{Field: "event_name", Op: "eq", Value: "socket"},
 				{Field: "comm", Op: "eq", Value: "systemd-network"},
 				{Field: "uid", Op: "neq", Value: 0},
 				verified,
+				{Field: "addr_family", Op: "eq", Value: 10},
+				rawSocket,
+				{Field: "flags", Op: "eq", Value: 58},
 			},
 			Priority: 65,
+			Tags:     []string{"systemd", "network", "expected"},
+		},
+		{
+			// 52360 is the LLDP EtherType 0x88CC in network byte order.
+			ProjectID:         projectID,
+			Name:              "Downgrade verified systemd-networkd LLDP packet socket",
+			Description:       "systemd-networkd runs as its own unprivileged user and opens a raw packet socket for LLDP when it starts. Kept at LOW and tagged, only for a non-root process the agent verified as the systemd-networkd binary of its own unit, and only for that socket (AF_PACKET, SOCK_RAW, EtherType 0x88CC). An unverified process with that name, root, any other socket and a BPF program load keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "socket"},
+				{Field: "comm", Op: "eq", Value: "systemd-network"},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+				{Field: "addr_family", Op: "eq", Value: 17},
+				rawSocket,
+				{Field: "flags", Op: "eq", Value: 52360},
+			},
+			Priority: 66,
 			Tags:     []string{"systemd", "network", "expected"},
 		},
 		{
@@ -1434,7 +1469,7 @@ func expectedReaderRules(projectID string) []domain.DetectionRule {
 				readsShadow,
 				opened,
 			},
-			Priority: 66,
+			Priority: 67,
 			Tags:     []string{"package-manager", "unverified-identity", "expected"},
 		},
 		{
@@ -1452,7 +1487,7 @@ func expectedReaderRules(projectID string) []domain.DetectionRule {
 				readsShadow,
 				opened,
 			},
-			Priority: 67,
+			Priority: 68,
 			Tags:     []string{"initramfs", "unverified-identity", "expected"},
 		},
 		{
@@ -1470,7 +1505,7 @@ func expectedReaderRules(projectID string) []domain.DetectionRule {
 				rootUID,
 				environ,
 			},
-			Priority: 68,
+			Priority: 69,
 			Tags:     []string{"package-manager", "proc", "unverified-identity", "expected"},
 		},
 		{
@@ -1487,7 +1522,7 @@ func expectedReaderRules(projectID string) []domain.DetectionRule {
 				rootUID,
 				environ,
 			},
-			Priority: 69,
+			Priority: 70,
 			Tags:     []string{"package-manager", "proc", "unverified-identity", "expected"},
 		},
 		{
@@ -1506,31 +1541,8 @@ func expectedReaderRules(projectID string) []domain.DetectionRule {
 				readsShadow,
 				opened,
 			},
-			Priority: 70,
-			Tags:     []string{"postgresql", "unverified-identity", "expected"},
-		},
-		{
-			// ret_val of at least 1 is a descriptor: the kernel let a non-root
-			// process open a root:ssl-cert 0640 key, so it holds the group root
-			// granted. A renamed process gets EACCES (ret_val -13), pg_read_file
-			// in a backend has a postgres parent, COPY FROM PROGRAM runs as cat or
-			// sh, and an agent that reports no open result sends ret_val 0.
-			ProjectID:         projectID,
-			Name:              "Downgrade PostgreSQL server key read at start",
-			Description:       "PostgreSQL reads its server key under /etc/ssl/private as the postgres user when a cluster starts. The key is readable by the ssl-cert group, so a completed open shows the kernel accepted the reader. Kept at MEDIUM and tagged, only for a non-root postgres under pg_ctl or systemd and an open the agent reported as completed with a descriptor. A failed open, an open with no result and any other parent keep their severity.",
-			Enabled:           true,
-			Action:            domain.RuleActionDowngrade,
-			SkipSeverityGuard: true,
-			SeverityOverride:  sev(2),
-			Conditions: []domain.RuleCondition{
-				{Field: "comm", Op: "eq", Value: "postgres"},
-				{Field: "parent_comm", Op: "in", Value: []string{"pg_ctl", "systemd"}},
-				{Field: "uid", Op: "neq", Value: 0},
-				{Field: "filename", Op: "starts_with", Value: "/etc/ssl/private/"},
-				{Field: "ret_val", Op: "gte", Value: 1},
-			},
 			Priority: 71,
-			Tags:     []string{"postgresql", "tls", "unverified-identity", "expected"},
+			Tags:     []string{"postgresql", "unverified-identity", "expected"},
 		},
 		{
 			// "." is dpkg-deb's working directory, which the agent could not

@@ -173,15 +173,30 @@ func TestExpectedReaderRules(t *testing.T) {
 		bpf := func(uid int, verified bool) application.TraceEventPayload {
 			return securityOf("bpf", "systemd-network", "systemd", "swapper/0", uid, verified, 3)
 		}
-		wantStored(t, "bpf", bpf(998, true), 1)
 		wantStored(t, "raw ICMPv6 socket", socketOf("systemd-network", 10, 3, 58, 998, true), 1)
+		wantStored(t, "raw ICMPv6 socket, nonblocking and close-on-exec", socketOf("systemd-network", 10, 526339, 58, 998, true), 1)
 		wantStored(t, "packet socket for LLDP", socketOf("systemd-network", 17, 3, 52360, 998, true), 1)
+		wantStored(t, "packet socket for LLDP, nonblocking and close-on-exec", socketOf("systemd-network", 17, 526339, 52360, 998, true), 1)
+		wantOpens(t, "verified bpf", bpf(998, true))
 		wantOpens(t, "unverified bpf", bpf(998, false))
 		wantOpens(t, "unverified raw socket", socketOf("systemd-network", 10, 3, 58, 998, false))
 		wantOpens(t, "root verified bpf", bpf(0, true))
 		wantOpens(t, "root verified raw socket", socketOf("systemd-network", 10, 3, 58, 0, true))
 		wantOpens(t, "verified mount", mountOf("systemd-network", "systemd", "swapper/0", "/proc/self/fd/11", 4096, 998))
 		wantOpens(t, "verified ptrace", securityOf("ptrace", "systemd-network", "systemd", "swapper/0", 998, true, 4))
+
+		// The verified mark is shared: the WAF agent (a service account) and any
+		// path in WAFIO_PROTECTED_EXE_PATHS carry it too, and a thread can take
+		// the name with prctl(PR_SET_NAME). Only the two sockets networkd opens
+		// are lowered.
+		wantOpens(t, "AF_KEY raw socket", socketOf("systemd-network", 15, 3, 2, 997, true))
+		wantOpens(t, "raw TCP socket", socketOf("systemd-network", 2, 3, 6, 997, true))
+		wantOpens(t, "raw ICMP socket over IPv4", socketOf("systemd-network", 2, 3, 1, 997, true))
+		wantOpens(t, "raw IPv6 socket of another protocol", socketOf("systemd-network", 10, 3, 6, 997, true))
+		wantOpens(t, "packet socket for every protocol", socketOf("systemd-network", 17, 3, 768, 997, true))
+		wantOpens(t, "packet socket with the ICMPv6 protocol", socketOf("systemd-network", 17, 3, 58, 998, true))
+		wantOpens(t, "IPv6 raw socket with the LLDP protocol", socketOf("systemd-network", 10, 3, 52360, 998, true))
+		wantOpens(t, "bpf by another verified user", bpf(997, true))
 	})
 
 	t.Run("debconf shadow read", func(t *testing.T) {
@@ -236,19 +251,25 @@ func TestExpectedReaderRules(t *testing.T) {
 		wantOpens(t, "pg_ctlcluster under a late systemd", cluster("systemd", "systemd", 0))
 	})
 
-	t.Run("PostgreSQL server key", func(t *testing.T) {
-		server := func(parent string, uid int, file string, ret int) application.TraceEventPayload {
-			return openOf("postgres", parent, "pg_ctlcluster", file, uid, false, ret, 0, 0)
+	// The postgres account belongs to the ssl-cert group on Debian and Ubuntu,
+	// so a completed open of a key under /etc/ssl/private shows only that the
+	// reader is in the group. comm and the parent are names a process the
+	// account starts can take, and a process the postgres account runs is the
+	// one this read has to catch.
+	t.Run("PostgreSQL server key stays an incident", func(t *testing.T) {
+		const snakeoil = "/etc/ssl/private/ssl-cert-snakeoil.key"
+		server := func(comm, parent string, verified bool, file string, ret int) application.TraceEventPayload {
+			return openOf(comm, parent, "pg_ctlcluster", file, 104, verified, ret, 0, 0)
 		}
-		wantStored(t, "postgres under pg_ctl", server("pg_ctl", 104, exampleSSLKey, 7), 2)
-		wantStored(t, "postgres under systemd", server("systemd", 104, exampleSSLKey, 7), 2)
-		wantOpens(t, "no open result", server("pg_ctl", 104, exampleSSLKey, 0))
-		wantOpens(t, "denied open", server("pg_ctl", 104, exampleSSLKey, -13))
-		wantOpens(t, "backend reading a key", server("postgres", 104, exampleSSLKey, 7))
-		wantOpens(t, "key of a web server", server("pg_ctl", 104, exampleKey, 7))
-		wantOpens(t, "root postgres", server("pg_ctl", 0, exampleSSLKey, 7))
-		wantOpens(t, "write", withFlags(server("pg_ctl", 104, exampleSSLKey, 7), oWronly))
-		wantOpens(t, "COPY FROM PROGRAM", openOf("cat", "sh", "postgres", exampleSSLKey, 104, false, 7, 0, 0))
+		wantOpens(t, "postgres under pg_ctl", server("postgres", "pg_ctl", false, snakeoil, 7))
+		wantOpens(t, "postgres under systemd", server("postgres", "systemd", false, snakeoil, 7))
+		wantOpens(t, "postgres under pg_ctl, another key", server("postgres", "pg_ctl", false, exampleSSLKey, 7))
+		wantOpens(t, "verified postgres under pg_ctl", server("postgres", "pg_ctl", true, snakeoil, 7))
+		wantOpens(t, "no open result", server("postgres", "pg_ctl", false, snakeoil, 0))
+		wantOpens(t, "denied open", server("postgres", "pg_ctl", false, snakeoil, -13))
+		wantOpens(t, "backend reading a key", server("postgres", "postgres", false, snakeoil, 7))
+		wantOpens(t, "root postgres", openOf("postgres", "pg_ctl", "pg_ctlcluster", snakeoil, 0, false, 7, 0, 0))
+		wantOpens(t, "COPY FROM PROGRAM", openOf("cat", "sh", "postgres", snakeoil, 104, false, 7, 0, 0))
 	})
 
 	t.Run("dpkg-deb and dracut chown", func(t *testing.T) {
@@ -358,7 +379,6 @@ func expectedReaderReplayRows() []replayRow {
 	crun := securityOf("bpf", "crun", "exe", "podman", 1000, false, 3)
 	return []replayRow{
 		// ── Closed ──
-		{"none systemd-network", "bpf", securityOf("bpf", "systemd-network", "systemd", "swapper/0", 998, true, 3), false},
 		{"T1071 systemd-network", "raw ICMPv6", socketOf("systemd-network", 10, 3, 58, 998, true), false},
 		{"T1071 systemd-network", "LLDP packet socket", socketOf("systemd-network", 17, 3, 52360, 998, true), false},
 		{"T1083 certbot", "README write", openOf("certbot", "sudo", "bash", "/etc/letsencrypt/live/README", 0, false, 0, oCreateWrite, 0), false},
@@ -381,7 +401,6 @@ func expectedReaderReplayRows() []replayRow {
 		{"T1083 nginx", "reload under certbot", openOf("nginx", "certbot", "systemd", exampleKey, 0, false, 5, 0, 0), false},
 		{"T1083 pg_ctlcluster", "boot", openOf("pg_ctlcluster", "systemd", "swapper/0", "/etc/shadow", 0, false, 0, oRdonlyCloexec, 3), false},
 		{"T1083 podman", "registry credentials", openOf("podman", "bash", "bash", "/home/user/.docker/config.json", 1000, false, 0, oRdonlyCloexec, 0), false},
-		{"T1083 postgres", "server key, result reported", openOf("postgres", "pg_ctl", "pg_ctlcluster", exampleSSLKey, 104, false, 7, 0, 0), false},
 		{"T1083 ps", "process viewer", openOf("ps", "bash", "sshd-session", "/proc/1305/environ", 1000, false, 0, 0, 3), false},
 		{"T1083 sed", "needrestart hook", openOf("sed", "200-write", "needrestart", exampleEnviron, 0, false, 0, 0, 3), false},
 		{"T1083 sh", "directory glob", openOf("sh", "sudo", "bash", "/etc/letsencrypt/live/example.test", 0, false, 4, oDirectory, 0), false},
@@ -396,6 +415,7 @@ func expectedReaderReplayRows() []replayRow {
 
 		// ── Still open ──
 		{"none crun", "rootless bpf", crun, true},
+		{"none systemd-network", "bpf", securityOf("bpf", "systemd-network", "systemd", "swapper/0", 998, true, 3), true},
 		{"none wafio-host-agen", "bpf by hand under sudo", securityOf("bpf", "wafio-host-agen", "sudo", "bash", 0, false, 3), true},
 		{"T1083 dpkg-preconfigu", "rootless build", openOf("dpkg-preconfigu", "sh", "apt-get", "/etc/shadow", 1000, false, 0, oRdonlyCloexec, 3), true},
 		{"T1083 exe", "rootless build", openOf("exe", "podman", "bash", "/etc/shadow", 1000, false, 0, 524353, 3), true},
@@ -403,6 +423,7 @@ func expectedReaderReplayRows() []replayRow {
 		{"T1083 nginx", "manual reload under sudo", openOf("nginx", "bash", "bash", exampleKey, 0, false, 5, 0, 0), true},
 		{"T1083 nginx", "script", openOf("nginx", "facts.sh", "restore.sh", exampleKey, 0, false, 5, 0, 0), true},
 		{"T1083 openssl", "admin reads a key", openOf("openssl", "sh", "sudo", exampleTrial, 0, false, 3, 0, 0), true},
+		{"T1083 postgres", "server key, result reported", openOf("postgres", "pg_ctl", "pg_ctlcluster", exampleSSLKey, 104, false, 7, 0, 0), true},
 		{"T1083 tokio-rt-worker", "key outside the product paths", openOf("tokio-rt-worker", "systemd", "swapper/0", exampleTrial, 997, true, 12, oRdonlyCloexec, 0), true},
 		{"T1083 useradd", "rootless build", openOf("useradd", "sh", "exe", "/etc/shadow", 1000, false, 0, oReadWrite, 3), true},
 		{"T1083 wafio-waf-agent", "key outside the product paths", openOf("wafio-waf-agent", "systemd", "swapper/0", exampleTrial, 997, true, 10, oRdonlyCloexec, 0), true},
@@ -421,10 +442,12 @@ func expectedReaderReplayRows() []replayRow {
 	}
 }
 
-// The 41 incidents of a test host, replayed through the full library. Twenty
-// would not open again; twenty-one would: seventeen are rootless podman, admin
-// or trial work and a module autoload that look like an attack, and four mix a
-// service shape that closes with a shape that stays.
+// The 41 incidents of a test host, replayed through the full library. Eighteen
+// would not open again; twenty-three would: seventeen are rootless podman,
+// admin or trial work and a module autoload that look like an attack, four mix
+// a service shape that closes with a shape that stays, and two are services
+// whose event cannot show the service from a process that took its names (the
+// BPF load of systemd-networkd and the server key read of PostgreSQL).
 func TestExpectedReadersReplay(t *testing.T) {
 	stillOpen := map[string]bool{}
 	allLabels := map[string]bool{}
@@ -443,8 +466,8 @@ func TestExpectedReadersReplay(t *testing.T) {
 		t.Errorf("%d incident labels, want 41", len(allLabels))
 	}
 	want := []string{
-		"none crun", "none wafio-host-agen",
-		"T1083 dpkg-preconfigu", "T1083 exe", "T1083 install", "T1083 nginx", "T1083 openssl", "T1083 tokio-rt-worker",
+		"none crun", "none systemd-network", "none wafio-host-agen",
+		"T1083 dpkg-preconfigu", "T1083 exe", "T1083 install", "T1083 nginx", "T1083 openssl", "T1083 postgres", "T1083 tokio-rt-worker",
 		"T1083 useradd", "T1083 wafio-waf-agent",
 		"T1222.002 cp", "T1222.002 crun", "T1222.002 exe", "T1222.002 podman", "T1222.002 tar",
 		"T1547.006 modprobe", "T1548.001 pasta.avx2",
@@ -461,19 +484,14 @@ func TestExpectedReadersReplay(t *testing.T) {
 	}
 }
 
-// What the replay assumes of the agent: the services' verified flag and the
-// result of an open. Without them the same events open an incident, which is
-// the safe direction.
+// What the replay assumes of the agent: the services' verified flag. Without
+// it the same events open an incident, which is the safe direction.
 func TestExpectedReadersNeedWhatTheAgentSends(t *testing.T) {
-	const oRdonlyCloexec = 524288
 	for _, c := range []replayRow{
 		{"nginx not verified", "start under systemd", openOf("nginx", "systemd", "swapper/0", exampleKey, 0, false, 5, 0, 0), true},
 		{"systemd-networkd not verified", "bpf", securityOf("bpf", "systemd-network", "systemd", "swapper/0", 998, false, 3), true},
 		{"systemd-networkd not verified", "raw socket", socketOf("systemd-network", 10, 3, 58, 998, false), true},
 		{"sshd not verified", "host key at start", openOf("sshd", "systemd", "swapper/0", "/etc/ssh/ssh_host_ed25519_key", 0, false, 0, 0, 3), true},
-		{"postgres without an open result", "server key", openOf("postgres", "pg_ctl", "pg_ctlcluster", exampleSSLKey, 104, false, 0, 0, 0), true},
-		{"postgres with an open result", "server key", openOf("postgres", "pg_ctl", "pg_ctlcluster", exampleSSLKey, 104, false, 7, 0, 0), false},
-		{"postgres with a denied open", "server key", openOf("postgres", "pg_ctl", "pg_ctlcluster", exampleSSLKey, 104, false, -13, oRdonlyCloexec, 0), true},
 	} {
 		got, stored := replayEvent(t, c.ev)
 		if opened := stored && got.Severity >= 3; opened != c.opens {
@@ -514,9 +532,14 @@ func TestExpectedReaderRulesSeeded(t *testing.T) {
 		if !hasCondition(r, "exe_verified") && (*r.SeverityOverride < 2 || !slices.Contains(r.Tags, "unverified-identity")) {
 			t.Errorf("%s lowers an unverified identity to %d (tags %v)", name, *r.SeverityOverride, r.Tags)
 		}
-		// An open rule keeps the read-only guard; the socket, BPF and chown rules have none.
+		// A name is a name any process can take, so an unverified rule accepts
+		// only root, which an unprivileged process cannot show.
+		if !hasCondition(r, "exe_verified") && !slices.Contains(r.Conditions, domain.RuleCondition{Field: "uid", Op: "eq", Value: 0}) {
+			t.Errorf("%s lowers a process that is not verified without requiring root", name)
+		}
+		// An open rule keeps the read-only guard; the socket and chown rules have none.
 		guarded := slices.Contains(r.Conditions, domain.RuleCondition{Field: "flags", Op: "bit_none", Value: 579})
-		isOpen := !slices.Contains([]int{65, 72, 73}, r.Priority)
+		isOpen := !slices.Contains([]int{65, 66, 72, 73}, r.Priority)
 		if isOpen && !guarded {
 			t.Errorf("%s can downgrade a write", name)
 		}
