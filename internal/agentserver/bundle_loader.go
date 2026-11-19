@@ -50,6 +50,9 @@ type bundleAppLite struct {
 	// FastCGI config (migration 000044).
 	FCGIDocRoot string `json:"fcgi_doc_root,omitempty"`
 	FCGIIndex   string `json:"fcgi_index,omitempty"`
+	// FCGIKeepConn is present only when true (migration 000123): the agent closes the FastCGI
+	// connection after each reply unless it is set. An agent that does not know the key ignores it.
+	FCGIKeepConn bool `json:"fcgi_keep_conn,omitempty"`
 	// Per-app custom WAF rules.
 	CustomGUIRules    []json.RawMessage `json:"custom_gui_rules,omitempty"`
 	CustomScriptRules []json.RawMessage `json:"custom_script_rules,omitempty"`
@@ -136,13 +139,14 @@ func (l *projectBundleLoader) build(ctx context.Context, projectID, agentID stri
 			continue
 		}
 		app := bundleAppLite{
-			AppID:       a.AppID,
-			ListenHost:  a.ListenHost,
-			ListenPort:  a.ListenPort,
-			Upstream:    a.Upstream,
-			Mode:        a.Mode,
-			FCGIDocRoot: a.FCGIDocRoot,
-			FCGIIndex:   a.FCGIIndex,
+			AppID:        a.AppID,
+			ListenHost:   a.ListenHost,
+			ListenPort:   a.ListenPort,
+			Upstream:     a.Upstream,
+			Mode:         a.Mode,
+			FCGIDocRoot:  a.FCGIDocRoot,
+			FCGIIndex:    a.FCGIIndex,
+			FCGIKeepConn: a.FCGIKeepConn,
 		}
 		if len(a.ProxyConfig) > 0 {
 			app.ProxyConfig = json.RawMessage(a.ProxyConfig)
