@@ -60,6 +60,11 @@ func TestBuiltinRulePredicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	migration = append(migration, tlsKeyMigration...)
+	expectedReadersMigration, err := os.ReadFile(expectedReadersUpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration = append(migration, expectedReadersMigration...)
 	for _, rule := range builtinRules("project", "host") {
 		if err := rule.Validate(); err != nil {
 			t.Errorf("%s: %v", rule.Name, err)

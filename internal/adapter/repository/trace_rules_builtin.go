@@ -22,7 +22,7 @@ import (
 // unprivileged user and is verified too, and it can name any of its threads
 // as it likes. So a rule that trusts a root daemon's name and exe_verified
 // also requires uid 0. Existing hosts get the same library from migrations
-// 000093, 000106, 000111, 000113, 000114, 000118 and 000121.
+// 000093, 000106, 000111, 000113, 000114, 000118, 000121 and 000122.
 func builtinRules(projectID, hostID string) []domain.DetectionRule {
 	sev := func(n int) *int { return &n }
 	verified := domain.RuleCondition{Field: "exe_verified", Op: "eq", Value: true}
@@ -542,14 +542,14 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade sshd host key reads",
-			Description:       "sshd loads its own host keys on every connection. Reading /etc/ssh/* is the daemon doing its job. Only for a root process the agent verified as the sshd host binary.",
+			Description:       "sshd loads its own host keys on every connection and when it starts. Reading /etc/ssh/* is the daemon doing its job. Only for a root process the agent verified as the sshd host binary, under an sshd or a systemd parent.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SkipSeverityGuard: true,
 			SeverityOverride:  sev(1),
 			Conditions: []domain.RuleCondition{
 				{Field: "comm", Op: "eq", Value: "sshd"},
-				{Field: "parent_comm", Op: "eq", Value: "sshd"},
+				{Field: "parent_comm", Op: "in", Value: []string{"sshd", "systemd"}},
 				{Field: "event_name", Op: "eq", Value: "openat"},
 				{Field: "filename", Op: "starts_with", Value: "/etc/ssh/"},
 				{Field: "uid", Op: "eq", Value: 0},
@@ -646,6 +646,7 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 	rules = append(rules, jitRuntimeRules(projectID)...)
 	rules = append(rules, alreadyRootRules(projectID)...)
 	rules = append(rules, runtimeNoiseRules(projectID)...)
+	rules = append(rules, expectedReaderRules(projectID)...)
 	for i := range rules {
 		rules[i].HostID = hostID
 		rule := &rules[i]
@@ -760,7 +761,7 @@ func authSessionRules(projectID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade verified systemd BPF programs",
-			Description:       "systemd (PID 1) loads cgroup BPF programs (device policy, IP accounting and firewalling) whenever it starts a unit, including every user session. Only for a process the kernel saw as PID 1 or in the agent-verified protected set.",
+			Description:       "systemd (PID 1) loads cgroup BPF programs (device policy, IP accounting and firewalling) whenever it starts a unit, including every user session. Only for a root process the kernel saw as PID 1 or in the agent-verified protected set.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SeverityOverride:  sev(1),
@@ -769,6 +770,7 @@ func authSessionRules(projectID string) []domain.DetectionRule {
 			Conditions: []domain.RuleCondition{
 				{Field: "comm", Op: "eq", Value: "systemd"},
 				{Field: "event_name", Op: "eq", Value: "bpf"},
+				{Field: "uid", Op: "eq", Value: 0},
 				verified,
 			},
 			Priority: 19,
@@ -908,13 +910,13 @@ func systemServiceRules(projectID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade PID 1 environment reads by system tools",
-			Description:       "systemctl, the systemd environment generator, needrestart and cloud-id read PID 1's environment (/proc/1/environ) at login, motd refresh or package runs. Read-only opens by these names are kept at MEDIUM and tagged; any other reader keeps its severity.",
+			Description:       "systemctl, networkctl, the systemd environment generator, needrestart and cloud-id read PID 1's environment (/proc/1/environ) at login, motd refresh, package runs or when networkd starts. Read-only opens by these names are kept at MEDIUM and tagged; any other reader keeps its severity.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SeverityOverride:  sev(2),
 			SkipSeverityGuard: true,
 			Conditions: []domain.RuleCondition{
-				{Field: "comm", Op: "in", Value: []string{"systemctl", "30-systemd-envi", "needrestart", "cloud-id", "systemd-detect-"}},
+				{Field: "comm", Op: "in", Value: []string{"systemctl", "30-systemd-envi", "needrestart", "cloud-id", "systemd-detect-", "networkctl"}},
 				{Field: "filename", Op: "eq", Value: "/proc/1/environ"},
 			},
 			Priority: 44,
@@ -1047,6 +1049,7 @@ func alreadyRootRules(projectID string) []domain.DetectionRule {
 func runtimeNoiseRules(projectID string) []domain.DetectionRule {
 	sev := func(n int) *int { return &n }
 	verified := domain.RuleCondition{Field: "exe_verified", Op: "eq", Value: true}
+	rootUID := domain.RuleCondition{Field: "uid", Op: "eq", Value: 0}
 	rawSocket := domain.RuleCondition{Field: "detail", Op: "in", Value: []any{3, 2051, 524291, 526339}}
 	runtimeParents := []string{"runc", "containerd-shim", "containerd-shim-runc-v2"}
 	daemonChown := []domain.RuleCondition{
@@ -1127,13 +1130,13 @@ func runtimeNoiseRules(projectID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade verified container daemon chown",
-			Description:       "dockerd and containerd set root ownership on the container state they keep under /var/lib/docker and /var/lib/containerd. Changing a file's owner to root needs root already. Only for a process the kernel saw in the agent-verified protected set; a process merely named dockerd keeps HIGH.",
+			Description:       "dockerd and containerd set root ownership on the container state they keep under /var/lib/docker and /var/lib/containerd. Changing a file's owner to root needs root already. Only for a root process the kernel saw in the agent-verified protected set; a process merely named dockerd keeps HIGH.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SeverityOverride:  sev(1),
 			SkipSeverityGuard: true,
 			SkipWriteGuard:    true,
-			Conditions:        append(slices.Clone(daemonChown), verified),
+			Conditions:        append(slices.Clone(daemonChown), rootUID, verified),
 			Priority:          50,
 			Tags:              []string{"container", "expected"},
 		},
@@ -1207,13 +1210,13 @@ func runtimeNoiseRules(projectID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade verified container daemon state changes",
-			Description:       "containerd and dockerd unpack image layers and mount container filesystems under /var/lib/containerd and /var/lib/docker, setting modes and mounting overlay layers there. Only for a process the kernel saw in the agent-verified protected set; a process merely named containerd keeps HIGH.",
+			Description:       "containerd and dockerd unpack image layers and mount container filesystems under /var/lib/containerd and /var/lib/docker, setting modes and mounting overlay layers there. Only for a root process the kernel saw in the agent-verified protected set; a process merely named containerd keeps HIGH.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SeverityOverride:  sev(1),
 			SkipSeverityGuard: true,
 			SkipWriteGuard:    true,
-			Conditions:        append(slices.Clone(daemonState), verified),
+			Conditions:        append(slices.Clone(daemonState), rootUID, verified),
 			Priority:          55,
 			Tags:              []string{"container", "expected"},
 		},
@@ -1269,13 +1272,13 @@ func runtimeNoiseRules(projectID string) []domain.DetectionRule {
 		{
 			ProjectID:         projectID,
 			Name:              "Downgrade verified container daemon overlay and namespace mounts",
-			Description:       "dockerd and containerd mount the overlay filesystem of a container and bind its namespace files from /proc (the network namespace under /run/docker/netns). Only for a process the kernel saw in the agent-verified protected set; a process merely named dockerd keeps HIGH.",
+			Description:       "dockerd and containerd mount the overlay filesystem of a container and bind its namespace files from /proc (the network namespace under /run/docker/netns). Only for a root process the kernel saw in the agent-verified protected set; a process merely named dockerd keeps HIGH.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SeverityOverride:  sev(1),
 			SkipSeverityGuard: true,
 			SkipWriteGuard:    true,
-			Conditions:        append(slices.Clone(daemonMounts), verified),
+			Conditions:        append(slices.Clone(daemonMounts), rootUID, verified),
 			Priority:          59,
 			Tags:              []string{"container", "expected"},
 		},
@@ -1310,6 +1313,261 @@ func runtimeNoiseRules(projectID string) []domain.DetectionRule {
 			},
 			Priority: 61,
 			Tags:     []string{"container", "unverified-identity", "expected"},
+		},
+	}
+}
+
+// expectedReaderRules calibrate the credential reads and system calls that
+// services, package runs and installers make on every ordinary host
+// (migration 000122; measured on a test host: 41 open incidents, most of them
+// from services, package runs and installers). The process x file matrix rates a read of a key or
+// of /etc/shadow CRITICAL for every real UID but 0 and for every name it does
+// not know, and the kernel rates a raw socket, a BPF load and a chown to root
+// HIGH.
+//
+// Two kinds of identity, as in authSessionRules:
+//   - A daemon the agent can verify is lowered to LOW only with exe_verified
+//     and the UID it runs as: nginx (root), systemd-networkd (its own user).
+//     An unverified process with the same name keeps its severity.
+//   - A helper that is exec'd cannot be verified. It is lowered to MEDIUM
+//     (stored, no incident), tagged unverified-identity, and only for root,
+//     the exact name, the exact lineage and the exact file: a name is set by
+//     the process, so the lineage and the file carry the identity. The one
+//     exception is PostgreSQL's server key read: the kernel let a non-root
+//     process open a key that only a group may read, and the agent reported
+//     the open as completed (ret_val of at least 1, a descriptor).
+//
+// Every rule downgrades, never suppresses: the event stays stored and visible
+// in Runtime Security. Open rules keep the read-only guard the factory adds.
+// Priorities 63-73 sit after the WAF agent key rule (62) and before the
+// escalations at 80 and above; no earlier rule matches these shapes.
+func expectedReaderRules(projectID string) []domain.DetectionRule {
+	sev := func(n int) *int { return &n }
+	verified := domain.RuleCondition{Field: "exe_verified", Op: "eq", Value: true}
+	rootUID := domain.RuleCondition{Field: "uid", Op: "eq", Value: 0}
+	opened := domain.RuleCondition{Field: "ret_val", Op: "gte", Value: 0}
+	readsShadow := domain.RuleCondition{Field: "filename", Op: "eq", Value: "/etc/shadow"}
+	environ := domain.RuleCondition{Field: "filename", Op: "glob", Value: "/proc/*/environ"}
+	chownToRoot := []domain.RuleCondition{
+		{Field: "event_name", Op: "eq", Value: "chown"},
+		{Field: "detail", Op: "eq", Value: 0},
+		rootUID,
+	}
+	return []domain.DetectionRule{
+		{
+			// The master loads the key when the unit starts, on a reload and on
+			// SIGHUP, and the ExecStartPre and ExecReload commands run nginx -t and
+			// nginx -s reload under systemd. A worker runs as the configured user,
+			// and its parent is the master, so neither matches. Code inside a worker
+			// and the shells it starts have lost the kernel's entry and the name.
+			ProjectID:         projectID,
+			Name:              "Downgrade verified web server TLS key reads",
+			Description:       "nginx loads its TLS keys under /etc/ssl/private and /etc/letsencrypt/live when the service starts, on a reload and on its configuration test, as root under systemd. Kept at LOW and tagged, only for a root process the agent verified as the nginx host binary, under a systemd parent, with an open that did not fail. A worker, an unverified process, a write, any other file and a failed open keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "openat"},
+				{Field: "filename", Op: "starts_with_any", Value: []string{"/etc/ssl/private/", "/etc/letsencrypt/live/"}},
+				{Field: "comm", Op: "eq", Value: "nginx"},
+				{Field: "parent_comm", Op: "eq", Value: "systemd"},
+				rootUID,
+				verified,
+				opened,
+			},
+			Priority: 63,
+			Tags:     []string{"web-server", "tls", "expected"},
+		},
+		{
+			ProjectID:         projectID,
+			Name:              "Downgrade web server key reads in certbot reloads",
+			Description:       "The nginx plugin of certbot runs nginx -t and nginx -s reload after it renews a certificate, and both read the key under /etc/letsencrypt/live. certbot starts them as new programs, so the agent cannot verify them: kept at MEDIUM and tagged, only for root, a certbot parent, a read-only open that did not fail. Any other parent, a worker, a write and a failed open keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(2),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "openat"},
+				{Field: "filename", Op: "starts_with", Value: "/etc/letsencrypt/live/"},
+				{Field: "comm", Op: "eq", Value: "nginx"},
+				{Field: "parent_comm", Op: "eq", Value: "certbot"},
+				rootUID,
+				opened,
+			},
+			Priority: 64,
+			Tags:     []string{"web-server", "tls", "unverified-identity", "expected"},
+		},
+		{
+			// comm is cut at 15 bytes: systemd-networkd reaches here as
+			// systemd-network.
+			ProjectID:         projectID,
+			Name:              "Downgrade verified systemd-networkd sockets and BPF",
+			Description:       "systemd-networkd runs as its own unprivileged user and opens raw ICMPv6 and packet sockets (router discovery, LLDP) and loads BPF programs when it starts. Kept at LOW and tagged, only for a non-root process the agent verified as the systemd-networkd binary of its own unit. An unverified process with that name, root and any other event keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "in", Value: []string{"socket", "bpf"}},
+				{Field: "comm", Op: "eq", Value: "systemd-network"},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+			},
+			Priority: 65,
+			Tags:     []string{"systemd", "network", "expected"},
+		},
+		{
+			// Perl's getpw* calls read /etc/shadow when the process is root.
+			ProjectID:         projectID,
+			Name:              "Downgrade debconf account database reads in package runs",
+			Description:       "The debconf front end (frontend) and dpkg-preconfigure run Perl as root during a package run, and Perl reads /etc/shadow when it looks up an account. Kept at MEDIUM and tagged, only for root, a read-only open that did not fail and an apt, dpkg or unattended-upgrades grandparent. Any other lineage, user or reader keeps its severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(2),
+			Conditions: []domain.RuleCondition{
+				{Field: "comm", Op: "in", Value: []string{"dpkg-preconfigu", "frontend"}},
+				{Field: "grandparent_comm", Op: "in", Value: []string{"unattended-upgr", "apt-get", "apt", "aptitude", "dpkg"}},
+				rootUID,
+				readsShadow,
+				opened,
+			},
+			Priority: 66,
+			Tags:     []string{"package-manager", "unverified-identity", "expected"},
+		},
+		{
+			ProjectID:         projectID,
+			Name:              "Downgrade dracut root account read",
+			Description:       "dracut runs grep over /etc/shadow as root when it builds an initramfs. Kept at MEDIUM and tagged, only for root, a dracut parent, a read-only open that did not fail. Any other parent, user or reader keeps its severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(2),
+			Conditions: []domain.RuleCondition{
+				{Field: "comm", Op: "eq", Value: "grep"},
+				{Field: "parent_comm", Op: "eq", Value: "dracut"},
+				rootUID,
+				readsShadow,
+				opened,
+			},
+			Priority: 67,
+			Tags:     []string{"initramfs", "unverified-identity", "expected"},
+		},
+		{
+			// Most of these opens fail with ESRCH because the process is gone by
+			// the time needrestart looks, so there is no ret_val condition.
+			ProjectID:         projectID,
+			Name:              "Downgrade needrestart process environment reads",
+			Description:       "needrestart reads /proc/<pid>/environ of the services it checks after a package run. Most of these opens fail because the process has exited. Kept at MEDIUM and tagged, only for root and a read-only open; any other reader of a process environment keeps its severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(2),
+			Conditions: []domain.RuleCondition{
+				{Field: "comm", Op: "eq", Value: "needrestart"},
+				rootUID,
+				environ,
+			},
+			Priority: 68,
+			Tags:     []string{"package-manager", "proc", "unverified-identity", "expected"},
+		},
+		{
+			ProjectID:         projectID,
+			Name:              "Downgrade needrestart hook environment reads",
+			Description:       "A needrestart hook runs sed over /proc/<pid>/environ of the services it checks. Kept at MEDIUM and tagged, only for root, a read-only open and needrestart as the grandparent of sed; any other reader of a process environment keeps its severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(2),
+			Conditions: []domain.RuleCondition{
+				{Field: "comm", Op: "eq", Value: "sed"},
+				{Field: "grandparent_comm", Op: "eq", Value: "needrestart"},
+				rootUID,
+				environ,
+			},
+			Priority: 69,
+			Tags:     []string{"package-manager", "proc", "unverified-identity", "expected"},
+		},
+		{
+			ProjectID:         projectID,
+			Name:              "Downgrade pg_ctlcluster account database read at start",
+			Description:       "pg_ctlcluster, which systemd starts at boot to bring up a PostgreSQL cluster, reads /etc/shadow as root. Kept at MEDIUM and tagged, only for root, a systemd parent started by the kernel, a read-only open that did not fail. Any other lineage, user or reader keeps its severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(2),
+			Conditions: []domain.RuleCondition{
+				{Field: "comm", Op: "eq", Value: "pg_ctlcluster"},
+				{Field: "parent_comm", Op: "eq", Value: "systemd"},
+				{Field: "grandparent_comm", Op: "eq", Value: "swapper/0"},
+				rootUID,
+				readsShadow,
+				opened,
+			},
+			Priority: 70,
+			Tags:     []string{"postgresql", "unverified-identity", "expected"},
+		},
+		{
+			// ret_val of at least 1 is a descriptor: the kernel let a non-root
+			// process open a root:ssl-cert 0640 key, so it holds the group root
+			// granted. A renamed process gets EACCES (ret_val -13), pg_read_file
+			// in a backend has a postgres parent, COPY FROM PROGRAM runs as cat or
+			// sh, and an agent that reports no open result sends ret_val 0.
+			ProjectID:         projectID,
+			Name:              "Downgrade PostgreSQL server key read at start",
+			Description:       "PostgreSQL reads its server key under /etc/ssl/private as the postgres user when a cluster starts. The key is readable by the ssl-cert group, so a completed open shows the kernel accepted the reader. Kept at MEDIUM and tagged, only for a non-root postgres under pg_ctl or systemd and an open the agent reported as completed with a descriptor. A failed open, an open with no result and any other parent keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SeverityOverride:  sev(2),
+			Conditions: []domain.RuleCondition{
+				{Field: "comm", Op: "eq", Value: "postgres"},
+				{Field: "parent_comm", Op: "in", Value: []string{"pg_ctl", "systemd"}},
+				{Field: "uid", Op: "neq", Value: 0},
+				{Field: "filename", Op: "starts_with", Value: "/etc/ssl/private/"},
+				{Field: "ret_val", Op: "gte", Value: 1},
+			},
+			Priority: 71,
+			Tags:     []string{"postgresql", "tls", "unverified-identity", "expected"},
+		},
+		{
+			// "." is dpkg-deb's working directory, which the agent could not
+			// resolve; tmp.ci is where it unpacks control files.
+			ProjectID:         projectID,
+			Name:              "Downgrade dpkg-deb control extraction chown",
+			Description:       "dpkg-deb runs tar as root to unpack the control files of a package, and tar sets root ownership on the directory. Kept at MEDIUM and tagged, only for a chown to root by tar under dpkg-deb, on the working directory or /var/lib/dpkg/tmp.ci. Any other path, parent or user keeps its severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(2),
+			Conditions: slices.Concat(chownToRoot, []domain.RuleCondition{
+				{Field: "comm", Op: "eq", Value: "tar"},
+				{Field: "parent_comm", Op: "eq", Value: "dpkg-deb"},
+				{Field: "filename", Op: "in", Value: []string{".", "/var/lib/dpkg/tmp.ci"}},
+			}),
+			Priority: 72,
+			Tags:     []string{"package-manager", "unverified-identity", "expected"},
+		},
+		{
+			// dracut works in a temporary directory and its paths often reach
+			// ingest unresolved, so there is no path condition.
+			ProjectID:         projectID,
+			Name:              "Downgrade dracut initramfs copy chown",
+			Description:       "dracut copies files into the initramfs it builds and cp sets root ownership on them. Kept at MEDIUM and tagged, only for a chown to root by cp under dracut. Any other parent or user keeps its severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(2),
+			Conditions: slices.Concat(chownToRoot, []domain.RuleCondition{
+				{Field: "comm", Op: "eq", Value: "cp"},
+				{Field: "parent_comm", Op: "eq", Value: "dracut"},
+			}),
+			Priority: 73,
+			Tags:     []string{"initramfs", "unverified-identity", "expected"},
 		},
 	}
 }

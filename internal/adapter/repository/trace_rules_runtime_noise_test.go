@@ -238,6 +238,8 @@ func TestRuntimeNoiseMigrationMatchesBuiltins(t *testing.T) {
 			continue
 		}
 		found++
+		// Migration 000122 changed three of these rules afterwards.
+		r = beforeExpectedReaders(r)
 		conds, _ := json.Marshal(r.Conditions)
 		tags, _ := json.Marshal(r.Tags)
 		want := "'" + q(r.Name) + "', '" + q(r.Description) + "', true, '" + r.Action + "', '" + q(string(conds)) + "'::jsonb, " +
@@ -309,6 +311,10 @@ func TestRuntimeNoiseMigrationReplay(t *testing.T) {
 	for run := 1; run <= 2; run++ {
 		if _, err := pool.Exec(ctx, string(up)); err != nil {
 			t.Fatalf("up run %d: %v", run, err)
+		}
+		// 000122 changes three of these rules again; a host holds both.
+		if _, err := pool.Exec(ctx, string(expectedReadersUp(t))); err != nil {
+			t.Fatalf("000122 up run %d: %v", run, err)
 		}
 		after := snapshotBuiltins(t, pool, hostID)
 		if len(after) != len(builtinRules(projectID, hostID)) {

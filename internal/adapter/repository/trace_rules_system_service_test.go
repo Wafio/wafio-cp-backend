@@ -82,6 +82,8 @@ func TestSystemServiceMigrationMatchesBuiltins(t *testing.T) {
 			continue
 		}
 		found++
+		// Migration 000122 changed one of these rules afterwards.
+		r = beforeExpectedReaders(r)
 		conds, _ := json.Marshal(r.Conditions)
 		if !strings.Contains(string(up), "'"+q(r.Name)+"', '"+q(r.Description)+"', true, '"+r.Action+"', '"+q(string(conds))+"'::jsonb, ") {
 			t.Errorf("%s: up does not insert the seeded definition", r.Name)
