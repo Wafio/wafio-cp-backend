@@ -15191,7 +15191,7 @@ paths:
                   description: FastCGI index script; an empty string stores index.php. On update, absent keeps the stored value.
                 fcgi_keep_conn:
                   type: boolean
-                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only when PHP is 8.2.36, 8.3.37, 8.4.28, 8.5.13 or newer (CVE-2026-129289). On update, absent keeps the stored value.'
+                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only if PHP is at least 8.2.36, 8.3.37, 8.4.28 or 8.5.13 for its 8.2, 8.3, 8.4 or 8.5 series; 8.1 and older are not fixed (CVE-2026-129289). On update, absent keeps the stored value.'
               required:
                 - name
                 - listen_port
@@ -15333,7 +15333,7 @@ paths:
                   description: FastCGI index script; an empty string stores index.php. On update, absent keeps the stored value.
                 fcgi_keep_conn:
                   type: boolean
-                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only when PHP is 8.2.36, 8.3.37, 8.4.28, 8.5.13 or newer (CVE-2026-129289). On update, absent keeps the stored value.'
+                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only if PHP is at least 8.2.36, 8.3.37, 8.4.28 or 8.5.13 for its 8.2, 8.3, 8.4 or 8.5 series; 8.1 and older are not fixed (CVE-2026-129289). On update, absent keeps the stored value.'
               additionalProperties: false
             example:
               upstream: http://10.0.0.6:8080
@@ -18655,7 +18655,7 @@ components:
           maxLength: 128
         fcgi_keep_conn:
           type: boolean
-          description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Omitted keeps the stored value; false closes the connection after each reply. Turn it on only when PHP is 8.2.36, 8.3.37, 8.4.28, 8.5.13 or newer (CVE-2026-129289).'
+          description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Omitted keeps the stored value; false closes the connection after each reply. Turn it on only if PHP is at least 8.2.36, 8.3.37, 8.4.28 or 8.5.13 for its 8.2, 8.3, 8.4 or 8.5 series; 8.1 and older are not fixed (CVE-2026-129289).'
         proxy_config:
           allOf:
             - $ref: '#/components/schemas/ProxyConfig'
