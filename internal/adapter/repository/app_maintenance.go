@@ -57,10 +57,11 @@ func (r *AppRepo) UpdateMaintenance(ctx context.Context, projectID, appID string
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var raw []byte
-	var agentID string
-	if err = tx.QueryRow(ctx, `SELECT a.maintenance,
-		COALESCE((SELECT waa.agent_id::text FROM waf_agent_apps waa WHERE waa.app_id = a.id AND waa.enabled = TRUE LIMIT 1), '')
-		FROM apps a WHERE a.id = $1 AND a.project_id = $2 FOR UPDATE`, appID, projectID).Scan(&raw, &agentID); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT maintenance FROM apps WHERE id = $1 AND project_id = $2 FOR UPDATE`, appID, projectID).Scan(&raw); err != nil {
+		return stored, saved, err
+	}
+	agentID, _, err := enabledAssignment(ctx, tx, appID)
+	if err != nil {
 		return stored, saved, err
 	}
 	if agentID != "" {

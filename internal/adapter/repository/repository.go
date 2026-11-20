@@ -30,6 +30,7 @@ type Repository struct {
 	PasswordReset    *PasswordResetRepo
 	HostEnroll       *HostEnrollRepo
 	Storage          *StorageRepo
+	TLS              *TLSRepo
 }
 
 // PoolOptions sizes the shared connection pool. A zero value keeps pgx's own
@@ -126,6 +127,7 @@ func FromPool(pool *pgxpool.Pool) *Repository {
 		PasswordReset:    &PasswordResetRepo{pool: pool},
 		HostEnroll:       &HostEnrollRepo{pool: pool, host: host, grpc: agentGRPC},
 		Storage:          NewStorageRepo(pool),
+		TLS:              &TLSRepo{pool: pool},
 	}
 }
 

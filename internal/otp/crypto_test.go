@@ -1,7 +1,11 @@
 package otp
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -93,5 +97,157 @@ func TestNewEncryptorBadKey(t *testing.T) {
 	}
 	if e, err := NewEncryptor(""); err != nil || e != nil {
 		t.Fatalf("empty key should return (nil,nil): e=%v err=%v", e, err)
+	}
+}
+
+const boundAAD = "wafio-app-certificate:project-1:cert-1"
+
+func otherKeyHex() string { return strings.Repeat("ab", 32) }
+
+func TestSealBoundRoundTrip(t *testing.T) {
+	e, _ := NewEncryptor(testKeyHex())
+	plain := []byte("-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n")
+	stored, err := e.SealBound(plain, boundAAD)
+	if err != nil {
+		t.Fatalf("SealBound: %v", err)
+	}
+	raw, _ := hex.DecodeString(testKeyHex())
+	sum := sha256.Sum256(raw)
+	wantPrefix := "encb:v1:" + hex.EncodeToString(sum[:4]) + ":"
+	if !strings.HasPrefix(stored, wantPrefix) || e.KeyID() != hex.EncodeToString(sum[:4]) || len(e.KeyID()) != 8 {
+		t.Fatalf("stored form %q, key id %q, want prefix %q", stored, e.KeyID(), wantPrefix)
+	}
+	if strings.Contains(stored, "secret") || strings.Contains(stored, "PRIVATE") {
+		t.Fatal("ciphertext leaks plaintext")
+	}
+	got, err := e.OpenBound(stored, boundAAD)
+	if err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("OpenBound = %q, %v", got, err)
+	}
+	again, _ := e.SealBound(plain, boundAAD)
+	if again == stored {
+		t.Fatal("two seals of one value must differ (fresh nonce)")
+	}
+	empty, err := e.SealBound(nil, boundAAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := e.OpenBound(empty, boundAAD); err != nil || len(got) != 0 {
+		t.Fatalf("empty value: %q, %v", got, err)
+	}
+}
+
+func TestKeyIDIsTheSameForHexAndBase64OfOneKey(t *testing.T) {
+	raw, _ := hex.DecodeString(testKeyHex())
+	a, _ := NewEncryptor(testKeyHex())
+	b, _ := NewEncryptor(base64.StdEncoding.EncodeToString(raw))
+	if a.KeyID() == "" || a.KeyID() != b.KeyID() {
+		t.Fatalf("key ids %q and %q", a.KeyID(), b.KeyID())
+	}
+	other, _ := NewEncryptor(otherKeyHex())
+	if other.KeyID() == a.KeyID() {
+		t.Fatal("two keys share a key id")
+	}
+	var none *Encryptor
+	if none.KeyID() != "" {
+		t.Fatal("a nil Encryptor has no key id")
+	}
+}
+
+func TestOpenBoundRefusesAnotherContext(t *testing.T) {
+	e, _ := NewEncryptor(testKeyHex())
+	stored, _ := e.SealBound([]byte("key"), boundAAD)
+	for _, aad := range []string{"", boundAAD + "x", "wafio-app-certificate:project-2:cert-1", "wafio-app-certificate:project-1:cert-2"} {
+		if got, err := e.OpenBound(stored, aad); err == nil {
+			t.Errorf("aad %q opened the value: %q", aad, got)
+		}
+	}
+}
+
+func TestOpenBoundNamesAnotherKey(t *testing.T) {
+	e1, _ := NewEncryptor(testKeyHex())
+	e2, _ := NewEncryptor(otherKeyHex())
+	stored, _ := e1.SealBound([]byte("key"), boundAAD)
+	_, err := e2.OpenBound(stored, boundAAD)
+	var mismatch *KeyIDMismatchError
+	if !errors.As(err, &mismatch) || mismatch.Sealed != e1.KeyID() || mismatch.Current != e2.KeyID() {
+		t.Fatalf("error = %v, want a key id mismatch naming %s and %s", err, e1.KeyID(), e2.KeyID())
+	}
+	if !strings.Contains(err.Error(), e1.KeyID()) || !strings.Contains(err.Error(), e2.KeyID()) {
+		t.Fatalf("message %q names neither key id", err)
+	}
+	// A value whose key id was rewritten to the configured one still fails to authenticate.
+	forged := strings.Replace(stored, e1.KeyID(), e2.KeyID(), 1)
+	if got, err := e2.OpenBound(forged, boundAAD); err == nil {
+		t.Fatalf("forged key id opened the value: %q", got)
+	}
+}
+
+func TestOpenBoundRefusesEveryOtherForm(t *testing.T) {
+	e, _ := NewEncryptor(testKeyHex())
+	old, _ := e.Encrypt("secret")
+	good, _ := e.SealBound([]byte("key"), boundAAD)
+	body := good[strings.LastIndex(good, ":")+1:]
+	cases := map[string]string{
+		"empty":          "",
+		"plain text":     "-----BEGIN PRIVATE KEY-----",
+		"old enc:v1":     old,
+		"no key id":      "encb:v1:" + body,
+		"empty key id":   "encb:v1::" + body,
+		"bad base64":     "encb:v1:" + e.KeyID() + ":!!!",
+		"too short":      "encb:v1:" + e.KeyID() + ":" + base64.StdEncoding.EncodeToString([]byte("short")),
+		"other version":  "encb:v2:" + e.KeyID() + ":" + body,
+		"prefix only":    "encb:v1:",
+		"upper-case tag": "ENCB:V1:" + e.KeyID() + ":" + body,
+	}
+	for name, stored := range cases {
+		if got, err := e.OpenBound(stored, boundAAD); err == nil {
+			t.Errorf("%s opened: %q", name, got)
+		}
+	}
+	if _, err := e.OpenBound(old, boundAAD); !errors.Is(err, ErrNotBound) {
+		t.Errorf("the enc:v1: form: %v, want ErrNotBound", err)
+	}
+	// A flipped bit in the ciphertext fails authentication.
+	raw, _ := base64.StdEncoding.DecodeString(body)
+	raw[len(raw)-1] ^= 1
+	tampered := "encb:v1:" + e.KeyID() + ":" + base64.StdEncoding.EncodeToString(raw)
+	if got, err := e.OpenBound(tampered, boundAAD); err == nil {
+		t.Errorf("tampered value opened: %q", got)
+	}
+}
+
+func TestBoundValuesAndEncryptDoNotMix(t *testing.T) {
+	e, _ := NewEncryptor(testKeyHex())
+	bound, _ := e.SealBound([]byte("key"), boundAAD)
+	if _, err := e.Decrypt(bound); err == nil {
+		t.Fatal("Decrypt returned a bound ciphertext as if it were a secret")
+	}
+	old, _ := e.Encrypt("secret")
+	if _, err := e.OpenBound(old, ""); err == nil {
+		t.Fatal("OpenBound opened an enc:v1: value")
+	}
+}
+
+func TestNilEncryptorNeverPassesBoundValuesThrough(t *testing.T) {
+	var e *Encryptor
+	if got, err := e.SealBound([]byte("key"), boundAAD); !errors.Is(err, ErrNoEncryptionKey) || got != "" {
+		t.Fatalf("SealBound on nil = %q, %v", got, err)
+	}
+	real, _ := NewEncryptor(testKeyHex())
+	stored, _ := real.SealBound([]byte("key"), boundAAD)
+	if got, err := e.OpenBound(stored, boundAAD); !errors.Is(err, ErrNoEncryptionKey) || got != nil {
+		t.Fatalf("OpenBound on nil = %q, %v", got, err)
+	}
+}
+
+func TestIsBound(t *testing.T) {
+	e, _ := NewEncryptor(testKeyHex())
+	bound, _ := e.SealBound([]byte("key"), boundAAD)
+	old, _ := e.Encrypt("secret")
+	for stored, want := range map[string]bool{bound: true, old: false, "": false, "-----BEGIN PRIVATE KEY-----": false, "encb:v2:x:y": false, "ENCB:V1:x": false} {
+		if got := IsBound(stored); got != want {
+			t.Errorf("IsBound(%.20q) = %v, want %v", stored, got, want)
+		}
 	}
 }

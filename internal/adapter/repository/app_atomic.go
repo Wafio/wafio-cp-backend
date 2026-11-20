@@ -67,10 +67,11 @@ func (r *AppRepo) UpdateAtomic(ctx context.Context, projectID, appID string, pat
 	defer tx.Rollback(ctx) //nolint:errcheck
 	if admit != nil {
 		var raw []byte
-		var agentID, mode string
-		if err := tx.QueryRow(ctx, `SELECT a.maintenance, COALESCE(waa.agent_id::text, ''), COALESCE(waa.mode, '')
-			FROM apps a LEFT JOIN waf_agent_apps waa ON waa.app_id = a.id AND waa.enabled = TRUE
-			WHERE a.id = $1 AND a.project_id = $2 FOR UPDATE OF a`, appID, projectID).Scan(&raw, &agentID, &mode); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT maintenance FROM apps WHERE id = $1 AND project_id = $2 FOR UPDATE`, appID, projectID).Scan(&raw); err != nil {
+			return err
+		}
+		agentID, mode, err := enabledAssignment(ctx, tx, appID)
+		if err != nil {
 			return err
 		}
 		stored, err := decodeMaintenance(raw)

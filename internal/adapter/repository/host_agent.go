@@ -922,6 +922,8 @@ func (r *EBPFRepo) DeleteAgent(ctx context.Context, projectID, agentID string) e
 		`DELETE FROM waf_agent_apps WHERE agent_id = $1`,
 		`DELETE FROM waf_agent_bundles WHERE agent_id = $1`,
 		`DELETE FROM ebpf_trace_policies WHERE agent_id = $1`,
+		// The soft delete leaves the row, so the cascade that would take the reports does not run.
+		`DELETE FROM app_tls_status WHERE agent_id = $1`,
 	} {
 		if _, err := tx.Exec(ctx, q, agentID); err != nil {
 			return err
