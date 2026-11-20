@@ -48,9 +48,12 @@ type DetectionRule struct {
 // All conditions in a rule are AND-ed together.
 type RuleCondition struct {
 	Field string `json:"field"` // comm, parent_comm, grandparent_comm, event_name,
-	//                           // category, severity, filename, addr, port, uid, gid,
+	//                           // category, severity, filename, args, addr, port, uid, gid,
 	//                           // addr_family, flags, detail, ret_val, is_container,
 	//                           // exe_verified, container_image, container_name
+	// args (string): what the event carries besides its path. For a rename it is the
+	// destination, cleaned like filename; for an exec it is the argument text. A rule that
+	// reads it names the event as well, since the text means nothing without it.
 	// exe_verified (bool): the kernel saw the process in the agent-verified
 	// protected set when it produced the event. comm and the lineage
 	// names are chosen by the process itself; a rule that drops events keys
@@ -103,7 +106,7 @@ func (c RuleCondition) Validate() error {
 	numeric := false
 	boolean := false
 	switch c.Field {
-	case "comm", "parent_comm", "grandparent_comm", "event_name", "category", "filename", "addr", "container_image", "container_name":
+	case "comm", "parent_comm", "grandparent_comm", "event_name", "category", "filename", "args", "addr", "container_image", "container_name":
 	case "severity", "port", "uid", "gid", "addr_family", "flags", "detail", "ret_val":
 		numeric = true
 	case "is_container", "exe_verified":

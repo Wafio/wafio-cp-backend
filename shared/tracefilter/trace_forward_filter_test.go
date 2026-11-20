@@ -208,6 +208,9 @@ var traceForwardGolden = map[int]string{
 	// 5 rates reads under the WAF agent key directory /var/lib/wafio-waf-agent/tls/
 	// as credential reads.
 	5: "0f8a33cb8b05c42e0cbf7d2bb5761dcd1849e60fa8245c153fb11a182cfd2ff2",
+	// 6 lets a rule condition read args, the destination of a rename. The
+	// corpus rules do not name it.
+	6: "0f8a33cb8b05c42e0cbf7d2bb5761dcd1849e60fa8245c153fb11a182cfd2ff2",
 }
 
 // TestTraceForwardRevisionGolden fails when ingest's decisions on the

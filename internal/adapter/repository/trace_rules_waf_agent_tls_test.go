@@ -12,11 +12,7 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 )
 
-const (
-	tlsKeyRuleName = "Downgrade verified WAF agent TLS key reads"
-	// tlsKeyDir is where the WAF agent keeps its certificate keys and its ACME account key.
-	tlsKeyDir = "/var/lib/wafio-waf-agent/tls/"
-)
+const tlsKeyRuleName = "Downgrade verified WAF agent TLS key reads"
 
 // beforeKeyDir is the read rule as migration 000121 inserted it, before 000125 added the key
 // directory of the agent to its files. Every other rule is returned as it is.

@@ -29,7 +29,7 @@ import (
 // trace events that ingest does not store; TestTraceForwardRevisionGolden
 // fails on a change of behavior until the revision and its digest are
 // updated together.
-const TraceForwardRevision = 5
+const TraceForwardRevision = 6
 
 const (
 	// TraceForwardFilterMaxBytes bounds a filter message: the agent accepts
