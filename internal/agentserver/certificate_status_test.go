@@ -407,7 +407,7 @@ func TestCertificateStatusSkipsAWriteThatChangesNothing(t *testing.T) {
 				tc.status(c)
 			}
 			sent := &sentLog{}
-			f.s.handleCertificateStatus(handleOf(true, sent), c)
+			f.handleStatus(t, handleOf(true, sent), c)
 			if got := len(f.store.seenReports()) == 1; got != tc.write {
 				t.Fatalf("written = %v, want %v", got, tc.write)
 			}

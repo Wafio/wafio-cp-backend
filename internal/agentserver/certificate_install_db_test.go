@@ -339,14 +339,16 @@ func (f *tlsDB) prepareSentinels(a *dbAgent, n int) {
 	}
 }
 
-// settleOn sends the sentinel's status on the stream, waits until it is stored and returns how many
-// installs the stream got. A delivery is made on the receive loop, so it has ended when the status
-// after it is stored.
+// settleOn sends the sentinel's status on the stream, waits until it is stored and until the workers
+// of the streams have delivered what the statuses before it asked for, and returns how many installs
+// the stream got. The statuses are handled in order on the receive loop, so the requests of the
+// earlier ones are queued when the sentinel is stored.
 func (f *tlsDB) settleOn(s *dbStream, sn sentinel) int {
 	f.t.Helper()
 	token := uuid.NewString()
 	s.status(&agentv1.CertificateStatus{AppId: sn.app, Source: "acme", State: "failed", RequestId: sn.request, Error: token})
 	f.waitStatus(sn.app, func(st *repository.TLSStatus) bool { return st.Error == token })
+	f.s.settleDeliveries(f.t)
 	return len(s.installs())
 }
 

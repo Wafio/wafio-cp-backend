@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,6 +165,10 @@ type fakeCertStore struct {
 	upsertErr error
 	// onDelivery runs when CertificateForDelivery is about to answer with a row.
 	onDelivery func()
+	// gate, when set, holds DeliveryAgent until it is closed or the context ends: a database that is
+	// slow. waiting counts the calls that wait.
+	gate    chan struct{}
+	waiting atomic.Int64
 
 	agentCalls, deliveryCalls, priorCalls int
 	reports                               []repository.TLSStatusReport
@@ -176,7 +181,15 @@ func newFakeCertStore(d repository.CertificateDelivery) *fakeCertStore {
 	}
 }
 
-func (f *fakeCertStore) DeliveryAgent(_ context.Context, projectID, credentialID, agentID string) (repository.DeliveryAgent, error) {
+func (f *fakeCertStore) DeliveryAgent(ctx context.Context, projectID, credentialID, agentID string) (repository.DeliveryAgent, error) {
+	if f.gate != nil {
+		f.waiting.Add(1)
+		select {
+		case <-f.gate:
+		case <-ctx.Done():
+			return repository.DeliveryAgent{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.agentCalls++
@@ -386,4 +399,28 @@ func (s *Server) onlyPending(t *testing.T) string {
 		return id
 	}
 	return ""
+}
+
+// handleStatus handles a status on a handle that is not registered with the server and waits for the
+// delivery that it asked for, which the worker of the handle does. The worker ends with the test.
+func (f *certFixture) handleStatus(t *testing.T, h *streamHandle, cs *agentv1.CertificateStatus) {
+	t.Helper()
+	t.Cleanup(h.stopDeliveries)
+	f.s.handleCertificateStatus(h, cs)
+	waitUntil(t, "the delivery worker to be idle", func() bool { return h.queued.Load() == 0 })
+}
+
+// settleDeliveries waits until the workers of the registered streams have nothing queued or in service.
+func (s *Server) settleDeliveries(t *testing.T) {
+	t.Helper()
+	waitUntil(t, "the delivery workers to be idle", func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for _, h := range s.streams {
+			if h.queued.Load() != 0 {
+				return false
+			}
+		}
+		return true
+	})
 }

@@ -256,6 +256,15 @@ type streamHandle struct {
 	bound   bool
 	// peerIP is the address of the agent as the transport saw it, for audit rows.
 	peerIP string
+	// The worker that delivers keys on this stream is started by the first request and ended with the
+	// stream (certificate_install.go). queued counts the requests that wait or are being served.
+	workerMu        sync.Mutex
+	deliveries      chan deliveryRequest
+	workerCancel    context.CancelFunc
+	workerDone      chan struct{}
+	workerStopped   bool
+	queued          atomic.Int64
+	queueFullLogged atomic.Bool
 	// tlsApps are the ids of the apps whose entry in the last WAF bundle sent on this stream turns TLS
 	// on, under bundleMu. A status for any other app is dropped before it costs a query.
 	tlsApps map[string]struct{}
@@ -1367,6 +1376,7 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 		peerIP:       peerIP(ctx),
 		open:         func() bool { return ctx.Err() == nil && !live.ending() },
 	}
+	defer handle.stopDeliveries()
 	// Register before loading the first bundle so a push that lands in between
 	// reaches this connection rather than a predecessor with the same
 	// credential. sendHostBundle rejects an older generation, so the initial

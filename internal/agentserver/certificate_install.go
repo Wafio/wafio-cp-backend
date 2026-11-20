@@ -31,7 +31,9 @@ import (
 //
 // The trigger is a CertificateStatus of state missing (certificate_status.go): the agent applied a
 // bundle that names a certificate it does not hold. Connect, upload, replace and move of an app all
-// come through it.
+// come through it. The request goes to a worker of the stream, which does the database reads, the
+// decryption, the send and the writes in order, so that a slow delivery never delays what the receive
+// loop of the stream does: an ack that must come before its timeout, a heartbeat, a decision.
 //
 // Nothing in this file formats a ServerMessage or a CertificateInstall: a %v, %+v, String() or JSON
 // of one would write the key into a log. Log lines and audit rows carry ids only.
@@ -49,6 +51,9 @@ const (
 	certClaimsMax = 512
 	// certPendingMax bounds the installs waiting for an ack, process-wide.
 	certPendingMax = 1024
+	// certQueueMax bounds the deliveries that wait for the worker of a stream. A request that finds the
+	// queue full is dropped: the agent says missing again about once a minute.
+	certQueueMax = 8
 )
 
 // defaultCertInstallTimeout is how long an install waits for its ack.
@@ -202,11 +207,71 @@ func (h *streamHandle) certificateBlocked(certID string, generation int64) bool 
 // stillOpen says whether the stream takes part: not ended and not revoked.
 func (h *streamHandle) stillOpen() bool { return h.open == nil || h.open() }
 
+// deliveryRequest asks the worker of a stream to send the key of a certificate.
+type deliveryRequest struct{ appID, certID string }
+
+// enqueueDelivery hands a request to the worker of the stream, which the first request starts. It
+// never waits: it reports false, and drops the request, when the queue is full or the stream has
+// ended.
+func (s *Server) enqueueDelivery(h *streamHandle, appID, certID string) bool {
+	h.workerMu.Lock()
+	if h.workerStopped {
+		h.workerMu.Unlock()
+		return false
+	}
+	if h.deliveries == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		h.deliveries, h.workerCancel, h.workerDone = make(chan deliveryRequest, certQueueMax), cancel, make(chan struct{})
+		go s.deliveryWorker(ctx, h, h.deliveries, h.workerDone)
+	}
+	queue := h.deliveries
+	h.workerMu.Unlock()
+	h.queued.Add(1)
+	select {
+	case queue <- deliveryRequest{appID: appID, certID: certID}:
+		return true
+	default:
+		h.queued.Add(-1)
+		if h.queueFullLogged.CompareAndSwap(false, true) {
+			log.Printf("[agentserver] certificate delivery queue full, requests dropped until it drains agent=%s (logged once per stream)", h.agentID)
+		}
+		return false
+	}
+}
+
+// deliveryWorker serves the requests of one stream, one at a time, until the stream ends. What it is
+// doing when that happens is cancelled with ctx.
+func (s *Server) deliveryWorker(ctx context.Context, h *streamHandle, queue <-chan deliveryRequest, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r := <-queue:
+			s.deliverCertificate(ctx, h, r.appID, r.certID)
+			h.queued.Add(-1)
+		}
+	}
+}
+
+// stopDeliveries ends the worker of the stream, if one was started, and refuses requests from now on.
+// The requests that wait are dropped. It does not wait for the worker, which stops as soon as what it
+// is doing is cancelled.
+func (h *streamHandle) stopDeliveries() {
+	h.workerMu.Lock()
+	h.workerStopped = true
+	cancel := h.workerCancel
+	h.workerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // deliverCertificate sends the key of the current uploaded certificate of the app to h, after every
-// check. It runs on the receive loop, called by handleCertificateStatus, which is what keeps the
-// statuses that it writes in order with the others of the stream; the ack arrives through the same
-// loop later. A refusal at any step sends nothing and says nothing to the agent.
-func (s *Server) deliverCertificate(h *streamHandle, appID, certID string) {
+// check. It runs on the worker of the stream, which is what keeps the writes it makes in order with
+// each other; the ack arrives through the receive loop later. A refusal at any step sends nothing and
+// says nothing to the agent. ctx ends with the stream.
+func (s *Server) deliverCertificate(ctx context.Context, h *streamHandle, appID, certID string) {
 	defer recoverPanic("certificate-install")
 	store := s.certStore()
 	if store == nil || !h.mayReceiveCertificateKeys() || !h.stillOpen() {
@@ -216,7 +281,7 @@ func (s *Server) deliverCertificate(h *streamHandle, appID, certID string) {
 	if !h.claimCertificateDelivery(certID, generation, s.now()) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	agent, err := store.DeliveryAgent(ctx, h.projectID, h.credentialID, h.agentID)

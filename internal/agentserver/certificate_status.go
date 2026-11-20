@@ -112,10 +112,9 @@ func (h *streamHandle) takeBudget(app string, now time.Time, parse bool) bool {
 var certStatusStates = []string{"pending", "active", "failed", "missing"}
 
 // handleCertificateStatus stores the report and, when it says that an uploaded certificate is
-// missing, delivers the key. It runs on the receive loop of the stream, so statuses of one agent are
-// stored in the order it sent them, and so are the writes that a delivery makes (a refusal, a key that
-// does not open). The ack of the install comes through the same loop, so the delivery does not wait
-// for it; a send is bounded by the push deadline.
+// missing, asks the worker of the stream to deliver the key. It runs on the receive loop of the stream,
+// so statuses of one agent are stored in the order it sent them; it never waits for the delivery, which
+// reads the database and sends on the worker, and whose ack comes through the loop later.
 func (s *Server) handleCertificateStatus(h *streamHandle, cs *agentv1.CertificateStatus) {
 	defer recoverPanic("certificate-status")
 	// Only a WAF agent that said it serves TLS certificates sends this message.
@@ -162,7 +161,7 @@ func (s *Server) handleCertificateStatus(h *streamHandle, cs *agentv1.Certificat
 		}
 	}
 	if asksForKey {
-		s.deliverCertificate(h, rep.AppID, rep.CertificateID)
+		s.enqueueDelivery(h, rep.AppID, rep.CertificateID)
 	}
 }
 

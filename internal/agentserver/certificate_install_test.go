@@ -2,6 +2,7 @@ package agentserver
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
 	"github.com/wafio/wafio-cp-backend/internal/domain"
@@ -24,7 +26,9 @@ import (
 )
 
 // deliver runs one delivery for the handle, as the status ingest does on its own goroutine.
-func (f *certFixture) deliver(h *streamHandle) { f.s.deliverCertificate(h, certTestApp, certTestCert) }
+func (f *certFixture) deliver(h *streamHandle) {
+	f.s.deliverCertificate(context.Background(), h, certTestApp, certTestCert)
+}
 
 // waitAudit waits until n rows of the action are written (the refusal is audited on a goroutine).
 func (f *certFixture) waitAudit(t *testing.T, action string, n int) []repository.AuditEvent {
@@ -421,8 +425,7 @@ func TestOnlyMissingStatusOfAnUploadedCertificateStartsADelivery(t *testing.T) {
 			sent := &sentLog{}
 			cs := missingStatus()
 			tc.change(cs, f.store)
-			f.s.handleCertificateStatus(handleOf(true, sent), cs)
-			// The status and the delivery it may start are handled on this call.
+			f.handleStatus(t, handleOf(true, sent), cs)
 			if tc.starts {
 				if len(sent.installs()) != 1 {
 					t.Fatal("no install was sent")
@@ -547,7 +550,7 @@ func TestNothingLoggedHoldsKeyMaterial(t *testing.T) {
 	// A key that does not open, through the real status path.
 	broken := newCertFixture(t)
 	broken.store.delivery.KeyCiphertext = string(key)
-	broken.s.handleCertificateStatus(handleOf(true, &sentLog{}), missingStatus())
+	broken.handleStatus(t, handleOf(true, &sentLog{}), missingStatus())
 	waitUntil(t, "refusal", func() bool { return len(broken.audit.of(repository.AuditAgentCertificateRefused)) == 1 })
 
 	// Statuses that hold a key in the chain and in the error, from a stream that may deliver.
@@ -556,9 +559,8 @@ func TestNothingLoggedHoldsKeyMaterial(t *testing.T) {
 		{AppId: certTestApp, Source: "acme", State: "failed", Error: string(key)},
 		{AppId: certTestApp, Source: "uploaded", State: "failed", CertificateId: certTestCert, Error: string(key), ChainPem: key},
 	} {
-		f.s.handleCertificateStatus(handleOf(true, &sentLog{}), cs)
+		f.handleStatus(t, handleOf(true, &sentLog{}), cs)
 	}
-	time.Sleep(100 * time.Millisecond)
 
 	if text := out.String(); leaks(text, key) {
 		t.Fatalf("the log holds key material:\n%s", text)
@@ -873,23 +875,23 @@ func TestFeaturesAreStoredBeforeTheStreamIsRegistered(t *testing.T) {
 	}
 }
 
-// A delivery is made on the receive loop, with the writes it causes: when a status that asks for a key
-// is handled and the key does not open, the failed status is stored before the call returns, in order
-// with the statuses of the stream, not later from another goroutine.
-func TestKeyThatDoesNotOpenIsRecordedOnTheReceiveLoop(t *testing.T) {
+// A delivery is made by the worker of the stream, which does the reads, the decryption and the writes
+// in order: when a status that asks for a key is handled and the key does not open, the failed status
+// is stored after the missing one, and the refusal is audited.
+func TestKeyThatDoesNotOpenIsRecordedByTheWorkerInOrder(t *testing.T) {
 	f := newCertFixture(t)
 	f.store.delivery.KeyCiphertext = "not sealed"
-	f.s.handleCertificateStatus(handleOf(true, &sentLog{}), missingStatus())
+	f.handleStatus(t, handleOf(true, &sentLog{}), missingStatus())
 	failed := f.store.reportsOf("failed")
 	if len(failed) != 1 || !strings.Contains(failed[0].Error, certKeyUnreadable) {
-		t.Fatalf("failed statuses when the call returned: %+v", failed)
+		t.Fatalf("failed statuses: %+v", failed)
 	}
 	reports := f.store.seenReports()
 	if len(reports) != 2 || reports[0].State != "missing" || reports[1].State != "failed" {
 		t.Fatalf("statuses in the order they were stored: %+v", reports)
 	}
 	if len(f.audit.of(repository.AuditAgentCertificateRefused)) != 1 {
-		t.Fatal("the refusal was not audited when the call returned")
+		t.Fatal("the refusal was not audited")
 	}
 }
 
@@ -925,7 +927,7 @@ func TestRepeatedMissingKeepsAPermanentFailure(t *testing.T) {
 			setGeneration(h, 4)
 			f.store.prior = tc.prior
 			tc.prepare(f, h)
-			f.s.handleCertificateStatus(h, missingStatus())
+			f.handleStatus(t, h, missingStatus())
 			missing := f.store.reportsOf("missing")
 			if (len(missing) == 1) != tc.written {
 				t.Fatalf("missing written = %v, want %v", len(missing) == 1, tc.written)
@@ -994,6 +996,156 @@ func TestTLSAppsOfTheLastBundle(t *testing.T) {
 	}
 }
 
+// registered returns the handle the server holds for the credential of the test client.
+func registered(t *testing.T, s *Server) *streamHandle {
+	t.Helper()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	h := s.streams[e2eCred]
+	if h == nil {
+		t.Fatal("the stream is not registered")
+	}
+	return h
+}
+
+// A delivery that waits on a slow database holds the worker of its stream and nothing else: an unblock
+// ack, which has 10 seconds, and a heartbeat, on the same stream, are handled while it waits, and the
+// delivery goes on when the database answers.
+func TestSlowDeliveryDoesNotDelayTheReceiveLoop(t *testing.T) {
+	env, f := newCertEnv(t, true)
+	f.store.gate = make(chan struct{})
+	st := connectCertStream(t, env, engine.FeatureTLSCertificates)
+
+	now := time.Now()
+	env.s.BlockWindow.Record(BlockEntry{ID: "entry", ProjectID: e2eProject, AgentID: e2eAgentID, Key: "ip", UnblockType: "blockpolicy", UnblockKey: "ip",
+		BlockedAt: now, ExpiresAt: now.Add(time.Minute)})
+	sendStatus(t, st, missingStatus())
+	waitUntil(t, "the delivery to wait for the database", func() bool { return f.store.waiting.Load() == 1 })
+
+	// The unblock command goes out, is acked, and takes effect, while the delivery waits.
+	op, err := env.s.RequestUnblock(e2eProject, e2eAgentID, "entry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.waitFor(t, func(m *agentv1.ServerMessage) bool { return m.GetBundle().GetCommandId() == op.CommandID }, 3*time.Second)
+	sendAck(t, st.st, op.CommandID, true, "")
+	start := time.Now()
+	waitUntil(t, "the unblock ack to be handled", func() bool {
+		got := env.s.UnblockStatus(e2eProject, e2eAgentID, "entry")
+		return got != nil && got.Status == "applied"
+	})
+	if time.Since(start) > time.Second {
+		t.Fatalf("the unblock ack took %v while a delivery waited", time.Since(start))
+	}
+	// A heartbeat that carries health counters is stored.
+	if err := st.st.Send(&agentv1.AgentMessage{Kind: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{
+		AnalyzePanicsTotal: proto.Uint64(1), EnginePanicsTotal: proto.Uint64(3), PartialCoverageTotal: proto.Uint64(7), ParseBudgetExhaustedTotal: proto.Uint64(0),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the heartbeat to be handled", func() bool {
+		env.health.mu.Lock()
+		defer env.health.mu.Unlock()
+		return len(env.health.calls) == 1
+	})
+	// The status of another certificate is stored on the loop too; its delivery waits behind the first.
+	if _, delivery := f.store.counts(); delivery != 0 || len(f.audit.of(repository.AuditAgentCertificateDelivered)) != 0 {
+		t.Fatal("the delivery went on before the database answered")
+	}
+
+	close(f.store.gate)
+	ins := st.install(t, 3*time.Second)
+	if !bytes.Equal(ins.GetKeyPem(), f.cert.key) {
+		t.Fatal("the delivery that waited sent another key")
+	}
+}
+
+// The worker of a stream ends with it, also when it is in the middle of a delivery that waits on the
+// database, and the installs it had sent are dropped as before. After that a request is refused.
+func TestDeliveryWorkerStopsWithItsStream(t *testing.T) {
+	env, f := newCertEnv(t, true)
+	f.store.gate = make(chan struct{}) // never opened: the delivery waits until the stream ends
+	st := connectCertStream(t, env, engine.FeatureTLSCertificates)
+	h := registered(t, env.s)
+
+	sendStatus(t, st, missingStatus())
+	waitUntil(t, "the delivery to wait for the database", func() bool { return f.store.waiting.Load() == 1 })
+	h.workerMu.Lock()
+	done := h.workerDone
+	h.workerMu.Unlock()
+	select {
+	case <-done:
+		t.Fatal("the worker ended before the stream did")
+	default:
+	}
+
+	st.cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker did not stop when the stream ended")
+	}
+	if env.s.enqueueDelivery(h, certTestApp, certTestCert) {
+		t.Fatal("a request was accepted for a stream that ended")
+	}
+	if len(f.audit.of(repository.AuditAgentCertificateDelivered)) != 0 {
+		t.Fatal("a delivery was audited for a stream that ended")
+	}
+}
+
+// A worker that is busy keeps a small queue; a request that finds it full is dropped at once, without
+// blocking the caller, which is the receive loop, and the agent asks again with its next missing.
+func TestFullDeliveryQueueDropsWithoutBlocking(t *testing.T) {
+	f := newCertFixture(t)
+	f.store.gate = make(chan struct{})
+	sent := &sentLog{}
+	h := handleOf(true, sent)
+	t.Cleanup(h.stopDeliveries)
+
+	// The first request is taken by the worker, which then waits for the database; the next fill the queue.
+	if !f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+		t.Fatal("the first request was refused")
+	}
+	waitUntil(t, "the worker to take it", func() bool { return f.store.waiting.Load() == 1 })
+	for i := 0; i < certQueueMax; i++ {
+		if !f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+			t.Fatalf("request %d was refused with room in the queue", i)
+		}
+	}
+	start := time.Now()
+	out := captureLog(t)
+	for i := 0; i < 5; i++ {
+		if f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+			t.Fatal("a request was accepted into a full queue")
+		}
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatalf("dropping requests took %v", time.Since(start))
+	}
+	if n := strings.Count(out.String(), "delivery queue full"); n != 1 {
+		t.Fatalf("the drop was logged %d times, want once per stream", n)
+	}
+	if got := h.queued.Load(); got != int64(certQueueMax)+1 {
+		t.Fatalf("%d requests counted, want %d", got, certQueueMax+1)
+	}
+	// A status that asks for the key is judged and stored on the loop even then.
+	f.s.handleCertificateStatus(h, missingStatus())
+	if len(f.store.reportsOf("missing")) != 1 {
+		t.Fatal("a status was not stored because the delivery queue was full")
+	}
+
+	// When the database answers, the worker serves the queue: the first request sends the key, the
+	// others are the same certificate in the same bundle generation and send nothing more.
+	close(f.store.gate)
+	waitUntil(t, "the queue to drain", func() bool { return h.queued.Load() == 0 })
+	if n := len(sent.installs()); n != 1 {
+		t.Fatalf("%d installs sent, want 1", n)
+	}
+	if !f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+		t.Fatal("the queue did not take a request after it drained")
+	}
+}
+
 // ---- helpers for the gRPC tests ----
 
 // newCertEnv is the server of stream_e2e_test.go with the TLS storage and the audit log replaced by
@@ -1035,6 +1187,8 @@ type certStream struct {
 	st        agentv1.AgentControl_StreamClient
 	in        chan *agentv1.ServerMessage
 	sentinels int
+	// cancel ends the client side of the stream.
+	cancel context.CancelFunc
 }
 
 func startCertStream(st agentv1.AgentControl_StreamClient) *certStream {
@@ -1105,6 +1259,7 @@ func connectCertStreamWith(t *testing.T, env *e2eEnv, cert *tls.Certificate, fea
 	st, cancel := openHello(t, env.dial(t, cert), e2eAgent, features...)
 	t.Cleanup(cancel)
 	c := startCertStream(st)
+	c.cancel = cancel
 	c.waitFor(t, func(m *agentv1.ServerMessage) bool { return m.GetBundle() != nil }, 5*time.Second)
 	return c
 }
@@ -1129,6 +1284,7 @@ func (c *certStream) settle(t *testing.T, f *certFixture) {
 		}
 		return false
 	})
+	f.s.settleDeliveries(t)
 }
 
 func sendStatus(t *testing.T, c *certStream, cs *agentv1.CertificateStatus) {
