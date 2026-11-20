@@ -272,6 +272,7 @@ func contractSweep(s *contractSeed) map[string]sweepCase {
 		"GET /api/projects/{id}/apps/{appId}":                                     {},
 		"GET /api/projects/{id}/apps/{appId}/custom-rules":                        {},
 		"GET /api/projects/{id}/apps/{appId}/maintenance":                         {},
+		"GET /api/projects/{id}/apps/{appId}/tls":                                 {},
 		"GET /api/projects/{id}/apps/{appId}/waf-agent":                           {},
 		"GET /api/projects/{id}/apps/{appId}/waf-events/geo":                      {},
 		"GET /api/projects/{id}/apps/{appId}/waf-events/timeline":                 {},

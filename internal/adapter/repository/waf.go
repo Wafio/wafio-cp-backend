@@ -48,21 +48,43 @@ type WAFBundleAppRow struct {
 // ── Assignment ────────────────────────────────────────────────────────────
 
 // AssignApp binds an app to a WAF agent. Enforces one enabled assignment
-// per app via the uq_waf_agent_apps_enabled partial unique index.
+// per app via the uq_waf_agent_apps_enabled partial unique index. The app row and the bundle of the
+// agent are locked, and the app is checked against the TLS listeners of the applications already on
+// the agent (admitTLSMove): a *domain.TLSConflictError means nothing was bound. It takes a place
+// among the open transactions of its kind (enterNestedTx), since it waits for those locks.
 func (r *WAFRepo) AssignApp(ctx context.Context, agentID, appID, mode string) error {
 	if mode != "block" && mode != "monitor" {
 		mode = "block"
 	}
-	_, err := r.pool.Exec(ctx, `
+	leave, err := enterNestedTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer leave()
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var projectID string
+	if err := tx.QueryRow(ctx, `SELECT project_id::text FROM apps WHERE id = $1 FOR UPDATE`, appID).Scan(&projectID); err != nil {
+		return err
+	}
+	if err := admitTLSMove(ctx, tx, projectID, appID, agentID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO waf_agent_apps (agent_id, app_id, mode, enabled, updated_at)
 		VALUES ($1, $2, $3, TRUE, NOW())
 		ON CONFLICT (agent_id, app_id) DO UPDATE SET
 		    mode = EXCLUDED.mode, enabled = TRUE, updated_at = NOW()`,
-		agentID, appID, mode)
-	if err != nil {
+		agentID, appID, mode); err != nil {
 		return err
 	}
-	return r.bumpBundleGeneration(ctx, agentID)
+	if _, err := bumpBundle(ctx, tx, appID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // The columns of a bundle row, around the mode, which comes from the assignment or from the caller.

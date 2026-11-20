@@ -479,14 +479,10 @@ func TestDBTLSPlacementAmongApplicationsOfOneAgent(t *testing.T) {
 	// An application in proxy mode keeps whatever draft it likes.
 	f.mustUpdate(b, f.settings("proxy", "acme", "shop.example.com"))
 
-	// Listener settings.
+	// Applications that share a listener may have different limits: the agent takes the largest value
+	// of the listener and applies the limits of each application after routing.
 	f.mustUpdate(b, f.settings("proxy", ""))
-	f.limits(b, `{"max_body_bytes": 1048576}`)
-	_, err = f.update(b, f.settings("gateway", "acme", "blog.example.com"))
-	if ce := asConflict(err); ce.Code != domain.TLSConflictListenerSettings || ce.OtherAppID != a {
-		t.Fatalf("limits: %+v", ce)
-	}
-	f.limits(b, `{"max_body_bytes": 67108864, "timeouts": {"read_ms": 60000}}`) // the defaults, written out
+	f.limits(b, `{"max_body_bytes": 1048576, "timeouts": {"read_ms": 1500}}`)
 	f.gateway(b, "acme", "blog.example.com")
 
 	// Redirect and HTTPS listeners are not interchangeable.
