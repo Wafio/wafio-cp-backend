@@ -31,6 +31,10 @@ type Repository struct {
 	HostEnroll       *HostEnrollRepo
 	Storage          *StorageRepo
 	TLS              *TLSRepo
+
+	// keyTuning is the lock key and the waits of the encryption key lock; the zero value is the
+	// production setting, and a test sets its own.
+	keyTuning keyTuning
 }
 
 // PoolOptions sizes the shared connection pool. A zero value keeps pgx's own

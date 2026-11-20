@@ -892,7 +892,7 @@ type ExpiryCandidate = domain.ExpiryCandidate
 // row carries its project.
 func (r *TLSRepo) ListExpiryCandidates(ctx context.Context) ([]ExpiryCandidate, error) {
 	rows, err := r.pool.Query(ctx, `SELECT a.project_id::text, p.name, a.id::text, a.name, a.tls_hosts, a.tls_source,
-		COALESCE(c.id::text, ''), COALESCE(c.leaf_sha256, s.leaf_sha256, ''), COALESCE(c.not_after, s.not_after),
+		COALESCE(c.id::text, ''), COALESCE(c.leaf_sha256, s.leaf_sha256, ''), COALESCE(c.not_before, s.not_before), COALESCE(c.not_after, s.not_after),
 		COALESCE(c.expiry_notified_days, s.expiry_notified_days)
 		FROM apps a
 		JOIN projects p ON p.id = a.project_id
@@ -908,8 +908,12 @@ func (r *TLSRepo) ListExpiryCandidates(ctx context.Context) ([]ExpiryCandidate, 
 	var out []ExpiryCandidate
 	for rows.Next() {
 		var c ExpiryCandidate
-		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.AppID, &c.AppName, &c.Hosts, &c.Source, &c.CertificateID, &c.LeafSHA256, &c.NotAfter, &c.NotifiedDays); err != nil {
+		var notBefore *time.Time
+		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.AppID, &c.AppName, &c.Hosts, &c.Source, &c.CertificateID, &c.LeafSHA256, &notBefore, &c.NotAfter, &c.NotifiedDays); err != nil {
 			return nil, err
+		}
+		if notBefore != nil {
+			c.NotBefore = *notBefore
 		}
 		out = append(out, c)
 	}
@@ -944,18 +948,11 @@ func sealedKeys(ctx context.Context, tx pgx.Tx, lock bool) ([]SealedCertificateK
 	return out, rows.Err()
 }
 
-// replaceSealedKey writes the key of a certificate sealed again, with another key. It never changes
-// which certificate the key belongs to.
-func replaceSealedKey(ctx context.Context, tx pgx.Tx, projectID, certificateID, sealed string) error {
-	tag, err := tx.Exec(ctx, `UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2 AND project_id = $1`,
+// replaceSealedKey queues the statement that writes the key of a certificate sealed again, with
+// another key. It never changes which certificate the key belongs to.
+func replaceSealedKey(b *pgx.Batch, projectID, certificateID, sealed string) {
+	b.Queue(`UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2 AND project_id = $1`,
 		projectID, certificateID, sealed)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return errors.New("certificate key row is gone")
-	}
-	return nil
 }
 
 // certExpiryLockKey is the advisory lock of the expiry warning pass, apart from the retention lock.

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -90,6 +91,10 @@ func TestRekeyCommandRefusesBeforeTheDatabase(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "connect") || out.Len() != 0 {
 			t.Errorf("%s: went on to the database (%v, output %q)", name, err, out.String())
+		}
+		// The old key is out of the environment once it has been read, refusal or not.
+		if v, set := os.LookupEnv(oldKeyEnv); set || v != "" {
+			t.Errorf("%s: %s is still in the environment", name, oldKeyEnv)
 		}
 	}
 }

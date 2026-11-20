@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,9 +29,10 @@ func rekeyKey(seed string) *otp.Encryptor {
 	return e
 }
 
-// rekeyFixture is a database of its own: a schema that holds copies of the three tables Rekey reads,
-// so the test sees only its own rows (Rekey reads every row of those tables, and the shared test
-// database holds the rows of the tests that run beside this one).
+// rekeyFixture is a database of its own: a schema that holds copies of the tables Rekey reads and
+// writes, so the test sees only its own rows (Rekey reads every row of those tables, and the shared
+// test database holds the rows of the tests that run beside this one). The key lock is its own as
+// well, since advisory locks belong to the whole database.
 type rekeyFixture struct {
 	t                        *testing.T
 	repo                     *Repository
@@ -61,7 +63,7 @@ func newRekeyFixture(t *testing.T) *rekeyFixture {
 			t.Error(err)
 		}
 	})
-	for _, table := range []string{"users", "system_settings", "app_certificate_keys"} {
+	for _, table := range []string{"users", "system_settings", "app_certificate_keys", "system_audit"} {
 		if _, err := admin.Exec(ctx, "CREATE TABLE "+quoted+"."+table+" (LIKE public."+table+" INCLUDING ALL)"); err != nil {
 			t.Fatal(err)
 		}
@@ -76,7 +78,14 @@ func newRekeyFixture(t *testing.T) *rekeyFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	return &rekeyFixture{t: t, repo: FromPool(pool), project: uuid.NewString(),
+	repo := FromPool(pool)
+	id := uuid.New()
+	repo.keyTuning = keyTuning{
+		lockKey:  int64(binary.BigEndian.Uint64(id[:8])),
+		lockWait: 300 * time.Millisecond,
+		ping:     50 * time.Millisecond,
+	}
+	return &rekeyFixture{t: t, repo: repo, project: uuid.NewString(),
 		oldKey: rekeyKey("1a"), newKey: rekeyKey("2b"), thirdKey: rekeyKey("3c")}
 }
 
@@ -256,9 +265,14 @@ func TestRekeyApplyRewritesEveryKind(t *testing.T) {
 		t.Fatalf("report %+v", report)
 	}
 	after := f.snapshot()
-	if len(after) != len(before) {
+	// One row more: the id of the new key.
+	if len(after) != len(before)+1 {
 		t.Fatalf("rows: %d before, %d after", len(before), len(after))
 	}
+	if got := f.storedKeyID(); got != f.newKey.KeyID() {
+		t.Errorf("stored key id %q, want %q", got, f.newKey.KeyID())
+	}
+	f.checkAuditRow(report, "SECRET-A", "smtp-pass-8f3a", "malware-key-77c1")
 
 	// TOTP secrets: every sealed column opens with the new key to the same secret, and no longer with
 	// the old key.
@@ -621,5 +635,75 @@ func TestRekeyApplyWaitsForALockedRow(t *testing.T) {
 	}
 	if got, err := f.newKey.Decrypt(f.snapshot()["user-secret "+id]); err != nil || got != "DURING" {
 		t.Errorf("the committed value: %q %v", got, err)
+	}
+}
+
+// storedKeyID is the id of the key in force, as the database holds it.
+func (f *rekeyFixture) storedKeyID() string {
+	f.t.Helper()
+	var id string
+	err := f.repo.DB.QueryRow(context.Background(), `SELECT COALESCE(value->>'key_id', '') FROM system_settings WHERE key = $1`, encKeySetting).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ""
+	}
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return id
+}
+
+func (f *rekeyFixture) auditRows() []map[string]any {
+	f.t.Helper()
+	rows, err := f.repo.DB.Query(context.Background(), `SELECT action, target_type, COALESCE(target_id, ''), outcome, COALESCE(user_agent, ''), COALESCE(metadata::text, '') FROM system_audit ORDER BY created_at`)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var action, targetType, targetID, outcome, agent, meta string
+		if err := rows.Scan(&action, &targetType, &targetID, &outcome, &agent, &meta); err != nil {
+			f.t.Fatal(err)
+		}
+		out = append(out, map[string]any{"action": action, "target_type": targetType, "target_id": targetID, "outcome": outcome, "agent": agent, "meta": meta})
+	}
+	if err := rows.Err(); err != nil {
+		f.t.Fatal(err)
+	}
+	return out
+}
+
+// checkAuditRow expects the one row of a rotation, with the key ids and the counts, and no secret.
+func (f *rekeyFixture) checkAuditRow(report RekeyReport, secrets ...string) {
+	f.t.Helper()
+	rows := f.auditRows()
+	if len(rows) != 1 {
+		f.t.Fatalf("%d audit rows, want 1: %v", len(rows), rows)
+	}
+	row := rows[0]
+	if row["action"] != "admin.encryption_key_rotated" || row["target_type"] != "system" || row["target_id"] != "totp.enc_key" || row["outcome"] != "success" || row["agent"] != "wafio rekey" {
+		f.t.Errorf("audit row %v", row)
+	}
+	var meta struct {
+		Old       string         `json:"old_key_id"`
+		New       string         `json:"new_key_id"`
+		Rewritten map[string]int `json:"rewritten"`
+	}
+	text := row["meta"].(string)
+	if err := json.Unmarshal([]byte(text), &meta); err != nil {
+		f.t.Fatal(err)
+	}
+	if meta.Old != f.oldKey.KeyID() || meta.New != f.newKey.KeyID() {
+		f.t.Errorf("audit key ids %s %s", meta.Old, meta.New)
+	}
+	for _, c := range report.Counts {
+		if meta.Rewritten[c.Kind] != c.ToRewrite {
+			f.t.Errorf("audit counts %v, report %+v", meta.Rewritten, report.Counts)
+		}
+	}
+	for _, secret := range append(secrets, "enc:v1:", "encb:v1:") {
+		if strings.Contains(text, secret) {
+			f.t.Errorf("the audit row holds %q", secret)
+		}
 	}
 }

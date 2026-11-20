@@ -32,7 +32,11 @@ var rekeyCmd = &cobra.Command{
 		"would rewrite. With --apply it rewrites everything in one transaction, and writes nothing when a value\n" +
 		"opens with neither key. A value that already opens with the new key counts as done, so the command can\n" +
 		"be run again. It never prints a value.\n\n" +
-		"Stop the control plane before --apply and start it again after, with the new key.",
+		"Every control plane holds a lock on the key for as long as it runs, and --apply refuses while one does:\n" +
+		"stop them all, run it, and start them again with the new key. A control plane that is started with a key\n" +
+		"other than the one the database was sealed with refuses to start. The key is best given on the one\n" +
+		"command line, WAFIO_OLD_TOTP_ENC_KEY=\"$old\" wafio rekey --apply; the command removes it from its own\n" +
+		"environment as soon as it has read it.",
 	Args: cobra.NoArgs,
 	// A refusal is a message about keys or rows; the usage text would bury it.
 	SilenceUsage: true,
@@ -79,7 +83,11 @@ func runRekey(cmd *cobra.Command, _ []string) error {
 	if err := cfg.ValidateDatabase(); err != nil {
 		return err
 	}
-	oldKey, newKey, err := rekeyKeys(os.Getenv(oldKeyEnv), cfg.TOTP.EncKey)
+	// The old key is read once and then removed from the environment, so that nothing this
+	// process starts or writes (a core dump, a child) carries it.
+	oldRaw := os.Getenv(oldKeyEnv)
+	_ = os.Unsetenv(oldKeyEnv)
+	oldKey, newKey, err := rekeyKeys(oldRaw, cfg.TOTP.EncKey)
 	if err != nil {
 		return err
 	}

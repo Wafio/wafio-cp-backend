@@ -42,13 +42,20 @@ func keyStatement(sql, fn string, inTLSRepo bool) (delivery bool, problem string
 		return false, ""
 	case fn == "retireCertificates" && strings.HasPrefix(trimmed, "delete from app_certificate_keys") && !strings.Contains(lower, "returning"):
 		return false, ""
-	case fn == "sealedKeys" && strings.HasPrefix(trimmed, "select") && !strings.Contains(lower, "returning"):
+	case fn == "sealedKeys" && trimmed == sealedKeysSQL:
 		return false, ""
-	case fn == "replaceSealedKey" && strings.HasPrefix(trimmed, "update app_certificate_keys set key_ciphertext") && !strings.Contains(lower, "returning"):
+	case fn == "replaceSealedKey" && trimmed == replaceSealedKeySQL:
 		return false, ""
 	}
 	return false, "names the key table or column in " + fn + ", which may not"
 }
+
+// The two statements of the rotation, pinned to the letter: the column list of the read is the ids
+// and the sealed key, and the write changes the key of one certificate of one project.
+const (
+	sealedKeysSQL       = "select project_id::text, certificate_id::text, key_ciphertext from app_certificate_keys order by certificate_id"
+	replaceSealedKeySQL = "update app_certificate_keys set key_ciphertext = $3 where certificate_id = $2 and project_id = $1"
+)
 
 // keyMigration judges a migration file. Only the migration that creates the key table (and its down
 // file, which drops it) may name the table or the column, and only to create or drop the table: a
@@ -153,6 +160,108 @@ func TestOnlyTheDeliveryQuerySelectsTheKey(t *testing.T) {
 	}
 }
 
+// keyCall judges one call of a function that opens or hands out sealed keys. sealedKeys and
+// replaceSealedKey are the rotation's alone, called by the loader of the certificate keys; OpenBound
+// is called by the rotation to read what it rewrites, and by the delivery to an agent, nowhere else.
+// An agent that is sent a key opens it in agentserver/certificate_install.go.
+func keyCall(callee, file, fn string) string {
+	file = filepath.ToSlash(file)
+	switch callee {
+	case "sealedKeys", "replaceSealedKey":
+		if strings.HasSuffix(file, "internal/adapter/repository/rekey.go") && fn == "loadCertificateKeys" {
+			return ""
+		}
+	case "OpenBound":
+		if strings.HasSuffix(file, "internal/adapter/repository/rekey.go") && fn == "open" {
+			return ""
+		}
+		if strings.HasSuffix(file, "internal/agentserver/certificate_install.go") {
+			return ""
+		}
+	}
+	return callee + " is called from " + fn + " in " + file
+}
+
+// The two helpers of the rotation and OpenBound are the ways to a sealed key. This test finds every
+// call of them in the program and fails on one that is not where it may be.
+func TestKeyHelpersAreCalledOnlyWhereTheyMayBe(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	fset := token.NewFileSet()
+	calls := map[string]int{}
+	for _, dir := range []string{"internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+			for _, decl := range file.Decls {
+				fn := ""
+				if f, ok := decl.(*ast.FuncDecl); ok {
+					fn = f.Name.Name
+				}
+				ast.Inspect(decl, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					var callee string
+					switch f := call.Fun.(type) {
+					case *ast.Ident:
+						callee = f.Name
+					case *ast.SelectorExpr:
+						callee = f.Sel.Name
+					}
+					if callee != "sealedKeys" && callee != "replaceSealedKey" && callee != "OpenBound" {
+						return true
+					}
+					calls[callee]++
+					if problem := keyCall(callee, path, fn); problem != "" {
+						t.Errorf("%s: %s", fset.Position(call.Pos()), problem)
+					}
+					return true
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls["sealedKeys"] != 1 || calls["replaceSealedKey"] != 1 || calls["OpenBound"] < 1 {
+		t.Fatalf("calls found: %v; the scan is blind (want sealedKeys 1, replaceSealedKey 1, OpenBound at least 1)", calls)
+	}
+}
+
+func TestKeyCallRules(t *testing.T) {
+	const rekey = "internal/adapter/repository/rekey.go"
+	for name, tt := range map[string]struct {
+		callee, file, fn string
+		bad              bool
+	}{
+		"the loader reads the sealed keys":        {"sealedKeys", rekey, "loadCertificateKeys", false},
+		"the loader writes them back":             {"replaceSealedKey", rekey, "loadCertificateKeys", false},
+		"another function of the rotation reads":  {"sealedKeys", rekey, "Rekey", true},
+		"another function of the rotation writes": {"replaceSealedKey", rekey, "Rekey", true},
+		"the TLS repository reads them":           {"sealedKeys", "internal/adapter/repository/app_tls.go", "CertificateForDelivery", true},
+		"a handler reads them":                    {"sealedKeys", "internal/adapter/http/handlers/app_tls.go", "Upload", true},
+		"a command writes them":                   {"replaceSealedKey", "cmd/wafio/rekey.go", "runRekey", true},
+		"the rotation opens a key":                {"OpenBound", rekey, "open", false},
+		"the rotation opens a key elsewhere":      {"OpenBound", rekey, "Rekey", true},
+		"the delivery opens a key":                {"OpenBound", "internal/agentserver/certificate_install.go", "deliverCertificate", false},
+		"a handler opens a key":                   {"OpenBound", "internal/adapter/http/handlers/app_tls.go", "Upload", true},
+		"the stream opens a key":                  {"OpenBound", "internal/agentserver/stream.go", "handle", true},
+		"a command opens a key":                   {"OpenBound", "cmd/wafio/rekey.go", "runRekey", true},
+	} {
+		got := keyCall(tt.callee, tt.file, tt.fn)
+		if (got != "") != tt.bad {
+			t.Errorf("%s: %q, want bad=%v", name, got, tt.bad)
+		}
+	}
+}
+
 // The scan is only as good as its rules, so the rules are checked against statements that must be
 // caught and statements that must pass.
 func TestKeyStatementRules(t *testing.T) {
@@ -185,6 +294,12 @@ func TestKeyStatementRules(t *testing.T) {
 		{"the rotation reads them outside the repository", `SELECT key_ciphertext FROM app_certificate_keys`, "sealedKeys", false, false, true},
 		{"the rotation reads and returns what it writes", `UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2 RETURNING key_ciphertext`, "replaceSealedKey", true, false, true},
 		{"the rotation writes the key back", `UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2 AND project_id = $1`, "replaceSealedKey", true, false, false},
+		{"the rotation writes every key", `UPDATE app_certificate_keys SET key_ciphertext = $3`, "replaceSealedKey", true, false, true},
+		{"the rotation writes the key of every project", `UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2`, "replaceSealedKey", true, false, true},
+		{"the rotation reads one more column", `SELECT project_id::text, certificate_id::text, key_ciphertext, certificate_id FROM app_certificate_keys ORDER BY certificate_id`, "sealedKeys", true, false, true},
+		{"the rotation reads fewer columns", `SELECT key_ciphertext FROM app_certificate_keys ORDER BY certificate_id`, "sealedKeys", true, false, true},
+		{"the rotation reads through a join", `SELECT project_id::text, certificate_id::text, key_ciphertext FROM app_certificate_keys JOIN app_certificates USING (project_id) ORDER BY certificate_id`, "sealedKeys", true, false, true},
+		{"the rotation reads a filtered set", `SELECT project_id::text, certificate_id::text, key_ciphertext FROM app_certificate_keys WHERE true ORDER BY certificate_id`, "sealedKeys", true, false, true},
 		{"the rotation deletes a key", `DELETE FROM app_certificate_keys WHERE certificate_id = $1`, "replaceSealedKey", true, false, true},
 		{"a read under the name of the rotation write", `SELECT key_ciphertext FROM app_certificate_keys`, "replaceSealedKey", true, false, true},
 		{"a write under the name of the rotation read", `UPDATE app_certificate_keys SET key_ciphertext = $3`, "sealedKeys", true, false, true},

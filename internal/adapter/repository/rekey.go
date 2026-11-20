@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 	"github.com/wafio/wafio-cp-backend/internal/otp"
@@ -38,6 +39,17 @@ const rekeyNamedRows = 20
 
 // ErrRekeyUnreadable is returned when a stored value opens with neither key. Nothing was written.
 var ErrRekeyUnreadable = errors.New("some stored values open with neither the old nor the new key")
+
+// ErrRekeyControlPlaneRunning is returned by an apply that cannot have the encryption key lock: a
+// control plane holds it for as long as it runs, and so does another rekey. Nothing was written.
+var ErrRekeyControlPlaneRunning = errors.New("a control plane is running (or another rekey): stop every wafio serve, then run rekey --apply again")
+
+// ErrRekeyRowLocked is returned when a row to rewrite stays locked by another transaction past the
+// wait of the apply. Nothing was written.
+var ErrRekeyRowLocked = errors.New("a row to rewrite is locked by another transaction (find it in pg_stat_activity); nothing was changed, run rekey --apply again when it has ended")
+
+// rekeyAuditAction is the system_audit action of a rotation.
+const rekeyAuditAction = "admin.encryption_key_rotated"
 
 // RekeyCount is what Rekey found for one kind of value. A value is never part of it.
 type RekeyCount struct {
@@ -80,7 +92,9 @@ type rekeyItem struct {
 	// bound is set for a value sealed with SealBound, whose seal also depends on aad.
 	bound bool
 	aad   string
-	write func(ctx context.Context, tx pgx.Tx, sealed string) error
+	// queue adds the statement that stores the sealed value to the batch of the apply; it changes
+	// exactly one row.
+	queue func(b *pgx.Batch, sealed string) error
 }
 
 func (it rekeyItem) isSealed() bool {
@@ -140,10 +154,12 @@ func rekeyKinds() []rekeyKind {
 // settings, and the private keys of uploaded certificates. A value that already opens with newKey
 // counts as done, so a run after an interrupted rotation is safe.
 //
-// Without apply it reports and writes nothing. With apply it locks every row it reads and writes in
-// one transaction, and writes nothing at all when a value opens with neither key
-// (ErrRekeyUnreadable, with the report). Stop the control plane first: it keeps no lock on the rows,
-// and a secret saved between the read and the commit would be missed.
+// Without apply it reports and writes nothing, and needs no lock. With apply it takes the key lock
+// exclusively (a control plane holds it shared for as long as it runs: ErrRekeyControlPlaneRunning),
+// locks every row it reads and writes them in one transaction together with the id of the new key
+// and an audit row, and writes nothing at all when a value opens with neither key
+// (ErrRekeyUnreadable, with the report) or a row stays locked by another transaction too long
+// (ErrRekeyRowLocked).
 func (r *Repository) Rekey(ctx context.Context, oldKey, newKey *otp.Encryptor, apply bool) (RekeyReport, error) {
 	if oldKey == nil || newKey == nil {
 		return RekeyReport{}, errors.New("rekey needs the old and the new key")
@@ -158,6 +174,20 @@ func (r *Repository) Rekey(ctx context.Context, oldKey, newKey *otp.Encryptor, a
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if apply {
+		tune := r.keyTunings()
+		var got bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, tune.lockKey).Scan(&got); err != nil {
+			return RekeyReport{}, fmt.Errorf("take the key lock: %w", err)
+		}
+		if !got {
+			return RekeyReport{}, ErrRekeyControlPlaneRunning
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, fmt.Sprintf("%dms", tune.rowWait.Milliseconds())); err != nil {
+			return RekeyReport{}, err
+		}
+	}
+
 	type rewrite struct {
 		item   rekeyItem
 		sealed string
@@ -167,6 +197,9 @@ func (r *Repository) Rekey(ctx context.Context, oldKey, newKey *otp.Encryptor, a
 	for _, kind := range rekeyKinds() {
 		items, err := kind.load(ctx, tx, apply)
 		if err != nil {
+			if isLockNotAvailable(err) {
+				return report, ErrRekeyRowLocked
+			}
 			return report, fmt.Errorf("read %s: %w", kind.name, err)
 		}
 		count := RekeyCount{Kind: kind.name}
@@ -207,16 +240,65 @@ func (r *Repository) Rekey(ctx context.Context, oldKey, newKey *otp.Encryptor, a
 	if !apply {
 		return report, nil
 	}
+
+	batch := &pgx.Batch{}
 	for _, w := range rewrites {
-		if err := w.item.write(ctx, tx, w.sealed); err != nil {
+		if err := w.item.queue(batch, w.sealed); err != nil {
 			return report, fmt.Errorf("write %s: %w", w.item.label, err)
 		}
+	}
+	if err := execBatchOneRowEach(ctx, tx, batch); err != nil {
+		if isLockNotAvailable(err) {
+			return report, ErrRekeyRowLocked
+		}
+		return report, fmt.Errorf("write the values: %w", err)
+	}
+	if err := storeEncryptionKeyID(ctx, tx, newKey); err != nil {
+		return report, fmt.Errorf("store the key id: %w", err)
+	}
+	rewritten := map[string]int{}
+	for _, c := range report.Counts {
+		rewritten[c.Kind] = c.ToRewrite
+	}
+	audit := SystemAuditEvent{
+		Action: rekeyAuditAction, TargetType: "system", TargetID: "totp.enc_key", Outcome: "success", UserAgent: "wafio rekey",
+		Metadata: map[string]any{"old_key_id": oldKey.KeyID(), "new_key_id": newKey.KeyID(), "rewritten": rewritten},
+	}
+	if err := noteAuditFailure("system_audit", audit.Action, insertSystemAudit(ctx, tx, audit)); err != nil {
+		return report, fmt.Errorf("record the rotation: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return report, fmt.Errorf("commit: %w", err)
 	}
 	report.Applied = true
 	return report, nil
+}
+
+// execBatchOneRowEach sends the statements in one round trip and fails when one of them changed
+// anything but one row.
+func execBatchOneRowEach(ctx context.Context, tx pgx.Tx, batch *pgx.Batch) error {
+	if batch.Len() == 0 {
+		return nil
+	}
+	results := tx.SendBatch(ctx, batch)
+	for i := 0; i < batch.Len(); i++ {
+		tag, err := results.Exec()
+		if err != nil {
+			_ = results.Close()
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			_ = results.Close()
+			return fmt.Errorf("a stored value is gone (statement %d changed %d rows)", i+1, tag.RowsAffected())
+		}
+	}
+	return results.Close()
+}
+
+// isLockNotAvailable reports a lock_timeout cancellation (SQLSTATE 55P03).
+func isLockNotAvailable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
 }
 
 func (c *RekeyCount) unreadable(label string) {
@@ -250,9 +332,9 @@ func loadUserSecrets(pending bool) func(context.Context, pgx.Tx, bool) ([]rekeyI
 				return nil, err
 			}
 			items = append(items, rekeyItem{label: "user " + id, stored: stored,
-				write: func(ctx context.Context, tx pgx.Tx, sealed string) error {
-					_, err := tx.Exec(ctx, upd, id, sealed)
-					return err
+				queue: func(b *pgx.Batch, sealed string) error {
+					b.Queue(upd, id, sealed)
+					return nil
 				}})
 		}
 		return items, rows.Err()
@@ -280,7 +362,7 @@ func loadSettingSecret(key, field string) func(context.Context, pgx.Tx, bool) ([
 			return nil, nil
 		}
 		return []rekeyItem{{label: "setting " + key, stored: stored,
-			write: func(ctx context.Context, tx pgx.Tx, sealed string) error {
+			queue: func(b *pgx.Batch, sealed string) error {
 				// The other fields of the row stay as they are.
 				quoted, err := json.Marshal(sealed)
 				if err != nil {
@@ -291,8 +373,8 @@ func loadSettingSecret(key, field string) func(context.Context, pgx.Tx, bool) ([
 				if err != nil {
 					return err
 				}
-				_, err = tx.Exec(ctx, `UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`, key, out)
-				return err
+				b.Queue(`UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`, key, out)
+				return nil
 			}}}, nil
 	}
 }
@@ -307,8 +389,9 @@ func loadCertificateKeys(ctx context.Context, tx pgx.Tx, lock bool) ([]rekeyItem
 		items[i] = rekeyItem{
 			label: "certificate " + k.CertificateID, stored: k.Sealed, bound: true,
 			aad: domain.CertificateKeyAAD(k.ProjectID, k.CertificateID),
-			write: func(ctx context.Context, tx pgx.Tx, sealed string) error {
-				return replaceSealedKey(ctx, tx, k.ProjectID, k.CertificateID, sealed)
+			queue: func(b *pgx.Batch, sealed string) error {
+				replaceSealedKey(b, k.ProjectID, k.CertificateID, sealed)
+				return nil
 			},
 		}
 	}
