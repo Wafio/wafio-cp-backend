@@ -1446,7 +1446,7 @@ func TestDBTLSSaveIsCheckedAgainstTheAgentThatServesTheApplication(t *testing.T)
 	<-entered
 	saved := make(chan error, 1)
 	go func() { _, err := f.update(app, want); saved <- err }()
-	time.Sleep(500 * time.Millisecond)
+	f.waitForRowLockWait()
 	select {
 	case err := <-saved:
 		t.Fatalf("the save went through while the move held the application: %v", err)

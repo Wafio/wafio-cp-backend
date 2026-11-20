@@ -19,9 +19,31 @@ func (f *tlsDB) bundleHeld(agentID string) bool {
 	return held
 }
 
+// waitForRowLockWait polls pg_stat_activity until a session is waiting for a lock in a SELECT ... FOR
+// UPDATE, which is a save that reached the row of the application while a move holds it. It fails the
+// test at the deadline, so a test that needs the wait cannot pass without it.
+func (f *tlsDB) waitForRowLockWait() {
+	f.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := f.repo.DB.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ILIKE '%for update%'`).Scan(&waiting); err != nil {
+			f.t.Fatal(err)
+		}
+		if waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			f.t.Fatal("no session waited for a row lock within 10 seconds: the save did not reach the application held by the move")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // movedWhileWaiting runs a move of the application to y that stays inside its admit callback, holding
-// the application row, until release is called; it starts start() meanwhile and gives it time to
-// reach the row lock. wait returns the error of the move.
+// the application row, until release is called; it starts start() meanwhile and waits until the
+// session it started is waiting for the row lock. wait returns the error of the move.
 func (f *tlsDB) movedWhileWaiting(app, y string, start func()) (release func(), wait func() error) {
 	f.t.Helper()
 	entered, free := make(chan struct{}), make(chan struct{})
@@ -35,7 +57,7 @@ func (f *tlsDB) movedWhileWaiting(app, y string, start func()) (release func(), 
 	}()
 	<-entered
 	start()
-	time.Sleep(500 * time.Millisecond)
+	f.waitForRowLockWait()
 	return func() { close(free) }, func() error { return <-moved }
 }
 
@@ -65,6 +87,8 @@ func TestDBUpdateMaintenanceLocksTheBundleOfTheAgentThatServesTheApplication(t *
 	select {
 	case <-seen:
 		t.Fatal("the save went through while the move held the application")
+	case err := <-saved:
+		t.Fatalf("the save finished while the move held the application: %v", err)
 	default:
 	}
 	release()
@@ -101,6 +125,13 @@ func TestDBUpdateAtomicAdmitsAgainstTheAgentThatServesTheApplication(t *testing.
 			})
 		}()
 	})
+	select {
+	case <-seen:
+		t.Fatal("admit was called while the move held the application")
+	case err := <-done:
+		t.Fatalf("the change finished while the move held the application: %v", err)
+	default:
+	}
 	release()
 	if err := wait(); err != nil {
 		t.Fatal(err)
