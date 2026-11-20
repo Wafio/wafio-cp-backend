@@ -1769,9 +1769,9 @@ func TestDBTLSKeyOpensWhateverTheSpellingOfTheIDs(t *testing.T) {
 	agent := f.agent(ptr(true))
 	f.bind(agent)
 	spellings := map[string]func(string) string{
-		"upper case": strings.ToUpper,
-		"braces":     func(id string) string { return "{" + id + "}" },
-		"no hyphens": func(id string) string { return strings.ReplaceAll(id, "-", "") },
+		"upper case":        strings.ToUpper,
+		"braces":            func(id string) string { return "{" + id + "}" },
+		"no hyphens":        func(id string) string { return strings.ReplaceAll(id, "-", "") },
 		"braced upper case": func(id string) string { return "{" + strings.ToUpper(id) + "}" },
 	}
 	for name, spell := range spellings {
