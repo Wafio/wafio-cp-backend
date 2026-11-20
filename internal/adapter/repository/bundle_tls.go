@@ -1,6 +1,10 @@
 package repository
 
-import "github.com/wafio/wafio-cp-backend/internal/domain"
+import (
+	"strings"
+
+	"github.com/wafio/wafio-cp-backend/internal/domain"
+)
 
 // BundleTLS is the TLS entry of an application in the bundle, as the agent reads it (apps[].tls in
 // docs/agent-protocol.md). It names the certificate of an uploaded source by id and leaf and never
@@ -16,6 +20,21 @@ type BundleTLS struct {
 	CertificateID string `json:"certificate_id,omitempty"`
 	LeafSHA256    string `json:"leaf_sha256,omitempty"`
 	ACMERequestID string `json:"acme_request_id,omitempty"`
+}
+
+// bundleLeafPlaceholder stands for the leaf of the current certificate where only the size of the
+// entry matters: it has the length of a SHA-256 in hex.
+var bundleLeafPlaceholder = strings.Repeat("0", 64)
+
+// BundleEntry is the entry the bundle would carry for these settings, nil unless they are in gateway
+// mode. The leaf of an uploaded certificate is a placeholder of the same length, so the entry has the
+// size it will have; the caller measures a bundle with it, and never sends it.
+func (t AppTLS) BundleEntry() *BundleTLS {
+	e := BundleTLS{Listen: t.Listen, Hosts: t.Hosts, RedirectListen: t.RedirectListen, Source: t.Source, CertificateID: t.CertificateID, ACMERequestID: t.ACMERequestID}
+	if t.CertificateID != "" {
+		e.LeafSHA256 = bundleLeafPlaceholder
+	}
+	return e.forBundle(t.Mode)
 }
 
 // forBundle is the entry for an application with this tls_mode: nil unless it is in gateway mode.

@@ -3,6 +3,7 @@ package repository
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +51,28 @@ func TestBundleTLSForBundle(t *testing.T) {
 		if err != nil || string(raw) != tc.want {
 			t.Errorf("%s: %s, %v, want %s", tc.name, raw, err, tc.want)
 		}
+	}
+}
+
+// BundleEntry is the entry the bundle would carry, with a leaf of the length of a real one, so that a
+// size measured with it is the size of the bundle that will be sent.
+func TestAppTLSBundleEntry(t *testing.T) {
+	leaf := strings.Repeat("a", 64)
+	uploaded := AppTLS{
+		Mode: "gateway", Hosts: []string{"a.example.com", "b.example.com"}, Listen: "0.0.0.0:443", RedirectListen: "0.0.0.0:80",
+		Source: "uploaded", CertificateID: "6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10", ACMERequestID: "stale",
+	}
+	real := (BundleTLS{Listen: uploaded.Listen, Hosts: uploaded.Hosts, RedirectListen: uploaded.RedirectListen, Source: "uploaded", CertificateID: uploaded.CertificateID, LeafSHA256: leaf}).forBundle("gateway")
+	want, _ := json.Marshal(real)
+	got, _ := json.Marshal(uploaded.BundleEntry())
+	if len(got) != len(want) || strings.Contains(string(got), "stale") || !strings.Contains(string(got), `"certificate_id":"`+uploaded.CertificateID) {
+		t.Errorf("entry of an uploaded source: %s, want the length of %s", got, want)
+	}
+	acme := AppTLS{Mode: "gateway", Hosts: []string{"a.example.com"}, Listen: "0.0.0.0:443", Source: "acme", ACMERequestID: "r1", CertificateID: "left-over"}
+	if raw, _ := json.Marshal(acme.BundleEntry()); string(raw) != `{"listen":"0.0.0.0:443","hosts":["a.example.com"],"source":"acme","acme_request_id":"r1"}` {
+		t.Errorf("entry of an acme source: %s", raw)
+	}
+	if e := (AppTLS{Mode: "proxy", Hosts: []string{"a.example.com"}, Source: "acme"}).BundleEntry(); e != nil {
+		t.Errorf("a proxy application has an entry: %+v", e)
 	}
 }
