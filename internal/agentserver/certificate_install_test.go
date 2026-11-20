@@ -422,8 +422,7 @@ func TestOnlyMissingStatusOfAnUploadedCertificateStartsADelivery(t *testing.T) {
 			cs := missingStatus()
 			tc.change(cs, f.store)
 			f.s.handleCertificateStatus(handleOf(true, sent), cs)
-			// The status is judged on this call; only the delivery it may start runs on a goroutine.
-			f.s.waitDeliveries(t)
+			// The status and the delivery it may start are handled on this call.
 			if tc.starts {
 				if len(sent.installs()) != 1 {
 					t.Fatal("no install was sent")
@@ -521,7 +520,7 @@ func TestStreamResendLimitAndNewBundleGeneration(t *testing.T) {
 	st.settle(t, f)
 	st.noInstall(t, 200*time.Millisecond)
 
-	env.loader.set(8, `{"routes":[{"host":"shop.example"}]}`)
+	env.loader.set(8, certBundleJSON())
 	env.s.PushBundleToProject(e2eProject)
 	st.waitFor(t, func(m *agentv1.ServerMessage) bool { return m.GetBundle().GetGeneration() == 8 }, 3*time.Second)
 	sendStatus(t, st, missingStatus())
@@ -874,6 +873,127 @@ func TestFeaturesAreStoredBeforeTheStreamIsRegistered(t *testing.T) {
 	}
 }
 
+// A delivery is made on the receive loop, with the writes it causes: when a status that asks for a key
+// is handled and the key does not open, the failed status is stored before the call returns, in order
+// with the statuses of the stream, not later from another goroutine.
+func TestKeyThatDoesNotOpenIsRecordedOnTheReceiveLoop(t *testing.T) {
+	f := newCertFixture(t)
+	f.store.delivery.KeyCiphertext = "not sealed"
+	f.s.handleCertificateStatus(handleOf(true, &sentLog{}), missingStatus())
+	failed := f.store.reportsOf("failed")
+	if len(failed) != 1 || !strings.Contains(failed[0].Error, certKeyUnreadable) {
+		t.Fatalf("failed statuses when the call returned: %+v", failed)
+	}
+	reports := f.store.seenReports()
+	if len(reports) != 2 || reports[0].State != "missing" || reports[1].State != "failed" {
+		t.Fatalf("statuses in the order they were stored: %+v", reports)
+	}
+	if len(f.audit.of(repository.AuditAgentCertificateRefused)) != 1 {
+		t.Fatal("the refusal was not audited when the call returned")
+	}
+}
+
+// The agent repeats missing about once a minute. After a refusal that the same bytes would meet
+// again, the repeat must not wipe the failed status, which says why; after any other refusal, or in
+// another bundle generation, or for another certificate, it is stored like any other status.
+func TestRepeatedMissingKeepsAPermanentFailure(t *testing.T) {
+	failedRow := func(cert string) repository.StatusPrior {
+		return repository.StatusPrior{Stored: true, AgentID: e2eAgentID, Source: "uploaded", State: "failed", CertificateID: cert,
+			Error: "the agent refused the certificate (bad_pem)", ReceivedAt: time.Now().Add(-10 * time.Minute)}
+	}
+	for _, tc := range []struct {
+		name    string
+		prior   repository.StatusPrior
+		prepare func(f *certFixture, h *streamHandle)
+		written bool
+	}{
+		{"after a permanent refusal", failedRow(certTestCert), func(f *certFixture, h *streamHandle) { h.blockCertificate(certTestCert, 4, f.clock.now()) }, false},
+		{"in the next bundle generation", failedRow(certTestCert), func(f *certFixture, h *streamHandle) {
+			h.blockCertificate(certTestCert, 3, f.clock.now())
+		}, true},
+		{"after a refusal that can pass later", failedRow(certTestCert), func(f *certFixture, h *streamHandle) {}, true},
+		{"the failure is of another certificate", failedRow("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), func(f *certFixture, h *streamHandle) {
+			h.blockCertificate(certTestCert, 4, f.clock.now())
+		}, true},
+		{"the stored status is not a failure", repository.StatusPrior{Stored: true, AgentID: e2eAgentID, Source: "uploaded", State: "active", CertificateID: certTestCert,
+			ReceivedAt: time.Now().Add(-10 * time.Minute)}, func(f *certFixture, h *streamHandle) { h.blockCertificate(certTestCert, 4, f.clock.now()) }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCertFixture(t)
+			sent := &sentLog{}
+			h := handleOf(true, sent)
+			setGeneration(h, 4)
+			f.store.prior = tc.prior
+			tc.prepare(f, h)
+			f.s.handleCertificateStatus(h, missingStatus())
+			missing := f.store.reportsOf("missing")
+			if (len(missing) == 1) != tc.written {
+				t.Fatalf("missing written = %v, want %v", len(missing) == 1, tc.written)
+			}
+			if !tc.written && len(sent.installs()) != 0 {
+				t.Fatal("a blocked certificate was sent again")
+			}
+		})
+	}
+}
+
+// A status for an app that the last bundle sent on the stream does not turn TLS on for is dropped
+// before it costs anything: not a token of the budget, and not a query.
+func TestStatusOfAnAppOutsideTheBundleCostsNothing(t *testing.T) {
+	f := newCertFixture(t)
+	h := handleOf(false, &sentLog{})
+	stranger := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	for i := 0; i < 3*certStatusBurst; i++ {
+		f.s.handleCertificateStatus(h, &agentv1.CertificateStatus{AppId: stranger, Source: "acme", State: "pending", RequestId: "r"})
+	}
+	if f.store.priorReads() != 0 || len(f.store.seenReports()) != 0 || len(h.statusBudgets) != 0 {
+		t.Fatalf("%d reads, %d reports, %d budgets for an app that is not in the bundle", f.store.priorReads(), len(f.store.seenReports()), len(h.statusBudgets))
+	}
+	// A stream that was sent no bundle at all has none to report on.
+	h.tlsApps = nil
+	f.s.handleCertificateStatus(h, &agentv1.CertificateStatus{AppId: certTestApp, Source: "acme", State: "pending", RequestId: "r"})
+	if f.store.priorReads() != 0 {
+		t.Fatal("a stream that was sent no bundle was read")
+	}
+}
+
+// The apps a stream may report on are those whose entry turns TLS on in the last bundle sent to it,
+// and the next bundle replaces them.
+func TestTLSAppsOfTheLastBundle(t *testing.T) {
+	h := &streamHandle{}
+	send := func(gen int64, body string) {
+		if err := h.sendHostBundle("waf_config", &agentv1.ServerMessage{Kind: &agentv1.ServerMessage_Bundle{Bundle: &agentv1.BundleUpdate{
+			CommandId: "c", Generation: gen, BundleJson: []byte(body),
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.send = func(*agentv1.ServerMessage) error { return nil }
+	send(1, `{"apps":[{"app_id":"AAAAAAAA-aaaa-4aaa-8aaa-aaaaaaaaaaaa","tls":{"source":"acme"}},{"app_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},`+
+		`{"app_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","tls":null}]}`)
+	if !h.inTLSBundle("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") || h.inTLSBundle("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb") || h.inTLSBundle("cccccccc-cccc-4ccc-8ccc-cccccccccccc") {
+		t.Fatalf("apps of the first bundle: %v", h.tlsApps)
+	}
+	send(2, `{"apps":[{"app_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","tls":{"source":"uploaded"}}]}`)
+	if h.inTLSBundle("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") || !h.inTLSBundle("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb") {
+		t.Fatalf("apps of the second bundle: %v", h.tlsApps)
+	}
+	// A bundle that is not JSON, and another kind of bundle, leave nothing and change nothing.
+	send(3, `not json`)
+	if len(h.tlsApps) != 0 {
+		t.Fatalf("apps of a bundle that is no JSON: %v", h.tlsApps)
+	}
+	send(4, `{"apps":[{"app_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","tls":{"source":"uploaded"}}]}`)
+	if err := h.sendHostBundle("trace_policies", &agentv1.ServerMessage{Kind: &agentv1.ServerMessage_Bundle{Bundle: &agentv1.BundleUpdate{
+		CommandId: "t", Generation: 1, BundleJson: []byte(`{"apps":[]}`),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !h.inTLSBundle("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb") {
+		t.Fatal("a bundle of another kind replaced the apps of the WAF bundle")
+	}
+}
+
 // ---- helpers for the gRPC tests ----
 
 // newCertEnv is the server of stream_e2e_test.go with the TLS storage and the audit log replaced by
@@ -882,6 +1002,7 @@ func newCertEnv(t *testing.T, bound bool) (*e2eEnv, *certFixture) {
 	t.Helper()
 	env := newE2EEnv(t)
 	f := newCertFixture(t)
+	env.loader.set(7, certBundleJSON())
 	env.s.certs, env.s.audit, env.s.KeyCrypto, env.s.clock = f.store, f.audit, f.enc, f.clock.now
 	f.s = env.s
 	if bound {
@@ -892,11 +1013,28 @@ func newCertEnv(t *testing.T, bound bool) (*e2eEnv, *certFixture) {
 	return env, f
 }
 
+// certSentinels is how many apps beyond certTestApp the bundle of the tests of the gRPC server holds, for
+// settle.
+const certSentinels = 24
+
+func certSentinelApp(i int) string { return fmt.Sprintf("00000000-0000-4000-8000-%012d", i) }
+
+// certBundleJSON is a WAF bundle that turns TLS on for certTestApp and the sentinel apps. The server
+// takes from it which apps an agent may report on.
+func certBundleJSON() string {
+	apps := []string{`{"app_id":"` + certTestApp + `","tls":{"source":"uploaded"}}`}
+	for i := 1; i <= certSentinels; i++ {
+		apps = append(apps, `{"app_id":"`+certSentinelApp(i)+`","tls":{"source":"acme"}}`)
+	}
+	return `{"apps":[` + strings.Join(apps, ",") + `]}`
+}
+
 // certStream is an agent stream whose messages are read on a goroutine, so a test can wait for one
 // kind of message or check that none comes.
 type certStream struct {
-	st agentv1.AgentControl_StreamClient
-	in chan *agentv1.ServerMessage
+	st        agentv1.AgentControl_StreamClient
+	in        chan *agentv1.ServerMessage
+	sentinels int
 }
 
 func startCertStream(st agentv1.AgentControl_StreamClient) *certStream {
@@ -973,12 +1111,16 @@ func connectCertStreamWith(t *testing.T, env *e2eEnv, cert *tls.Certificate, fea
 
 // settle waits until the stream has handled everything it was sent before this call. The statuses of
 // a stream are handled in the order they arrive, so once one sent last is stored, the ones before it
-// were handled, and the deliveries they started have been counted and are waited for. Each call uses
-// an app of its own, since the budget of one app is a few statuses.
+// were handled, deliveries included. Each call uses an app of the bundle of its own, since the budget of
+// one app is a few statuses.
 func (c *certStream) settle(t *testing.T, f *certFixture) {
 	t.Helper()
+	if c.sentinels >= certSentinels {
+		t.Fatal("no sentinel app is left in the bundle")
+	}
+	c.sentinels++
 	id := uuid.NewString()
-	sendStatus(t, c, &agentv1.CertificateStatus{AppId: uuid.NewString(), Source: "acme", State: "pending", RequestId: id})
+	sendStatus(t, c, &agentv1.CertificateStatus{AppId: certSentinelApp(c.sentinels), Source: "acme", State: "pending", RequestId: id})
 	waitUntil(t, "the stream to handle its messages", func() bool {
 		for _, r := range f.store.seenReports() {
 			if r.RequestID == id {
@@ -987,7 +1129,6 @@ func (c *certStream) settle(t *testing.T, f *certFixture) {
 		}
 		return false
 	})
-	f.s.waitDeliveries(t)
 }
 
 func sendStatus(t *testing.T, c *certStream, cs *agentv1.CertificateStatus) {

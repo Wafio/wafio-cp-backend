@@ -178,3 +178,51 @@ func TestAppTLSPutBundleCheck(t *testing.T) {
 		t.Error("measured the bundle of an application that no agent serves")
 	}
 }
+
+// An application with no listen port or no upstream is left out of the bundle, so a TLS entry with
+// many hosts counts only from the route change that gives it both. That change is measured with the
+// entry, in the same way as when the application is in maintenance mode, and refused with 409
+// TLS_BUNDLE_TOO_LARGE when the bundle of its agent would pass what an agent accepts.
+func TestDBAppTLSRouteChangeThatBringsTheEntryIn(t *testing.T) {
+	tf := newTLSFixture(t)
+	owner := tf.tokens["owner"]
+	ctx := context.Background()
+	base := "/api/projects/" + tf.project + "/apps/"
+
+	r := call(t, tf.app, http.MethodPost, "/api/projects/"+tf.project+"/apps", owner, map[string]any{"name": "no-route-" + tf.name})
+	wantStatus(t, "create an application without a route", r, fiber.StatusCreated, "")
+	created, _ := r.body["app"].(map[string]any)
+	app, _ := created["id"].(string)
+	wantStatus(t, "assign it", call(t, tf.app, http.MethodPut, base+app+"/waf-agent", owner, map[string]string{"agent_id": tf.agentID, "mode": "block"}), fiber.StatusOK, "")
+	tlsURL := tf.tlsURL(app)
+	wantStatus(t, "its 100 hosts are not in the bundle yet, so they fit",
+		tf.do(t, http.MethodPut, tlsURL, "owner", gateway("acme", longHosts(100)...)), fiber.StatusOK, "")
+	tf.padBundle(t, 2000)
+
+	update := func(body map[string]any) testResponse { return call(t, tf.app, http.MethodPut, base+app, owner, body) }
+	routeURL := "/api/projects/" + tf.project + "/agents/" + tf.agentID + "/routes/" + app
+	wantStatus(t, "rename", update(map[string]any{"name": "still-no-route-" + tf.name}), fiber.StatusOK, "")
+	wantStatus(t, "a listen port without an upstream", update(map[string]any{"listen_port": 18191}), fiber.StatusOK, "")
+	gen := tf.generation(t, tf.agentID)
+	for name, send := range map[string]func() testResponse{
+		"application update": func() testResponse { return update(map[string]any{"upstream_url": "http://10.0.0.7:3000"}) },
+		"route update": func() testResponse {
+			return call(t, tf.app, http.MethodPut, routeURL, owner, map[string]any{"upstream": "http://10.0.0.7:3000"})
+		},
+	} {
+		r := send()
+		wantStatus(t, name+" that brings the entry in", r, fiber.StatusConflict, "TLS_BUNDLE_TOO_LARGE")
+		text, _ := r.body["error"].(string)
+		if !strings.HasPrefix(text, fmt.Sprintf(`This application is served over TLS. With this route the WAF agent %q starts serving it`, tf.agentName)) ||
+			!strings.Contains(text, " bytes, but it can receive at most 4,193,280 bytes. ") {
+			t.Errorf("409 text: %s", r.raw)
+		}
+	}
+	if row, sent, err := tf.repo.WAF.BundleRowForApp(ctx, app, "block"); err != nil || sent || row.Upstream != "" || tf.generation(t, tf.agentID) != gen {
+		t.Errorf("a refused route change was stored: %+v, sent %v, %v", row, sent, err)
+	}
+
+	// With fewer hosts the entry is small, and the same change goes through.
+	wantStatus(t, "fewer hosts", tf.do(t, http.MethodPut, tlsURL, "owner", gateway("acme", longHosts(1)...)), fiber.StatusOK, "")
+	wantStatus(t, "the route change goes through", update(map[string]any{"upstream_url": "http://10.0.0.7:3000"}), fiber.StatusOK, "")
+}

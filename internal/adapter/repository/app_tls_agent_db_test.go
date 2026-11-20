@@ -253,9 +253,11 @@ func TestDBUpdateAgentFeaturesStoresTLSCertificates(t *testing.T) {
 	}
 }
 
-// An agent row that has a host takes the TLS flag from a stream bound to a host only: a project-wide
-// credential under the same name leaves it as it is, whether it says true or false. The other two
-// flags are written either way, and a row without a host takes the flag from any stream.
+// An agent row that a host-bound credential is bound to (host, kind waf and name) takes the TLS flag
+// from a stream bound to a host only: a project-wide credential under the same name leaves it as it is,
+// whether it says true or false. The other two flags are written either way. Any other row takes the
+// flag from any stream, a row that has a host included: a project-wide agent that a host was linked
+// to by its host name has no such credential, and its own stream must be able to write the flag.
 func TestDBUpdateAgentFeaturesTLSFlagOfAHostAgent(t *testing.T) {
 	f := newTLSDB(t)
 	ctx := context.Background()
@@ -316,5 +318,45 @@ func TestDBUpdateAgentFeaturesTLSFlagOfAHostAgent(t *testing.T) {
 	write(free, nil, &no, false)
 	if got := flag(free); got != "false" {
 		t.Fatalf("an agent without a host: %s", got)
+	}
+
+	// A row that was linked to a host, with no credential bound to it, is the agent of a project-wide
+	// credential: its own stream writes the flag. A credential of kind host does not make it a bound
+	// row; one of kind waf for its host and name does.
+	linkedAgent := func(kind string) string {
+		t.Helper()
+		agent := f.agent(nil)
+		host := uuid.NewString()
+		f.exec(`INSERT INTO hosts (id, project_id, user_id, name, labels, host_key_prefix, host_key_hash) VALUES ($1,$2,$3,$4,'{}'::jsonb,'wafh_l','x')`,
+			host, f.project, f.user, "linked-"+host[:8])
+		f.exec(`UPDATE agents SET host_id = $2 WHERE id = $1`, agent, host)
+		if kind != "" {
+			f.exec(`INSERT INTO mtls_credentials (project_id, name, client_cert_pem, cert_fingerprint_sha256, host_id, agent_kind, agent_name)
+				SELECT project_id, 'cred-' || id::text, 'pem', $3, $2::uuid, $4, name FROM agents WHERE id = $1`, agent, host, strings.Repeat(host[:8], 8), kind)
+		}
+		return agent
+	}
+	linked := linkedAgent("")
+	write(linked, nil, &yes, false)
+	if got := flag(linked); got != "true" {
+		t.Fatalf("a linked agent with no bound credential: flag %s, its stream could not write it", got)
+	}
+	write(linked, nil, &no, false)
+	if got := flag(linked); got != "false" {
+		t.Fatalf("a linked agent with no bound credential: flag %s", got)
+	}
+	otherKind := linkedAgent("host")
+	write(otherKind, nil, &yes, false)
+	if got := flag(otherKind); got != "true" {
+		t.Fatalf("a credential of the other kind made the row a bound one: flag %s", got)
+	}
+	bound := linkedAgent("waf")
+	write(bound, nil, &yes, false)
+	if got := flag(bound); got != "null" {
+		t.Fatalf("a project-wide stream wrote the flag of a row with a bound credential: %s", got)
+	}
+	write(bound, nil, &yes, true)
+	if got := flag(bound); got != "true" {
+		t.Fatalf("a bound stream could not write the flag: %s", got)
 	}
 }

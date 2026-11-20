@@ -3,8 +3,10 @@ package agentserver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,10 +21,11 @@ import (
 // bundle entry turns TLS on. Every field is untrusted: the checks of docs/agent-protocol.md run
 // here and in UpsertTLSStatus, and a status that fails one is dropped without a word to the agent.
 //
-// The order is the cost order. Fields that need no lookup are judged first, then the budget of the
-// app on this stream (the agent chooses the app ids), then one query that says whether this agent may
-// report on this app at all and what is stored; only then is the chain parsed, within its own budget,
-// and the status written unless it would change nothing.
+// The order is the cost order. Fields that need no lookup are judged first, then whether the last
+// bundle sent on this stream turns TLS on for the app, then the budget of the app on this stream (the
+// agent chooses the app ids), then one query that says whether this agent may report on this app at
+// all and what is stored; only then is the chain parsed, within its own budget, and the status
+// written unless it would change nothing.
 
 const (
 	certStatusRequestIDMax = 128
@@ -109,8 +112,10 @@ func (h *streamHandle) takeBudget(app string, now time.Time, parse bool) bool {
 var certStatusStates = []string{"pending", "active", "failed", "missing"}
 
 // handleCertificateStatus stores the report and, when it says that an uploaded certificate is
-// missing, starts the delivery. It runs on the receive loop of the stream, so statuses of one agent
-// are stored in the order it sent them.
+// missing, delivers the key. It runs on the receive loop of the stream, so statuses of one agent are
+// stored in the order it sent them, and so are the writes that a delivery makes (a refusal, a key that
+// does not open). The ack of the install comes through the same loop, so the delivery does not wait
+// for it; a send is bounded by the push deadline.
 func (s *Server) handleCertificateStatus(h *streamHandle, cs *agentv1.CertificateStatus) {
 	defer recoverPanic("certificate-status")
 	// Only a WAF agent that said it serves TLS certificates sends this message.
@@ -123,7 +128,7 @@ func (s *Server) handleCertificateStatus(h *streamHandle, cs *agentv1.Certificat
 	}
 	now := s.now()
 	rep, ok := certificateReport(h, cs, now)
-	if !ok || !h.takeBudget(rep.AppID, now, false) {
+	if !ok || !h.inTLSBundle(rep.AppID) || !h.takeBudget(rep.AppID, now, false) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -138,6 +143,14 @@ func (s *Server) handleCertificateStatus(h *streamHandle, cs *agentv1.Certificat
 	if !ok || !s.readChain(h, &rep, prior.Leaf, cs.GetChainPem(), now) {
 		return
 	}
+	asksForKey := rep.State == "missing" && rep.Source == domain.TLSSourceUploaded
+	// The agent repeats missing while it lacks the certificate. After a refusal that the same bytes
+	// would meet again, the repeat must not wipe the failure, which tells the owner why: the key is
+	// not sent again in this bundle generation, and the status says what is stored already.
+	if asksForKey && prior.Stored && prior.State == "failed" && prior.CertificateID == rep.CertificateID &&
+		h.certificateBlocked(rep.CertificateID, h.desiredGeneration()) {
+		return
+	}
 	if !prior.Unchanged(rep, now, certStatusRefresh) {
 		stored, err := store.UpsertTLSStatus(ctx, rep)
 		if err != nil {
@@ -148,8 +161,8 @@ func (s *Server) handleCertificateStatus(h *streamHandle, cs *agentv1.Certificat
 			return
 		}
 	}
-	if rep.State == "missing" && rep.Source == domain.TLSSourceUploaded {
-		s.startDelivery(h, rep.AppID, rep.CertificateID)
+	if asksForKey {
+		s.deliverCertificate(h, rep.AppID, rep.CertificateID)
 	}
 }
 
@@ -242,4 +255,34 @@ func isLowerHex(s string, n int) bool {
 		}
 	}
 	return true
+}
+
+// tlsAppIDs returns the ids of the apps whose entry in a WAF bundle turns TLS on. An agent reports
+// the certificate of those apps only; a status for any other app id is not from the bundle this
+// stream was sent and is dropped before it costs anything.
+func tlsAppIDs(bundle []byte) map[string]struct{} {
+	var doc struct {
+		Apps []struct {
+			AppID string          `json:"app_id"`
+			TLS   json.RawMessage `json:"tls"`
+		} `json:"apps"`
+	}
+	if json.Unmarshal(bundle, &doc) != nil {
+		return nil
+	}
+	ids := make(map[string]struct{})
+	for _, a := range doc.Apps {
+		if len(a.TLS) > 0 && string(a.TLS) != "null" {
+			ids[strings.ToLower(a.AppID)] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// inTLSBundle says whether the last WAF bundle sent on this stream turns TLS on for the app.
+func (h *streamHandle) inTLSBundle(appID string) bool {
+	h.bundleMu.Lock()
+	defer h.bundleMu.Unlock()
+	_, ok := h.tlsApps[appID]
+	return ok
 }

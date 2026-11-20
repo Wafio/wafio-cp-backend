@@ -72,6 +72,10 @@ func (h *streamHandle) sendHostBundle(kind string, msg *agentv1.ServerMessage) e
 	h.bundleSendMu.Lock()
 	defer h.bundleSendMu.Unlock()
 	b := msg.GetBundle()
+	var apps map[string]struct{}
+	if kind == "waf_config" {
+		apps = tlsAppIDs(b.GetBundleJson())
+	}
 	h.bundleMu.Lock()
 	if h.bundleStates == nil {
 		h.bundleStates = make(map[string]HostBundleApplyStatus)
@@ -85,6 +89,9 @@ func (h *streamHandle) sendHostBundle(kind string, msg *agentv1.ServerMessage) e
 		CommandID: b.GetCommandId(), DesiredGeneration: b.GetGeneration(), AppliedGeneration: previous.AppliedGeneration,
 		Status: "pending", Source: previous.Source, SavedGeneration: previous.SavedGeneration,
 		DNSRelaxed: previous.DNSRelaxed, UpdatedAt: time.Now().UTC(),
+	}
+	if kind == "waf_config" {
+		h.tlsApps = apps
 	}
 	h.bundleMu.Unlock()
 	if err := h.send(msg); err != nil {

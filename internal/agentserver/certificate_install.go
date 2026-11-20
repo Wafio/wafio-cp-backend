@@ -190,21 +190,22 @@ func (h *streamHandle) blockCertificate(certID string, generation int64, now tim
 	h.certClaims[certID] = certClaim{generation: generation, at: now, blocked: true}
 }
 
+// certificateBlocked says whether a refusal that the same bytes would meet again keeps certID from
+// this stream in this bundle generation.
+func (h *streamHandle) certificateBlocked(certID string, generation int64) bool {
+	h.certMu.Lock()
+	defer h.certMu.Unlock()
+	c, ok := h.certClaims[certID]
+	return ok && c.blocked && c.generation == generation
+}
+
 // stillOpen says whether the stream takes part: not ended and not revoked.
 func (h *streamHandle) stillOpen() bool { return h.open == nil || h.open() }
 
-// startDelivery runs deliverCertificate on its own goroutine, counted so that a test can wait for it.
-func (s *Server) startDelivery(h *streamHandle, appID, certID string) {
-	s.certRuns.Add(1)
-	go func() {
-		defer s.certEnds.Add(1)
-		s.deliverCertificate(h, appID, certID)
-	}()
-}
-
 // deliverCertificate sends the key of the current uploaded certificate of the app to h, after every
-// check. It runs on its own goroutine: the ack arrives through the receive loop that started it. A
-// refusal at any step sends nothing and says nothing to the agent.
+// check. It runs on the receive loop, called by handleCertificateStatus, which is what keeps the
+// statuses that it writes in order with the others of the stream; the ack arrives through the same
+// loop later. A refusal at any step sends nothing and says nothing to the agent.
 func (s *Server) deliverCertificate(h *streamHandle, appID, certID string) {
 	defer recoverPanic("certificate-install")
 	store := s.certStore()

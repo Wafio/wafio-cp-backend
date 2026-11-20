@@ -34,6 +34,8 @@ const (
 	certTestHost = "host-e2e"
 	certTestApp  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	certTestCert = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	// certTestOtherApp is a second app of the bundle a test handle was sent.
+	certTestOtherApp = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 )
 
 // testCert is a leaf made for a test: the chain as an agent reports it, the key as it is stored and
@@ -347,6 +349,7 @@ func handleOf(bound bool, sent *sentLog) *streamHandle {
 		agentID: e2eAgentID, projectID: e2eProject, credentialID: e2eCred, agentName: e2eAgent, agentKind: "waf",
 		hostID: certTestHost, features: []string{engine.FeatureScriptRules, engine.FeatureTLSCertificates},
 		send: sent.send, peerIP: "192.0.2.7",
+		tlsApps: map[string]struct{}{certTestApp: {}, certTestOtherApp: {}},
 	}
 	if bound {
 		h.bound, h.binding = true, credentialBinding{hostID: certTestHost, kind: "waf", name: e2eAgent}
@@ -383,10 +386,4 @@ func (s *Server) onlyPending(t *testing.T) string {
 		return id
 	}
 	return ""
-}
-
-// waitDeliveries waits until every delivery that a status started has ended.
-func (s *Server) waitDeliveries(t *testing.T) {
-	t.Helper()
-	waitUntil(t, "deliveries to end", func() bool { return s.certEnds.Load() == s.certRuns.Load() })
 }

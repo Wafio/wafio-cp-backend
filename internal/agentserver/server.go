@@ -112,9 +112,6 @@ type Server struct {
 	// certInstalls holds the CertificateInstall messages that wait for their ack, by command id.
 	certMu       sync.Mutex
 	certInstalls map[string]*certInstall
-	// certRuns and certEnds count the deliveries started and finished (certificate_status.go), so a
-	// test can wait for the ones a status started.
-	certRuns, certEnds atomic.Int64
 	// certs, audit and clock replace the TLS repository, the audit repository and the wall clock,
 	// certTimeout the time an install waits for its ack, and afterWipe is called with the key buffer
 	// once it was zeroed after a send (tests only); nil or 0 means Repo.TLS, Repo.Audit, time.Now,
@@ -259,6 +256,9 @@ type streamHandle struct {
 	bound   bool
 	// peerIP is the address of the agent as the transport saw it, for audit rows.
 	peerIP string
+	// tlsApps are the ids of the apps whose entry in the last WAF bundle sent on this stream turns TLS
+	// on, under bundleMu. A status for any other app is dropped before it costs a query.
+	tlsApps map[string]struct{}
 	// open reports whether the stream is still taking part: not ended, revoked, or cut after a push
 	// that missed its deadline. Nil for handles built in tests, which count as open.
 	open func() bool

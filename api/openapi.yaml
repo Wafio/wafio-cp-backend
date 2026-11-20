@@ -8564,7 +8564,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or a new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one (LISTEN_CONFLICT; field is listen_port). A save that sends the listen host and port the application already has is not checked again. Nothing is saved.'
+          description: 'Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or the application is in gateway mode and the change gives it a listen port and an upstream for the first time, which brings its TLS entry (up to 100 hosts) into that bundle, and the bundle would be larger than an agent accepts (TLS_BUNDLE_TOO_LARGE), or a new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one (LISTEN_CONFLICT; field is listen_port). A save that sends the listen host and port the application already has is not checked again. Nothing is saved.'
           content:
             application/json:
               schema:
@@ -15810,7 +15810,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts), LISTEN_CONFLICT (the new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one; field is listen_port). A save that sends the listen host and port the route already has is not checked again. Nothing is saved.'
+          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts), TLS_BUNDLE_TOO_LARGE (the same for an application in gateway mode, whose TLS entry comes into the bundle), LISTEN_CONFLICT (the new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one; field is listen_port). A save that sends the listen host and port the route already has is not checked again. Nothing is saved.'
           content:
             application/json:
               schema:
