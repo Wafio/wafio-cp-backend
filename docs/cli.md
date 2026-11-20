@@ -45,6 +45,20 @@ Both subcommands read the database settings from the configuration.
 
 Security: authn=shell-access-to-the-host; authz=database-credentials-from-config; secrets=password-prompted-by-default
 
+## command: wafio rekey
+
+Re-encrypts every value that is sealed with `totp.enc_key`, from the old key to a new one: `users.totp_secret` and `users.totp_pending_secret`, the SMTP password and the MalwareBazaar key saved in `system_settings`, and the private keys of uploaded certificates (`app_certificate_keys`, sealed with the project and certificate they belong to). Run it after the operator changed `totp.enc_key`; the steps are in `docs/operations/rotate-encryption-key.md`.
+
+| Flag | Type | Rules |
+|---|---|---|
+| `--apply` | bool | Default false. Without it the command prints the counts per kind of value (to rewrite, already under the new key, plain text, unreadable) and changes nothing. With it, the values are rewritten in one transaction with a lock on every row it reads. The command refuses to write when a value opens with neither key: it prints which rows and writes nothing at all |
+| `WAFIO_OLD_TOTP_ENC_KEY` | environment | Required. The key that `totp.enc_key` had before, 64 hex characters or base64 of 32 bytes. The command refuses when it is empty, is not a key, or is the same key as `totp.enc_key` in either spelling. It is not read from an argument |
+| `totp.enc_key` | configuration | Required. The new key, from `config/config.yaml` or `WAFIO_TOTP_ENC_KEY`, which the operator has already changed. The command refuses when it is empty or is not a key |
+
+A value that already opens with the new key counts as done and is left alone, so the command can be run again after an interrupted rotation. A value stored in plain text (a TOTP secret from before encryption was on) is left as it is. The command never prints a value or a key; a report names a row by user id, certificate id or setting name. Stop the control plane before `--apply` and start it again after, with the new key. Exit code 1 when a key is refused, when a value opens with neither key (the dry run included), or when the database fails.
+
+Security: authn=shell-access-to-the-host; authz=database-credentials-from-config; secrets=old-key-from-environment-new-key-from-config-values-never-printed; destructive=apply-rewrites-ciphertext-in-one-transaction-dry-run-by-default; audit=counts-printed-to-stdout
+
 ## command: wafio fetch-data
 
 Downloads third-party security data into `security-data/`: GeoIP databases, IP reputation lists, JA4 and JA3 fingerprints, the bot User-Agent list and the malware hash corpus. The files are not stored in the repository.

@@ -916,6 +916,48 @@ func (r *TLSRepo) ListExpiryCandidates(ctx context.Context) ([]ExpiryCandidate, 
 	return out, rows.Err()
 }
 
+// SealedCertificateKey is a private key as it is stored, sealed, with the ids its seal is bound to.
+type SealedCertificateKey struct {
+	ProjectID, CertificateID, Sealed string
+}
+
+// sealedKeys returns every sealed certificate key, locked for update when lock is set. The keys stay
+// sealed. Only the rotation of totp.enc_key reads them this way (see Rekey).
+func sealedKeys(ctx context.Context, tx pgx.Tx, lock bool) ([]SealedCertificateKey, error) {
+	q := `SELECT project_id::text, certificate_id::text, key_ciphertext FROM app_certificate_keys ORDER BY certificate_id`
+	if lock {
+		q += ` FOR UPDATE`
+	}
+	rows, err := tx.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SealedCertificateKey
+	for rows.Next() {
+		var k SealedCertificateKey
+		if err := rows.Scan(&k.ProjectID, &k.CertificateID, &k.Sealed); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// replaceSealedKey writes the key of a certificate sealed again, with another key. It never changes
+// which certificate the key belongs to.
+func replaceSealedKey(ctx context.Context, tx pgx.Tx, projectID, certificateID, sealed string) error {
+	tag, err := tx.Exec(ctx, `UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2 AND project_id = $1`,
+		projectID, certificateID, sealed)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("certificate key row is gone")
+	}
+	return nil
+}
+
 // certExpiryLockKey is the advisory lock of the expiry warning pass, apart from the retention lock.
 const certExpiryLockKey int64 = 0x7761_6669_6f63_7865 // "wafiocxe"
 

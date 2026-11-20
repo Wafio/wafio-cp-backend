@@ -18,8 +18,10 @@ import (
 // The key lives in app_certificate_keys. It is selected only by CertificateForDelivery, inserted
 // only by InsertCertificate and deleted only by retireCertificates (a replace and a delete of the
 // certificate both go through it; an application or project that goes takes its keys by the foreign
-// key, and nothing else deletes them), and none of the writes returns the row. The table and the
-// column are named nowhere else, and no query reads every column of either table.
+// key, and nothing else deletes them), and none of the writes returns the row. The one other reader
+// and writer is the rotation of totp.enc_key: sealedKeys reads the keys still sealed and
+// replaceSealedKey puts them back sealed with the new key, both inside its transaction. The table
+// and the column are named nowhere else, and no query reads every column of either table.
 func keyStatement(sql, fn string, inTLSRepo bool) (delivery bool, problem string) {
 	lower := strings.ToLower(sql)
 	for _, table := range []string{"app_certificates", "app_certificate_keys"} {
@@ -39,6 +41,10 @@ func keyStatement(sql, fn string, inTLSRepo bool) (delivery bool, problem string
 	case fn == "InsertCertificate" && strings.HasPrefix(trimmed, "insert into app_certificate_keys") && !strings.Contains(lower, "returning"):
 		return false, ""
 	case fn == "retireCertificates" && strings.HasPrefix(trimmed, "delete from app_certificate_keys") && !strings.Contains(lower, "returning"):
+		return false, ""
+	case fn == "sealedKeys" && strings.HasPrefix(trimmed, "select") && !strings.Contains(lower, "returning"):
+		return false, ""
+	case fn == "replaceSealedKey" && strings.HasPrefix(trimmed, "update app_certificate_keys set key_ciphertext") && !strings.Contains(lower, "returning"):
 		return false, ""
 	}
 	return false, "names the key table or column in " + fn + ", which may not"
@@ -175,6 +181,14 @@ func TestKeyStatementRules(t *testing.T) {
 		{"inserting and reading it back", `INSERT INTO app_certificate_keys (key_ciphertext) VALUES ($1) RETURNING key_ciphertext`, "InsertCertificate", true, false, true},
 		{"a write outside the repository", `DELETE FROM app_certificate_keys`, "Other", false, false, true},
 		{"updating the key", `UPDATE app_certificate_keys SET key_ciphertext = $2 WHERE certificate_id = $1`, "InsertCertificate", true, false, true},
+		{"the rotation reads the sealed keys", `SELECT project_id::text, certificate_id::text, key_ciphertext FROM app_certificate_keys ORDER BY certificate_id`, "sealedKeys", true, false, false},
+		{"the rotation reads them outside the repository", `SELECT key_ciphertext FROM app_certificate_keys`, "sealedKeys", false, false, true},
+		{"the rotation reads and returns what it writes", `UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2 RETURNING key_ciphertext`, "replaceSealedKey", true, false, true},
+		{"the rotation writes the key back", `UPDATE app_certificate_keys SET key_ciphertext = $3 WHERE certificate_id = $2 AND project_id = $1`, "replaceSealedKey", true, false, false},
+		{"the rotation deletes a key", `DELETE FROM app_certificate_keys WHERE certificate_id = $1`, "replaceSealedKey", true, false, true},
+		{"a read under the name of the rotation write", `SELECT key_ciphertext FROM app_certificate_keys`, "replaceSealedKey", true, false, true},
+		{"a write under the name of the rotation read", `UPDATE app_certificate_keys SET key_ciphertext = $3`, "sealedKeys", true, false, true},
+		{"the rotation reads every column", `SELECT * FROM app_certificate_keys`, "sealedKeys", true, false, true},
 		{"every column", `SELECT * FROM app_certificates WHERE id = $1`, "GetTLS", true, false, true},
 		{"every column of an alias", `SELECT c.* FROM app_certificates c`, "GetTLS", true, false, true},
 		{"every column of the key table", `SELECT * FROM app_certificate_keys`, "GetTLS", true, false, true},

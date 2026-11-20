@@ -89,9 +89,10 @@ jwt:
 # uploaded TLS certificates.
 # enc_key: 32-byte AES-256 key as 64 hex chars or base64. Generate with:
 #   openssl rand -hex 32
-# Required: boot refuses an empty or malformed key. KEEP THIS KEY STABLE AND BACKED UP — losing/changing it makes all
-# encrypted TOTP secrets undecryptable, locking 2FA users out, and every uploaded certificate key unreadable: the
-# certificates must then be uploaded again. Nothing re-encrypts stored values for a new key.
+# Required: boot refuses an empty or malformed key. KEEP THIS KEY STABLE AND BACKED UP. Changing it by hand makes every
+# encrypted value unreadable: 2FA users are locked out, the saved SMTP password and malware key are lost, and the
+# uploaded certificates must be uploaded again. To change the key without losing them, set the new one here and run
+# `wafio rekey` with the old one in WAFIO_OLD_TOTP_ENC_KEY (docs/operations/rotate-encryption-key.md).
 # Env: WAFIO_TOTP_ENC_KEY
 totp:
   enc_key: ""

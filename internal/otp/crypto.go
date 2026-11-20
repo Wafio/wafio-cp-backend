@@ -127,6 +127,10 @@ func (e *KeyIDMismatchError) Error() string {
 	return "ciphertext was sealed with key " + e.Sealed + ", the configured key is " + e.Current
 }
 
+// IsEncrypted reports whether stored has the form Encrypt writes. Plain text, which Decrypt passes
+// through for TOTP secrets that predate encryption, does not.
+func IsEncrypted(stored string) bool { return strings.HasPrefix(stored, totpEncPrefix) }
+
 // IsBound reports whether stored has the form SealBound writes. It looks at the prefix only: a
 // caller that is about to store a value uses it to be sure that it is not storing plain text.
 func IsBound(stored string) bool { return strings.HasPrefix(stored, boundPrefix) }
