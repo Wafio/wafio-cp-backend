@@ -8564,7 +8564,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or a new listen address or proxy_config clashes with the TLS settings of the applications on the agent: the address is used by an HTTPS or redirect listener (LISTEN_CONFLICT) or applications that share an HTTPS listener would get different timeouts or limits (LISTENER_SETTINGS_DIFFER; field names the setting). Nothing is saved.'
+          description: 'Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or a new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one (LISTEN_CONFLICT; field is listen_port). A save that sends the listen host and port the application already has is not checked again. Nothing is saved.'
           content:
             application/json:
               schema:
@@ -9422,7 +9422,7 @@ paths:
     put:
       operationId: AppTLSHandler_Put
       summary: Set how an application is served over TLS
-      description: 'Replaces the TLS settings: mode, hosts (1 to 100 lower-case DNS names without wildcard, IP address or port, unique on one listener of one agent), listen (ip:port or [ipv6]:port, default 0.0.0.0:443), redirect_listen (optional, differs from listen) and source (acme or uploaded, required in gateway mode). A proxy application keeps its settings as a draft and the agent never sees them. The first field that is not valid is answered with INVALID_TLS_SETTINGS and its name. Switching to gateway, or changing the source or the hosts of a gateway application, is checked under a lock on the application and on the bundle of its WAF agent: the agent must not have said that it cannot serve TLS certificates (TLS_UNSUPPORTED; an agent that never said is let through); for the uploaded source the application needs a current certificate that has not expired (CERTIFICATE_REQUIRED) and covers every host (CERTIFICATE_DOES_NOT_COVER), and its agent needs a credential bound to its host, kind and name (AGENT_NOT_HOST_BOUND: enroll the agent again with a host key); for acme a request id is minted when there is none. Every PUT of a gateway application is also checked against the other applications on its agent, which the agent would otherwise refuse as a whole: a listener address is used by one kind of listener only (LISTEN_CONFLICT: an address of a plain listener, an HTTPS listener or a redirect listener, or two addresses on one port where one is a wildcard), a host is served once per HTTPS listener (HOST_CONFLICT), and applications that share an HTTPS listener need equal read and write timeouts, body limit and read buffer in proxy_config (LISTENER_SETTINGS_DIFFER). Nothing is saved when a check fails. Saves the settings, drops the status the agent reported for another source, raises the bundle generation and pushes it to the project agents when the bundle changed, and writes an audit entry (app.tls_updated). The answer has the shape of GET and carries a dns_mismatch warning for each host that resolves to addresses none of which is a public address the agent host reported (the public_ip and primary_ip of its host information): the lookups share 2 seconds, a host that does not resolve in time or at all gives no warning, and there is no warning when the host reported no public address. Nothing about DNS is stored.'
+      description: 'Replaces the TLS settings: mode, hosts (1 to 100 lower-case DNS names without wildcard, IP address or port, unique on one listener of one agent), listen (ip:port or [ipv6]:port, default 0.0.0.0:443), redirect_listen (optional, differs from listen) and source (acme or uploaded, required in gateway mode). A proxy application keeps its settings as a draft and the agent never sees them. The first field that is not valid is answered with INVALID_TLS_SETTINGS and its name. Switching to gateway, or changing the source or the hosts of a gateway application, is checked under a lock on the application and on the bundle of its WAF agent: the agent must not have said that it cannot serve TLS certificates (TLS_UNSUPPORTED; an agent that never said is let through); for the uploaded source the application needs a current certificate that has not expired (CERTIFICATE_REQUIRED) and covers every host (CERTIFICATE_DOES_NOT_COVER), and its agent needs a credential bound to its host, kind and name (AGENT_NOT_HOST_BOUND: enroll the agent again with a host key); for acme a request id is minted when there is none. Every PUT of a gateway application is also checked against the other applications on its agent, which the agent would otherwise refuse as a whole: a listener address is used by one kind of listener only (LISTEN_CONFLICT: an address of a plain listener, an HTTPS listener or a redirect listener, or two addresses on one port where one is a wildcard), and a host is served once per HTTPS listener (HOST_CONFLICT). Applications that share an HTTPS listener may have different timeouts and limits in proxy_config: the agent uses the largest value per listener and applies the limits of each application after routing. Nothing is saved when a check fails. Saves the settings, drops the status the agent reported for another source, raises the bundle generation and pushes it to the project agents when the bundle changed, and writes an audit entry (app.tls_updated). The answer has the shape of GET and, for the hosts this save looks up, carries a dns_mismatch warning for each host that resolves to at least one public address when none of its public addresses is a public address the agent host reported (the public_ip and primary_ip of its host information). Only a save that switches the application to gateway mode looks up all its hosts, and a save that stays in gateway mode looks up the hosts it added; a draft in proxy mode looks up nothing. One save looks up at most 10 hosts, the rest are not checked, and all lookups share 2 seconds. The hint is silent when the agent host reported no public address (the Rust WAF agent reports only primary_ip, which behind a NAT or on a cloud VM is a private address, so it stays silent there), for a host that does not resolve, for one that resolves to private addresses only (the two look the same), and for a host whose lookup did not finish in time. Nothing about DNS is stored.'
       tags:
         - Applications
         - WAF agents
@@ -9501,7 +9501,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'A check failed and nothing is saved. Codes: TLS_UNSUPPORTED (the agent said it cannot serve TLS certificates), CERTIFICATE_REQUIRED (an uploaded source needs a current certificate that has not expired), CERTIFICATE_DOES_NOT_COVER (the certificate does not cover a host; the answer carries host), AGENT_NOT_HOST_BOUND (the agent has no credential bound to its host, kind and name), LISTEN_CONFLICT, LISTENER_SETTINGS_DIFFER and HOST_CONFLICT (another application on the agent; field names the setting that must change).'
+          description: 'A check failed and nothing is saved. Codes: TLS_UNSUPPORTED (the agent said it cannot serve TLS certificates), CERTIFICATE_REQUIRED (an uploaded source needs a current certificate that has not expired), CERTIFICATE_DOES_NOT_COVER (the certificate does not cover a host; the answer carries host), AGENT_NOT_HOST_BOUND (the agent has no credential bound to its host, kind and name), LISTEN_CONFLICT and HOST_CONFLICT (another application on the agent; field names the setting that must change).'
           content:
             application/json:
               schema:
@@ -9610,7 +9610,7 @@ paths:
     post:
       operationId: AppTLSHandler_UploadCertificate
       summary: Upload the certificate and private key of an application
-      description: 'Stores a certificate chain and its private key as the current certificate of the application and sets the source to uploaded. The body is at most 96 KiB. chain_pem holds only CERTIFICATE blocks, leaf first (1 to 10 certificates, at most 64 KiB; a root at the end is dropped); key_pem holds one unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block (at most 16 KiB; RSA of 2048 to 4096 bits or ECDSA P-256 or P-384). The control plane checks the order of the chain, that the leaf is no CA, the dates (a certificate valid from at most 24 hours ahead is accepted), that no certificate is signed with SHA-1 or MD5, that the leaf covers every host of the application, and that the key matches the leaf. Every refusal is 400 INVALID_CERTIFICATE with field (chain_pem, key_pem, or body when the request is larger than 96 KiB) and reason: bad_pem, private_key_in_chain, too_large, chain_order, ca_leaf, expired, not_yet_valid, weak_signature, names_do_not_cover (the answer carries host), key_encrypted (the message names the openssl command that removes the passphrase), pkcs12 (the message names the openssl command that converts the file), unsupported_key or key_mismatch. The answer never repeats the input. A chain that does not verify to the system roots is stored (a private CA is a legitimate source) and shown with trusted false. The key is sealed with the key from totp.enc_key before it is stored and is never returned or logged; without that key the upload is refused with 503 KEY_ENCRYPTION_UNAVAILABLE. A new upload gets a new certificate id and the previous certificate loses its key. When the application is in gateway mode the bundle generation goes up and the bundle is pushed; the certificate itself goes to the agent over its gRPC stream, and only to an agent whose credential is bound to its host. An application in gateway mode with another source switches to uploaded with this upload, and is refused with 409 AGENT_NOT_HOST_BOUND when its agent has no such credential. Writes an audit entry (app.tls_certificate_uploaded: id, names, expiry, leaf, replaced id). Uploads are limited to 10 per minute per user, refused ones included.'
+      description: 'Stores a certificate chain and its private key as the current certificate of the application and sets the source to uploaded. The body is at most 96 KiB. chain_pem holds only CERTIFICATE blocks, leaf first (1 to 10 certificates, at most 64 KiB; a root at the end is dropped); key_pem holds one unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block (at most 16 KiB; RSA of 2048 to 4096 bits or ECDSA P-256 or P-384). The control plane checks the order of the chain, that the leaf is no CA, the dates (a certificate valid from at most 24 hours ahead is accepted), that no certificate is signed with SHA-1 or MD5, that the leaf covers every host of the application, and that the key matches the leaf. Every refusal is 400 INVALID_CERTIFICATE with field (chain_pem, key_pem, or body for a refusal about the whole request) and reason: bad_pem, private_key_in_chain, too_large (field body when the request is larger than 96 KiB), chain_order, ca_leaf, expired, not_yet_valid, weak_signature, names_do_not_cover (the answer carries host), key_encrypted (the message names the openssl command that removes the passphrase), pkcs12 (the message names the openssl command that converts the file), unsupported_key, key_mismatch, or bad_json (field body: a top-level field appears twice, in any letter case, for example key_pem and KEY_PEM, so there is no telling which one a reader would take). A body that is not a JSON object, or has a chain_pem or key_pem that is not a string, is 400 BAD_REQUEST. The answer never repeats the input. The control plane clears the request body and every copy it makes of the chain and the key on every way out, best effort: the connection read buffers of the server and the buffers of a reverse proxy in front of it may keep copies of an upload for a while. A chain that does not verify to the system roots is stored (a private CA is a legitimate source) and shown with trusted false. The key is sealed with the key from totp.enc_key before it is stored and is never returned or logged; without that key the upload is refused with 503 KEY_ENCRYPTION_UNAVAILABLE. A new upload gets a new certificate id and the previous certificate loses its key. When the application is in gateway mode the bundle generation goes up and the bundle is pushed; the certificate itself goes to the agent over its gRPC stream, and only to an agent whose credential is bound to its host. An application in gateway mode with another source switches to uploaded with this upload, and is refused with 409 AGENT_NOT_HOST_BOUND when its agent has no such credential. Writes an audit entry (app.tls_certificate_uploaded: id, names, expiry, leaf, replaced id). Uploads are limited to 10 per minute per user, refused ones included.'
       tags:
         - Applications
         - WAF agents
@@ -9649,7 +9649,7 @@ paths:
                 trusted: true
                 created_at: '2026-11-20T09:30:00Z'
         '400':
-          description: 'The body is not valid JSON (BAD_REQUEST), or the chain or the key is refused (INVALID_CERTIFICATE, with field and reason). Nothing is stored.'
+          description: 'The body is not a JSON object, or a text is not a string (BAD_REQUEST), or the chain, the key or the request is refused (INVALID_CERTIFICATE, with field and reason: chain_pem or key_pem for a text, body with too_large for a request over 96 KiB, body with bad_json for a field that appears twice in any letter case). Nothing is stored.'
           content:
             application/json:
               schema:
@@ -9907,7 +9907,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Another application on the agent already uses the listen address (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the agent does not support it (MAINTENANCE_UNSUPPORTED), or its bundle with this application would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or the move breaks a TLS rule on the target agent: the application is in gateway mode and the agent said it cannot serve TLS certificates (TLS_UNSUPPORTED), the application uses the uploaded source and the agent has no credential bound to its host (AGENT_NOT_HOST_BOUND), or next to the applications already on the agent its plain listener, HTTPS or redirect listener, hosts or listener settings would clash (LISTEN_CONFLICT, HOST_CONFLICT, LISTENER_SETTINGS_DIFFER; field names the setting). Nothing changes.'
+          description: 'Another application on the agent already uses the listen address (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the agent does not support it (MAINTENANCE_UNSUPPORTED), or its bundle with this application would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or the move breaks a TLS rule on the target agent: the application is in gateway mode and the agent said it cannot serve TLS certificates (TLS_UNSUPPORTED), the application uses the uploaded source and the agent has no credential bound to its host (AGENT_NOT_HOST_BOUND), or next to the applications already on the agent its plain listener, HTTPS or redirect listener or hosts would clash (LISTEN_CONFLICT, HOST_CONFLICT; field names the setting of the application that must change). Applications that share an HTTPS listener may have different limits. Nothing changes.'
           content:
             application/json:
               schema:
@@ -15695,7 +15695,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (an application with this name exists in the project), LISTEN_HOST_TAKEN (another application on this agent uses the listen address), LISTEN_CONFLICT (the listen address is used by an HTTPS or redirect listener of another application on this agent; field names the setting). Nothing is created.'
+          description: 'Codes: CONFLICT (an application with this name exists in the project), LISTEN_HOST_TAKEN (another application on this agent uses the listen address), LISTEN_CONFLICT (the listen address is used by an HTTPS or redirect listener of another application on this agent; field is listen_port). Nothing is created.'
           content:
             application/json:
               schema:
@@ -15810,7 +15810,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts), LISTEN_CONFLICT (the new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one), LISTENER_SETTINGS_DIFFER (applications that share an HTTPS listener would get different timeouts or limits). field names the setting. Nothing is saved.'
+          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts), LISTEN_CONFLICT (the new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one; field is listen_port). A save that sends the listen host and port the route already has is not checked again. Nothing is saved.'
           content:
             application/json:
               schema:
@@ -19285,7 +19285,7 @@ components:
           type: string
           maxLength: 64
           pattern: ^[A-Z0-9_]+$
-          description: 'Machine code: INVALID_TLS_SETTINGS, INVALID_CERTIFICATE, KEY_ENCRYPTION_UNAVAILABLE, TLS_UNSUPPORTED, CERTIFICATE_REQUIRED, CERTIFICATE_DOES_NOT_COVER, AGENT_NOT_HOST_BOUND, CERTIFICATE_IN_USE, ACME_REQUEST_TOO_SOON, LISTEN_CONFLICT, LISTENER_SETTINGS_DIFFER, HOST_CONFLICT, BAD_REQUEST, and the generic codes of Error.'
+          description: 'Machine code: INVALID_TLS_SETTINGS, INVALID_CERTIFICATE, KEY_ENCRYPTION_UNAVAILABLE, TLS_UNSUPPORTED, CERTIFICATE_REQUIRED, CERTIFICATE_DOES_NOT_COVER, AGENT_NOT_HOST_BOUND, CERTIFICATE_IN_USE, ACME_REQUEST_TOO_SOON, LISTEN_CONFLICT, HOST_CONFLICT, BAD_REQUEST, and the generic codes of Error.'
         field:
           type: string
           maxLength: 64
@@ -19307,6 +19307,7 @@ components:
             - pkcs12
             - unsupported_key
             - key_mismatch
+            - bad_json
         host:
           type: string
           maxLength: 253
@@ -19337,7 +19338,7 @@ components:
             maxLength: 253
         listen:
           type: string
-          description: The HTTPS address the agent binds, ip:port or [ipv6]:port. Empty or absent means 0.0.0.0:443. Applications on one agent that share an address must have equal read and write timeouts, body limit and read buffer.
+          description: The HTTPS address the agent binds, ip:port or [ipv6]:port. Empty or absent means 0.0.0.0:443. Applications on one agent may share an address (each host once); their timeouts and limits may differ, the agent uses the largest value per listener and applies the limits of each application after routing.
           maxLength: 64
         redirect_listen:
           type: string
@@ -19405,6 +19406,7 @@ components:
           description: Whether the agent has a credential bound to its host, kind and name, which an uploaded key needs. null = no agent serves the application.
         warnings:
           type: array
+          description: Warnings that follow from what is stored (not_trusted, expires_soon), and in the answer of a save the dns_mismatch hints for the hosts that save looked up. A save looks up the hosts of a switch to gateway mode, or the hosts it added, at most 10 hosts and 2 seconds in all; the other hosts are not checked, and a host that is not checked or that did not resolve in time gives no warning.
           items:
             $ref: '#/components/schemas/AppTLSWarning'
       required:
@@ -19509,7 +19511,7 @@ components:
       additionalProperties: false
     AppTLSWarning:
       type: object
-      description: 'A warning, not a refusal. not_trusted: the uploaded chain does not verify to the system roots. expires_soon: the certificate in use has 30 days or fewer left (14 for acme); days_left and not_after say when. dns_mismatch: host resolves, and none of its addresses is a public address the agent host reported; resolved lists the public addresses it resolves to (at most 8) and agent_addresses the ones the agent host reported.'
+      description: 'A warning, not a refusal. not_trusted: the uploaded chain does not verify to the system roots. expires_soon: the certificate in use has 30 days or fewer left (14 for acme); days_left and not_after say when. dns_mismatch: host resolves to at least one public address, and none of its public addresses is a public address the agent host reported; resolved lists the public addresses it resolves to (at most 8) and agent_addresses the ones the agent host reported. It appears only in the answer of a save, never in GET. The hint is silent when the agent host reports no public address: the Rust WAF agent reports only primary_ip, so behind a NAT or on a cloud VM it stays silent.'
       properties:
         code:
           type: string

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/wafio/wafio-cp-backend/internal/domain"
@@ -81,9 +82,9 @@ func TestDBUpdateAtomicChecksThePlainListenerAgainstTLSListeners(t *testing.T) {
 	}
 }
 
-// Applications that share a TLS listener need equal timeouts and limits, so a proxy_config change
-// that would split them is refused.
-func TestDBUpdateAtomicChecksSharedListenerLimits(t *testing.T) {
+// Applications that share a TLS listener may have different limits: the agent takes the largest
+// value per listener, so a proxy_config change is no placement change.
+func TestDBUpdateAtomicAllowsDifferentLimitsOnASharedListener(t *testing.T) {
 	f := newTLSDB(t)
 	ctx := context.Background()
 	agent := f.agent(nil)
@@ -92,46 +93,82 @@ func TestDBUpdateAtomicChecksSharedListenerLimits(t *testing.T) {
 	f.assign(agent, b)
 	f.gatewayAt(a, "0.0.0.0:443", "a.example.com")
 	f.gatewayAt(b, "0.0.0.0:443", "b.example.com")
+	gen := f.watch(agent)
 
-	err := f.repo.App.UpdateAtomic(ctx, f.project, b, AppPatch{ProxyConfig: []byte(`{"timeouts":{"read_ms":1234}}`)}, nil)
-	wantConflict(t, "a limit that differs", err, domain.TLSConflictListenerSettings, "listen")
-	var raw string
-	if err := f.repo.DB.QueryRow(ctx, `SELECT proxy_config::text FROM apps WHERE id = $1`, b).Scan(&raw); err != nil || raw != "{}" {
-		t.Fatalf("a refused change was stored: %s, %v", raw, err)
+	if err := f.repo.App.UpdateAtomic(ctx, f.project, b, AppPatch{ProxyConfig: []byte(`{"timeouts":{"read_ms":1234},"max_body_bytes":1048576}`)}, nil); err != nil {
+		t.Fatalf("other limits on a shared listener: %v", err)
 	}
-
-	// On a listener of its own, b may set any limit.
-	f.gatewayAt(b, "0.0.0.0:444", "b.example.com")
-	if err := f.repo.App.UpdateAtomic(ctx, f.project, b, AppPatch{ProxyConfig: []byte(`{"timeouts":{"read_ms":1234}}`)}, nil); err != nil {
-		t.Fatalf("b alone on its listener: %v", err)
+	var raw string
+	if err := f.repo.DB.QueryRow(ctx, `SELECT proxy_config::text FROM apps WHERE id = $1`, b).Scan(&raw); err != nil || !strings.Contains(raw, "1234") {
+		t.Fatalf("the limits were not stored: %s, %v", raw, err)
+	}
+	if !gen.moved() {
+		t.Error("a proxy_config change did not move the bundle")
+	}
+	// And so does moving an application with other limits onto the listener.
+	if _, err := f.update(b, f.settings("gateway", "acme", "b.example.com", "www.b.example.com")); err != nil {
+		t.Fatalf("a hosts edit with other limits: %v", err)
 	}
 }
 
-// An edit that leaves the placement alone is not measured, so an application that is already in
-// conflict (stored before the check existed) can still be renamed and re-pointed.
-func TestDBUpdateAtomicLeavesOtherEditsAlone(t *testing.T) {
+// A save that sends the listen fields the application already has is not a placement change, so an
+// application that is in conflict (stored before the check existed) can still be saved as a whole
+// form; a change of the listener is checked.
+func TestDBUpdateAtomicChecksOnlyAChangedListener(t *testing.T) {
 	f := newTLSDB(t)
 	ctx := context.Background()
 	agent := f.agent(nil)
-	a, b := f.app("a", "", 0), f.app("b", "", 0)
-	f.assign(agent, a)
-	f.assign(agent, b)
-	f.gatewayAt(a, "0.0.0.0:443", "a.example.com")
-	f.gatewayAt(b, "0.0.0.0:443", "b.example.com")
-	f.limits(b, `{"timeouts":{"read_ms":2222}}`) // stored in conflict, behind the check
+	secure := f.app("secure", "", 0)
+	f.assign(agent, secure)
+	f.gatewayAt(secure, "0.0.0.0:8443", "secure.example.com")
+	plain := f.app("plain", "0.0.0.0", 8443) // in conflict, put there behind the check
+	f.assign(agent, plain)
+	gen := f.watch(agent)
 
-	name, upstream := "renamed-b", "http://10.0.0.9:8080"
-	if err := f.repo.App.UpdateAtomic(ctx, f.project, b, AppPatch{Name: &name, Upstream: &upstream}, nil); err != nil {
-		t.Fatalf("a rename in a stored conflict: %v", err)
+	host, name, upstream := "0.0.0.0", "renamed", "http://10.0.0.9:8080"
+	whole := AppPatch{Name: &name, Upstream: &upstream, ListenHost: &host, ListenPort: ptr(8443)}
+	if err := f.repo.App.UpdateAtomic(ctx, f.project, plain, whole, nil); err != nil {
+		t.Fatalf("a whole-form save with the same listener: %v", err)
 	}
-	err := f.repo.App.UpdateAtomic(ctx, f.project, b, AppPatch{ProxyConfig: []byte(`{"timeouts":{"read_ms":2222}}`)}, nil)
-	wantConflict(t, "a proxy_config save that keeps the conflict", err, domain.TLSConflictListenerSettings, "listen")
+	if !gen.moved() {
+		t.Error("the save did not move the bundle")
+	}
+	if err := f.repo.App.UpdateAtomic(ctx, f.project, plain, AppPatch{ListenPort: ptr(8443)}, nil); err != nil {
+		t.Fatalf("the port alone, unchanged: %v", err)
+	}
+
+	// Another address on the same port is a change, and checked.
+	local := "127.0.0.1"
+	err := f.repo.App.UpdateAtomic(ctx, f.project, plain, AppPatch{ListenHost: &local}, nil)
+	wantConflict(t, "an address inside the wildcard", err, domain.TLSConflictListen, "listen_port")
+	if err := f.repo.App.UpdateAtomic(ctx, f.project, plain, AppPatch{ListenPort: ptr(9000)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	err = f.repo.App.UpdateAtomic(ctx, f.project, plain, AppPatch{ListenPort: ptr(8443)}, nil)
+	wantConflict(t, "back onto the HTTPS port", err, domain.TLSConflictListen, "listen_port")
 
 	// No agent, nothing to place.
 	lone := f.app("lone", "", 0)
 	if err := f.repo.App.UpdateAtomic(ctx, f.project, lone, AppPatch{ListenPort: ptr(443)}, nil); err != nil {
 		t.Fatalf("an application without an agent: %v", err)
 	}
+	// An edit that names no listener is not measured.
+	renamed := "secure-renamed"
+	if err := f.repo.App.UpdateAtomic(ctx, f.project, secure, AppPatch{Name: &renamed}, nil); err != nil {
+		t.Fatalf("a rename: %v", err)
+	}
+}
+
+// The HTTPS listener of an application against its own plain listener names the port of the form.
+func TestDBUpdateAtomicNamesTheListenPortOfAnApplicationInGatewayMode(t *testing.T) {
+	f := newTLSDB(t)
+	agent := f.agent(nil)
+	app := f.app("shop", "0.0.0.0", 9000)
+	f.assign(agent, app)
+	f.gatewayAt(app, "0.0.0.0:8443", "shop.example.com")
+
+	err := f.repo.App.UpdateAtomic(context.Background(), f.project, app, AppPatch{ListenPort: ptr(8443)}, nil)
+	wantConflict(t, "its own HTTPS address", err, domain.TLSConflictListen, "listen_port")
 }
 
 // The check runs with the row of the application and the bundle of its agent held, so it measures

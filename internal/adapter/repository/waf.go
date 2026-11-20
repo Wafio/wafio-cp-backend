@@ -47,12 +47,18 @@ type WAFBundleAppRow struct {
 
 // AssignApp binds an app to a WAF agent. Enforces one enabled assignment
 // per app via the uq_waf_agent_apps_enabled partial unique index. The app row and the bundle of the
-// agent are locked, and the app is checked against the TLS listeners and limits of the applications
-// already on the agent (admitTLSMove): a *domain.TLSConflictError means nothing was bound.
+// agent are locked, and the app is checked against the TLS listeners of the applications already on
+// the agent (admitTLSMove): a *domain.TLSConflictError means nothing was bound. It takes a place
+// among the open transactions of its kind (enterNestedTx), since it waits for those locks.
 func (r *WAFRepo) AssignApp(ctx context.Context, agentID, appID, mode string) error {
 	if mode != "block" && mode != "monitor" {
 		mode = "block"
 	}
+	leave, err := enterNestedTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer leave()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err

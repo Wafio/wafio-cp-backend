@@ -2,6 +2,7 @@ package httpadapter
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -331,13 +332,11 @@ func TestDBAppTLSPutPlacementConflicts(t *testing.T) {
 	r = tf.put(t, "owner", map[string]any{"mode": "gateway", "source": "acme", "hosts": []string{"shop.example.com"}, "listen": "127.0.0.1:18091"})
 	wantStatus(t, "HTTPS on the plain listener of another application, the other way", r, fiber.StatusConflict, "LISTEN_CONFLICT")
 
-	// Applications that share a listener need equal limits.
-	wantStatus(t, "different limits", tf.do(t, http.MethodPut, "/api/projects/"+tf.project+"/apps/"+second, "owner", map[string]any{"proxy_config": map[string]any{"timeouts": map[string]any{"read_ms": 1500}}}),
-		fiber.StatusConflict, "LISTENER_SETTINGS_DIFFER")
-	wantStatus(t, "its own listener", putSecond(map[string]any{"mode": "gateway", "source": "acme", "hosts": []string{"blog.example.com"}, "listen": "0.0.0.0:9443"}), fiber.StatusOK, "")
-	wantStatus(t, "different limits on its own listener", tf.do(t, http.MethodPut, "/api/projects/"+tf.project+"/apps/"+second, "owner", map[string]any{"proxy_config": map[string]any{"timeouts": map[string]any{"read_ms": 1500}}}), fiber.StatusOK, "")
-	r = putSecond(map[string]any{"mode": "gateway", "source": "acme", "hosts": []string{"blog.example.com"}, "listen": "0.0.0.0:443"})
-	wantStatus(t, "back to the shared listener with other limits", r, fiber.StatusConflict, "LISTENER_SETTINGS_DIFFER")
+	// Applications that share a listener may have different limits: the agent takes the largest value
+	// of the listener and applies the limits of each application after routing.
+	limits := map[string]any{"proxy_config": map[string]any{"timeouts": map[string]any{"read_ms": 1500}, "max_body_bytes": 1048576}}
+	wantStatus(t, "different limits on a shared listener", tf.do(t, http.MethodPut, "/api/projects/"+tf.project+"/apps/"+second, "owner", limits), fiber.StatusOK, "")
+	wantStatus(t, "saved again with other limits on the shared listener", putSecond(gateway("acme", "blog.example.com", "www.blog.example.com")), fiber.StatusOK, "")
 }
 
 func TestDBAppTLSDNSWarning(t *testing.T) {
@@ -345,21 +344,28 @@ func TestDBAppTLSDNSWarning(t *testing.T) {
 	body := gateway("acme", "shop.example.com", "www.example.com")
 	tf.resolver.set("shop.example.com", "198.51.100.7")
 	tf.resolver.set("www.example.com", "203.0.113.10")
+	// toGateway leaves gateway mode and goes back with body, which is a switch the hint looks at.
+	toGateway := func(body map[string]any) testResponse {
+		t.Helper()
+		wantStatus(t, "to proxy", tf.put(t, "owner", map[string]any{"mode": "proxy"}), fiber.StatusOK, "")
+		return tf.put(t, "owner", body)
+	}
+	lookups := func(from int) int { return tf.resolver.lookups() - from }
 
 	// The agent's host reported no address: nothing to compare, and nothing is looked up.
-	r := tf.put(t, "owner", body)
+	r := toGateway(body)
 	wantStatus(t, "no addresses known", r, fiber.StatusOK, "")
 	if len(warningCodes(r)) != 0 || tf.resolver.lookups() != 0 {
 		t.Errorf("no address known: warnings %v, %d lookups", warningCodes(r), tf.resolver.lookups())
 	}
 	// An address behind a NAT says nothing about what DNS should answer.
 	tf.hostInfo(t, tf.agentID, `{"primary_ip":"10.0.0.5","public_ip":"not an address"}`)
-	if r = tf.put(t, "owner", body); len(warningCodes(r)) != 0 || tf.resolver.lookups() != 0 {
+	if r = toGateway(body); len(warningCodes(r)) != 0 || tf.resolver.lookups() != 0 {
 		t.Errorf("private address: warnings %v, %d lookups", warningCodes(r), tf.resolver.lookups())
 	}
 
 	tf.hostInfo(t, tf.agentID, `{"primary_ip":"10.0.0.5","public_ip":"203.0.113.10"}`)
-	r = tf.put(t, "owner", body)
+	r = toGateway(body)
 	wantStatus(t, "one host points elsewhere", r, fiber.StatusOK, "")
 	warnings, _ := r.body["warnings"].([]any)
 	if len(warnings) != 1 {
@@ -374,19 +380,46 @@ func TestDBAppTLSDNSWarning(t *testing.T) {
 		t.Errorf("GET carries DNS warnings: %s", got.raw)
 	}
 
+	// A save in gateway mode that adds no host looks nothing up; one that adds a host looks up that host only.
+	before := tf.resolver.lookups()
+	if r = tf.put(t, "owner", body); len(warningCodes(r)) != 0 || lookups(before) != 0 {
+		t.Errorf("a save without a new host: warnings %v, %d lookups", warningCodes(r), lookups(before))
+	}
+	tf.resolver.set("blog.example.com", "198.51.100.9")
+	r = tf.put(t, "owner", gateway("acme", "shop.example.com", "www.example.com", "blog.example.com"))
+	if codes := warningCodes(r); len(codes) != 1 || lookups(before) != 1 || r.body["warnings"].([]any)[0].(map[string]any)["host"] != "blog.example.com" {
+		t.Errorf("a save that adds a host: warnings %s, %d lookups", r.raw, lookups(before))
+	}
+
 	// Once the name points at the agent, the warning goes.
 	tf.resolver.set("shop.example.com", "203.0.113.10")
-	if r = tf.put(t, "owner", body); len(warningCodes(r)) != 0 {
+	if r = toGateway(body); len(warningCodes(r)) != 0 {
 		t.Errorf("warnings %v for a host that points at the agent", warningCodes(r))
 	}
-	// A name that does not resolve gives none; a draft looks nothing up.
+	// A draft looks nothing up. A name that does not resolve, and one that resolves to private
+	// addresses only, give no warning: they look the same, so neither is reported.
 	tf.resolver.set("shop.example.com", "198.51.100.7")
-	before := tf.resolver.lookups()
-	if r = tf.put(t, "owner", map[string]any{"mode": "proxy", "hosts": []string{"shop.example.com"}}); len(warningCodes(r)) != 0 || tf.resolver.lookups() != before {
-		t.Errorf("a draft in proxy mode looked up names: %v, %d lookups", warningCodes(r), tf.resolver.lookups()-before)
+	before = tf.resolver.lookups()
+	if r = tf.put(t, "owner", map[string]any{"mode": "proxy", "hosts": []string{"shop.example.com"}}); len(warningCodes(r)) != 0 || lookups(before) != 0 {
+		t.Errorf("a draft in proxy mode looked up names: %v, %d lookups", warningCodes(r), lookups(before))
 	}
-	if r = tf.put(t, "owner", gateway("acme", "unknown.example.com")); len(warningCodes(r)) != 0 {
-		t.Errorf("a name that does not resolve gave %v", warningCodes(r))
+	tf.resolver.set("internal.example.com", "10.1.2.3", "fd00::5")
+	for _, host := range []string{"unknown.example.com", "internal.example.com"} {
+		if r = toGateway(gateway("acme", host)); len(warningCodes(r)) != 0 {
+			t.Errorf("%s gave %v", host, warningCodes(r))
+		}
+	}
+
+	// One save looks up at most ten names; the rest stay unchecked.
+	hosts := make([]string, 14)
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("many%02d.example.com", i)
+		tf.resolver.set(hosts[i], "198.51.100.7")
+	}
+	before = tf.resolver.lookups()
+	r = toGateway(gateway("acme", hosts...))
+	if n, got := lookups(before), len(warningCodes(r)); n != 10 || got != 10 {
+		t.Errorf("14 hosts: %d lookups and %d warnings, want 10 and 10", n, got)
 	}
 
 	// A name server that never answers holds a save for the budget and no longer.
@@ -394,7 +427,7 @@ func TestDBAppTLSDNSWarning(t *testing.T) {
 	tf.resolver.stuck = true
 	tf.resolver.mu.Unlock()
 	start := time.Now()
-	r = tf.put(t, "owner", body)
+	r = toGateway(body)
 	elapsed := time.Since(start)
 	wantStatus(t, "stuck resolver", r, fiber.StatusOK, "")
 	if len(warningCodes(r)) != 0 || elapsed < 1800*time.Millisecond || elapsed > 3500*time.Millisecond {

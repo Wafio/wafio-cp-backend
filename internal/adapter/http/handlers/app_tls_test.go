@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -141,17 +142,56 @@ func TestDNSMismatches(t *testing.T) {
 		byHost[w.Host] = w
 		order = append(order, w.Host)
 	}
-	if want := []string{"wrong.example.com", "private.example.com", "many.example.com"}; !slices.Equal(order, want) {
+	// A name that resolves to nothing public, or not at all, is silent: both look the same.
+	if want := []string{"wrong.example.com", "many.example.com"}; !slices.Equal(order, want) {
 		t.Fatalf("warned hosts %v, want %v (in the order of the hosts)", order, want)
 	}
 	if res := byHost["wrong.example.com"].Resolved; !slices.Equal(res, []string{"198.51.100.7", "2001:db8::5"}) {
 		t.Errorf("resolved = %v, want the addresses sorted and without repeats", res)
 	}
-	if res := byHost["private.example.com"].Resolved; len(res) != 0 {
-		t.Errorf("a private address was shown: %v", res)
-	}
 	if res := byHost["many.example.com"].Resolved; len(res) != tlsResolvedShown {
 		t.Errorf("resolved lists %d addresses, want at most %d", len(res), tlsResolvedShown)
+	}
+}
+
+// A save looks up at most tlsDNSMaxHosts names; the others are not checked.
+func TestDNSMismatchesStopAtTheCap(t *testing.T) {
+	r := &tlsFakeResolver{answers: map[string][]netip.Addr{}}
+	hosts := make([]string, 15)
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("h%02d.example.com", i)
+		r.answers[hosts[i]] = addrs("198.51.100.7")
+	}
+	got := dnsMismatches(context.Background(), r, hosts, addrs("203.0.113.10"))
+	if n := int(r.calls.Load()); n != tlsDNSMaxHosts {
+		t.Errorf("%d lookups, want %d", n, tlsDNSMaxHosts)
+	}
+	if len(got) != tlsDNSMaxHosts || got[0].Host != "h00.example.com" || got[len(got)-1].Host != "h09.example.com" {
+		t.Errorf("warnings for %d hosts, want the first %d: %+v", len(got), tlsDNSMaxHosts, got)
+	}
+}
+
+// A save asks about every host on a switch to gateway and about the added ones afterwards.
+func TestDNSCandidates(t *testing.T) {
+	proxy := repository.AppTLS{Mode: domain.TLSModeProxy, Hosts: []string{"a.example.com"}}
+	gw := func(hosts ...string) repository.AppTLS {
+		return repository.AppTLS{Mode: domain.TLSModeGateway, Hosts: hosts}
+	}
+	for name, c := range map[string]struct {
+		before, after repository.AppTLS
+		want          []string
+	}{
+		"switch to gateway":     {proxy, gw("a.example.com", "b.example.com"), []string{"a.example.com", "b.example.com"}},
+		"unchanged hosts":       {gw("a.example.com"), gw("a.example.com"), nil},
+		"a host added":          {gw("a.example.com"), gw("a.example.com", "b.example.com"), []string{"b.example.com"}},
+		"a host removed":        {gw("a.example.com", "b.example.com"), gw("a.example.com"), nil},
+		"a host swapped":        {gw("a.example.com"), gw("b.example.com"), []string{"b.example.com"}},
+		"leaving gateway":       {gw("a.example.com"), proxy, nil},
+		"a draft in proxy mode": {proxy, repository.AppTLS{Mode: domain.TLSModeProxy, Hosts: []string{"c.example.com"}}, nil},
+	} {
+		if got := dnsCandidates(c.before, c.after); !slices.Equal(got, c.want) {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
 	}
 }
 
@@ -246,7 +286,6 @@ func TestTLSRefusedAnswers(t *testing.T) {
 		"field":            {&domain.TLSFieldError{Field: "hosts", Msg: "is empty"}, 400, "INVALID_TLS_SETTINGS", map[string]any{"field": "hosts"}},
 		"wrapped field":    {fmt.Errorf("save: %w", &domain.TLSFieldError{Field: "mode", Msg: "bad"}), 400, "INVALID_TLS_SETTINGS", map[string]any{"field": "mode"}},
 		"listen":           {&domain.TLSConflictError{Code: domain.TLSConflictListen, Field: "listen_port", Address: "0.0.0.0:443", OtherAppName: "shop"}, 409, "LISTEN_CONFLICT", map[string]any{"field": "listen_port"}},
-		"settings":         {&domain.TLSConflictError{Code: domain.TLSConflictListenerSettings, Field: "listen", Address: "0.0.0.0:443", OtherAppName: "shop"}, 409, "LISTENER_SETTINGS_DIFFER", map[string]any{"field": "listen"}},
 		"host":             {&domain.TLSConflictError{Code: domain.TLSConflictHost, Field: "hosts", Address: "0.0.0.0:443", Host: "a.example.com", OtherAppName: "shop"}, 409, "HOST_CONFLICT", map[string]any{"field": "hosts"}},
 		"coverage":         {&repository.TLSCoverageError{Host: "b.example.com"}, 409, "CERTIFICATE_DOES_NOT_COVER", map[string]any{"host": "b.example.com"}},
 		"acme too soon":    {&repository.ACMETooSoonError{RetryAfter: 90*time.Second + 400*time.Millisecond}, 409, "ACME_REQUEST_TOO_SOON", map[string]any{"retry_after": float64(91)}},
@@ -309,7 +348,7 @@ func TestCertRefusalBody(t *testing.T) {
 		return certRefusal(c, domain.CertFieldChain, domain.CertReasonNamesDoNotCover, "the leaf certificate does not cover a.example.com", "a.example.com")
 	})
 	app.Get("/plain", func(c *fiber.Ctx) error {
-		return certRefusal(c, tlsFieldUploadBody, domain.CertReasonTooLarge, "too large", "")
+		return certRefusal(c, domain.CertFieldBody, domain.CertReasonTooLarge, "too large", "")
 	})
 	for path, want := range map[string]map[string]any{
 		"/":      {"error": "the leaf certificate does not cover a.example.com", "code": "INVALID_CERTIFICATE", "field": "chain_pem", "reason": "names_do_not_cover", "host": "a.example.com"},
@@ -319,6 +358,69 @@ func TestCertRefusalBody(t *testing.T) {
 		status, raw := tlsGet(t, app, path)
 		if err := json.Unmarshal(raw, &got); err != nil || status != 400 || fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("%s: %d %s, want 400 %v", path, status, raw, want)
+		}
+	}
+}
+
+func TestReadUploadFields(t *testing.T) {
+	read := func(body string) (*uploadFields, error) { return readUploadFields([]byte(body)) }
+
+	u, err := read(`{ "chain_pem" : "line1\nline2", "other": {"a": ["}", "\"{"], "b": 1}, "key_pem": "k\u0041" }`)
+	if err != nil || string(u.chain) != "line1\nline2" || string(u.key) != "kA" {
+		t.Fatalf("a body with other fields: %+v, %v", u, err)
+	}
+	for _, body := range []string{`{}`, `{"chain_pem": null}`, `{"other": 1}`} {
+		if u, err := read(body); err != nil || len(u.chain) != 0 || len(u.key) != 0 {
+			t.Errorf("%s: %+v, %v, want no bytes", body, u, err)
+		}
+	}
+	// Names match without regard to case, also when they are written with escapes.
+	u, err = read(`{"CHAIN_PEM": "c", "Key\u005fPem": "k"}`)
+	if err != nil || string(u.chain) != "c" || string(u.key) != "k" {
+		t.Errorf("upper-case names: %+v, %v", u, err)
+	}
+	for name, body := range map[string]string{
+		"key twice":           `{"key_pem": "a", "key_pem": "b"}`,
+		"key in two cases":    `{"KEY_PEM": "a", "chain_pem": "c", "key_pem": "b"}`,
+		"chain twice":         `{"chain_pem": "a", "Chain_Pem": "b"}`,
+		"an escaped spelling": `{"key_pem": "a", "key\u005fpem": "b"}`,
+		"another field twice": `{"x": 1, "x": 2}`,
+	} {
+		if u, err := read(body); !errors.Is(err, errUploadDuplicateField) || u != nil {
+			t.Errorf("%s: %+v, %v, want a duplicate field", name, u, err)
+		}
+	}
+	for name, body := range map[string]string{
+		"not JSON":      "not json",
+		"cut off":       `{"key_pem": "a`,
+		"an array":      `["a"]`,
+		"a string":      `"a"`,
+		"chain number":  `{"chain_pem": 5}`,
+		"key object":    `{"key_pem": {"a": "b"}}`,
+		"two documents": `{} {}`,
+		"empty":         "",
+	} {
+		if u, err := read(body); !errors.Is(err, errUploadBody) || u != nil {
+			t.Errorf("%s: %+v, %v, want errUploadBody", name, u, err)
+		}
+	}
+
+	// The fields are copies: clearing the body leaves them, and wipe clears every one, the chain
+	// included, since a combined file puts the key there.
+	body := []byte(`{"chain_pem": "CERT\nKEYMATERIAL", "key_pem": "KEYMATERIAL"}`)
+	u, err = readUploadFields(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, key := u.chain, u.key
+	clear(body)
+	if string(chain) != "CERT\nKEYMATERIAL" || string(key) != "KEYMATERIAL" {
+		t.Fatalf("the fields share the body: %q %q", chain, key)
+	}
+	u.wipe()
+	for name, buf := range map[string][]byte{"chain": chain, "key": key} {
+		if len(bytes.Trim(buf, "\x00")) != 0 {
+			t.Errorf("%s was not cleared: %q", name, buf)
 		}
 	}
 }

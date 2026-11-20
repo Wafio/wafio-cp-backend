@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,8 +12,6 @@ import (
 	"slices"
 	"sync"
 	"time"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -47,6 +44,8 @@ const (
 	// tlsDNSBudget is the time all lookups of one save share. A save never waits longer for a warning.
 	tlsDNSBudget   = 2 * time.Second
 	tlsDNSParallel = 8
+	// tlsDNSMaxHosts caps the hosts one save looks up. The rest are left unchecked.
+	tlsDNSMaxHosts = 10
 	// tlsResolvedShown caps the addresses a dns_mismatch warning lists for one host.
 	tlsResolvedShown = 8
 
@@ -66,9 +65,6 @@ const (
 	tlsCodeInvalidCert = "INVALID_CERTIFICATE"
 	tlsCodeInvalidTLS  = "INVALID_TLS_SETTINGS"
 	tlsCodeKeyEncrypt  = "KEY_ENCRYPTION_UNAVAILABLE"
-
-	// tlsFieldUploadBody names the whole request of an upload that is too large to read a field from.
-	tlsFieldUploadBody = "body"
 )
 
 // ── Views ─────────────────────────────────────────────────────────────────
@@ -347,19 +343,20 @@ func (h *AppTLSHandler) Put(c *fiber.Ctx) error {
 		"listen": out.Saved.Listen, "redirect_listen": out.Saved.RedirectListen,
 		"previous_mode": out.Previous.Mode, "previous_source": out.Previous.Source,
 	})
-	return h.answerState(c, projectID, appID, out.Saved.Mode == domain.TLSModeGateway)
+	return h.answerState(c, projectID, appID, dnsCandidates(out.Previous, out.Saved))
 }
 
-// answerState answers with the state as GET gives it. With dns it adds the dns_mismatch warnings.
-func (h *AppTLSHandler) answerState(c *fiber.Ctx, projectID, appID string, dns bool) error {
+// answerState answers with the state as GET gives it. For the hosts in dnsHosts it adds the
+// dns_mismatch warnings.
+func (h *AppTLSHandler) answerState(c *fiber.Ctx, projectID, appID string, dnsHosts []string) error {
 	now := time.Now()
 	r, err := h.read(c.UserContext(), projectID, appID)
 	if err != nil {
 		return h.refused(c, err)
 	}
 	v := r.view(now)
-	if dns && r.agent != nil {
-		v.Warnings = append(v.Warnings, h.dnsWarnings(c.UserContext(), projectID, r.agent.ID, r.tls.Hosts)...)
+	if len(dnsHosts) > 0 && r.agent != nil {
+		v.Warnings = append(v.Warnings, h.dnsWarnings(c.UserContext(), projectID, r.agent.ID, dnsHosts)...)
 	}
 	return c.JSON(v)
 }
@@ -374,10 +371,30 @@ func publicAddr(a netip.Addr) bool {
 	return a.IsGlobalUnicast() && !a.IsPrivate() && !carrierGradeNAT.Contains(a)
 }
 
-// dnsWarnings compares what the hosts resolve to with the public address the agent's host reports. A
-// warning is a hint and nothing is stored. There is none when the host reports no public address
-// (an address behind a NAT or a load balancer says nothing about what DNS should answer), when a name
-// does not resolve, or when the lookups run out of the shared time.
+// dnsCandidates are the hosts a save has the resolver look up: all of them on a switch to gateway
+// mode, the ones the save added while the application stays in it, and none otherwise. A host that
+// was already served is not looked up again at every save.
+func dnsCandidates(before, after repository.AppTLS) []string {
+	if after.Mode != domain.TLSModeGateway {
+		return nil
+	}
+	if before.Mode != domain.TLSModeGateway {
+		return after.Hosts
+	}
+	var added []string
+	for _, host := range after.Hosts {
+		if !slices.Contains(before.Hosts, host) {
+			added = append(added, host)
+		}
+	}
+	return added
+}
+
+// dnsWarnings compares what the hosts resolve to with the public address the agent's host reports.
+// A warning is a hint and nothing is stored. It is silent when the host reported no public address
+// (an address behind a NAT or a load balancer says nothing about what DNS should answer), for a name
+// that does not resolve or resolves to no public address, past the first tlsDNSMaxHosts hosts, and
+// when the lookups run out of the shared time.
 func (h *AppTLSHandler) dnsWarnings(ctx context.Context, projectID, agentID string, hosts []string) []tlsWarning {
 	reported, err := h.Repo.TLS.AgentReportedAddresses(ctx, projectID, agentID)
 	if err != nil {
@@ -396,6 +413,7 @@ func (h *AppTLSHandler) dnsWarnings(ctx context.Context, projectID, agentID stri
 }
 
 func dnsMismatches(ctx context.Context, resolver HostResolver, hosts []string, known []netip.Addr) []tlsWarning {
+	hosts = hosts[:min(len(hosts), tlsDNSMaxHosts)]
 	ctx, cancel := context.WithTimeout(ctx, tlsDNSBudget)
 	defer cancel()
 	agentAddrs := make([]string, 0, len(known))
@@ -421,7 +439,7 @@ start:
 			defer wg.Done()
 			defer func() { <-slots }()
 			addrs, err := resolver.LookupNetIP(ctx, "ip", host)
-			if err != nil || len(addrs) == 0 {
+			if err != nil {
 				return
 			}
 			shown := []string{}
@@ -433,6 +451,11 @@ start:
 				if publicAddr(a) {
 					shown = append(shown, a.String())
 				}
+			}
+			// A name that resolves to nothing public says nothing about where it points; a name that
+			// does not resolve at all looks the same, so neither is reported.
+			if len(shown) == 0 {
+				return
 			}
 			slices.Sort(shown)
 			shown = slices.Compact(shown)
@@ -464,98 +487,10 @@ func (h *AppTLSHandler) RequestACME(c *fiber.Ctx) error {
 	h.audit(c, repository.AuditAppTLSACMERequested, projectID, appID, map[string]any{
 		"request_id": out.Saved.ACMERequestID, "hosts": out.Saved.Hosts, "mode": out.Saved.Mode,
 	})
-	return h.answerState(c, projectID, appID, false)
+	return h.answerState(c, projectID, appID, nil)
 }
 
 // ── Uploaded certificate ──────────────────────────────────────────────────
-
-// unquoteJSONString decodes the JSON string literal raw into bytes without making a Go string, which
-// could not be cleared. It reports false when raw is not a string literal. Absent and null give no
-// bytes.
-func unquoteJSONString(raw []byte) ([]byte, bool) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, true
-	}
-	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return nil, false
-	}
-	in := raw[1 : len(raw)-1]
-	out := make([]byte, 0, len(in))
-	fail := func() ([]byte, bool) {
-		clear(out)
-		return nil, false
-	}
-	for i := 0; i < len(in); {
-		if in[i] != '\\' {
-			out = append(out, in[i])
-			i++
-			continue
-		}
-		if i+1 >= len(in) {
-			return fail()
-		}
-		switch esc := in[i+1]; esc {
-		case '"', '\\', '/':
-			out = append(out, esc)
-		case 'b':
-			out = append(out, '\b')
-		case 'f':
-			out = append(out, '\f')
-		case 'n':
-			out = append(out, '\n')
-		case 'r':
-			out = append(out, '\r')
-		case 't':
-			out = append(out, '\t')
-		case 'u':
-			r, ok := hex4(in[i+2:])
-			if !ok {
-				return fail()
-			}
-			i += 4
-			if utf16.IsSurrogate(r) {
-				// A high half needs its low half right behind it. Anything else is the replacement
-				// character, as in encoding/json.
-				pair := utf8.RuneError
-				if rest := in[i+2:]; len(rest) >= 6 && rest[0] == '\\' && rest[1] == 'u' {
-					if low, ok := hex4(rest[2:]); ok {
-						pair = utf16.DecodeRune(r, low)
-					}
-				}
-				if pair != utf8.RuneError {
-					i += 6
-				}
-				r = pair
-			}
-			out = utf8.AppendRune(out, r)
-		default:
-			return fail()
-		}
-		i += 2
-	}
-	return out, true
-}
-
-func hex4(b []byte) (rune, bool) {
-	if len(b) < 4 {
-		return 0, false
-	}
-	var r rune
-	for _, c := range b[:4] {
-		switch {
-		case c >= '0' && c <= '9':
-			c -= '0'
-		case c >= 'a' && c <= 'f':
-			c = c - 'a' + 10
-		case c >= 'A' && c <= 'F':
-			c = c - 'A' + 10
-		default:
-			return 0, false
-		}
-		r = r<<4 | rune(c)
-	}
-	return r, true
-}
 
 // certRefusal answers an upload that is refused with the code and the reason, never with the
 // input.
@@ -581,11 +516,6 @@ func (h *AppTLSHandler) UploadCertificate(c *fiber.Ctx) error {
 	// cannot be cleared. Everything cut out of it is cleared on every way out, refusals included.
 	body := c.Request().Body()
 	defer clear(body)
-	var in struct {
-		ChainPEM json.RawMessage `json:"chain_pem"`
-		KeyPEM   json.RawMessage `json:"key_pem"`
-	}
-	defer func() { clear(in.KeyPEM) }()
 
 	enc := h.Repo.User.TOTPCrypto
 	if enc == nil {
@@ -593,18 +523,17 @@ func (h *AppTLSHandler) UploadCertificate(c *fiber.Ctx) error {
 			"Certificate keys cannot be stored: no encryption key is configured on the control plane (totp.enc_key).", nil)
 	}
 	if len(body) > domain.CertUploadMaxBytes {
-		return certRefusal(c, tlsFieldUploadBody, domain.CertReasonTooLarge,
+		return certRefusal(c, domain.CertFieldBody, domain.CertReasonTooLarge,
 			fmt.Sprintf("The request is larger than %d KiB.", domain.CertUploadMaxBytes>>10), "")
 	}
-	if err := json.Unmarshal(body, &in); err != nil {
+	fields, err := readUploadFields(body)
+	switch {
+	case errors.Is(err, errUploadDuplicateField):
+		return certRefusal(c, domain.CertFieldBody, domain.CertReasonBadJSON, "A field appears more than once in the request.", "")
+	case err != nil:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body", "code": "BAD_REQUEST"})
 	}
-	chain, chainOK := unquoteJSONString(in.ChainPEM)
-	key, keyOK := unquoteJSONString(in.KeyPEM)
-	defer clear(key)
-	if !chainOK || !keyOK {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body", "code": "BAD_REQUEST"})
-	}
+	defer fields.wipe()
 
 	settings, _, err := h.Repo.TLS.GetTLS(c.UserContext(), projectID, appID)
 	if err != nil {
@@ -612,7 +541,7 @@ func (h *AppTLSHandler) UploadCertificate(c *fiber.Ctx) error {
 	}
 	now := time.Now()
 	up, err := domain.ParseCertificateUpload(domain.CertificateUploadInput{
-		ChainPEM: chain, KeyPEM: key, Hosts: settings.Hosts, Now: now, Roots: h.Roots,
+		ChainPEM: fields.chain, KeyPEM: fields.key, Hosts: settings.Hosts, Now: now, Roots: h.Roots,
 	})
 	if err != nil {
 		var refused *domain.CertificateError

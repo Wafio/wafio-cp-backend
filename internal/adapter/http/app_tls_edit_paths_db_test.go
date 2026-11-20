@@ -111,7 +111,14 @@ func TestDBAppTLSMoveChecksThroughTheAPI(t *testing.T) {
 	tight := tf.route(t, f, "tight", 18101)
 	wantStatus(t, "a gateway application with other limits", tf.setTLS(t, tight, gateway("acme", "blog.example.com")), fiber.StatusOK, "")
 	wantStatus(t, "other limits", tf.do(t, http.MethodPut, tf.appURL(tight), "owner", map[string]any{"proxy_config": map[string]any{"timeouts": map[string]any{"write_ms": 4000}}}), fiber.StatusOK, "")
-	wantConflictField(t, "other limits on a shared listener", tf.move(t, tf.appID, f), "LISTENER_SETTINGS_DIFFER", "listen")
+	// Other limits on a shared listener are no obstacle: the agent takes the largest value per listener.
+	wantStatus(t, "other limits on a shared listener", tf.move(t, tf.appID, f), fiber.StatusOK, "")
+	moves++
+	if tf.serving(t, tf.appID) != f {
+		t.Fatal("the application did not move next to one with other limits")
+	}
+	wantStatus(t, "back", tf.move(t, tf.appID, a), fiber.StatusOK, "")
+	moves++
 
 	// A proxy application is checked too: its plain listener must not take a TLS address of the target.
 	g := tf.newAgent(t)
@@ -124,7 +131,7 @@ func TestDBAppTLSMoveChecksThroughTheAPI(t *testing.T) {
 		t.Errorf("a refused move changed the assignment (%s) or wrote an audit row (%d, want %d)", tf.serving(t, tf.appID), assigned(), moves)
 	}
 	// Nothing was left bound to the targets of the refused moves.
-	for _, agent := range []string{d, e, f, g} {
+	for _, agent := range []string{d, e, g} {
 		if n := tf.count(t, `SELECT count(*) FROM waf_agent_apps WHERE agent_id = $1 AND app_id = $2`, agent, tf.appID); n != 0 {
 			t.Errorf("a refused move bound the application to agent %s", agent)
 		}
@@ -181,18 +188,21 @@ func TestDBAppTLSPlacementOnOtherEditPaths(t *testing.T) {
 
 	// The HTTPS listener of the application itself against its own plain listener.
 	r := tf.do(t, http.MethodPut, tf.appURL(tf.appID), "owner", map[string]any{"listen_port": 8443, "listen_host": "0.0.0.0"})
-	wantConflictField(t, "the plain listener on the HTTPS listener of the same application", r, "LISTEN_CONFLICT", "listen")
+	wantConflictField(t, "the plain listener on the HTTPS listener of the same application", r, "LISTEN_CONFLICT", "listen_port")
 
-	// Limits of applications that share a TLS listener.
+	// Limits of applications that share a TLS listener may differ, and a proxy_config edit moves nothing
+	// that the placement checks look at: both forms save it, and the bundle follows.
 	wantStatus(t, "shared listener", tf.setTLS(t, ok, map[string]any{"mode": "gateway", "source": "acme", "hosts": []string{"blog.example.com"}, "listen": "0.0.0.0:8443"}), fiber.StatusOK, "")
-	limits := map[string]any{"proxy_config": map[string]any{"timeouts": map[string]any{"read_ms": 1500}}}
 	gen = tf.generation(t, a)
-	wantConflictField(t, "route limits", tf.do(t, http.MethodPut, routeURL, "owner", limits), "LISTENER_SETTINGS_DIFFER", "listen")
-	wantConflictField(t, "application limits", tf.do(t, http.MethodPut, tf.appURL(ok), "owner", limits), "LISTENER_SETTINGS_DIFFER", "listen")
-	if readMs := tf.count(t, `SELECT COALESCE((proxy_config->'timeouts'->>'read_ms')::int, 0) FROM apps WHERE id = $1`, ok); readMs != 0 || tf.generation(t, a) != gen {
-		t.Errorf("refused limits were stored (read_ms %d) or moved the bundle", readMs)
+	wantStatus(t, "route limits", tf.do(t, http.MethodPut, routeURL, "owner", map[string]any{"proxy_config": map[string]any{"timeouts": map[string]any{"read_ms": 1500}}}), fiber.StatusOK, "")
+	wantStatus(t, "application limits", tf.do(t, http.MethodPut, tf.appURL(ok), "owner", map[string]any{"proxy_config": map[string]any{"timeouts": map[string]any{"read_ms": 1600}}}), fiber.StatusOK, "")
+	if readMs := tf.count(t, `SELECT COALESCE((proxy_config->'timeouts'->>'read_ms')::int, 0) FROM apps WHERE id = $1`, ok); readMs != 1600 || tf.generation(t, a) <= gen {
+		t.Errorf("limits saved as read_ms %d, or the bundle did not move", readMs)
 	}
-	// On a listener of its own the application may have other limits.
-	wantStatus(t, "own listener", tf.setTLS(t, ok, map[string]any{"mode": "gateway", "source": "acme", "hosts": []string{"blog.example.com"}, "listen": "0.0.0.0:9443"}), fiber.StatusOK, "")
-	wantStatus(t, "limits on its own listener", tf.do(t, http.MethodPut, routeURL, "owner", limits), fiber.StatusOK, "")
+
+	// A form that sends the listener it already has is not checked again, so an application that is in
+	// conflict can still be saved (the conflict is put there behind the check, as an older release left it).
+	tf.exec(t, `UPDATE apps SET listen_host = '0.0.0.0', listen_port = 8443 WHERE id = $1`, ok)
+	wantStatus(t, "a whole form with the stored listener", tf.do(t, http.MethodPut, tf.appURL(ok), "owner", map[string]any{"name": "whole-" + uuid.NewString()[:6], "listen_host": "0.0.0.0", "listen_port": 8443}), fiber.StatusOK, "")
+	wantStatus(t, "route form with the stored listener", tf.do(t, http.MethodPut, routeURL, "owner", map[string]any{"listen_host": "0.0.0.0", "listen_port": 8443, "upstream": "http://10.0.0.7:3001"}), fiber.StatusOK, "")
 }

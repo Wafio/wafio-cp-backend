@@ -316,6 +316,25 @@ func TestDBAppTLSUploadRefusals(t *testing.T) {
 			t.Errorf("%s: %s", name, r.raw)
 		}
 	}
+	// A field that appears twice, in any case, is refused whichever way the two are ordered: a reader
+	// that took the other one would store a different key than the one that was checked.
+	other := tf.newCert(t, certOpts{})
+	quote := func(v string) string { return string(mustJSON(t, v)) }
+	for name, raw := range map[string]string{
+		"key twice":          `{"chain_pem": ` + quote(good.chain) + `, "key_pem": ` + quote(good.key) + `, "key_pem": ` + quote(other.key) + `}`,
+		"key in two cases":   `{"KEY_PEM": ` + quote(other.key) + `, "chain_pem": ` + quote(good.chain) + `, "key_pem": ` + quote(good.key) + `}`,
+		"chain in two cases": `{"chain_pem": ` + quote(good.chain) + `, "key_pem": ` + quote(good.key) + `, "Chain_PEM": ` + quote(other.chain) + `}`,
+		"escaped spelling":   `{"chain_pem": ` + quote(good.chain) + `, "key_pem": ` + quote(good.key) + `, "key\u005fpem": ` + quote(other.key) + `}`,
+	} {
+		r := tf.raw(t, http.MethodPost, tf.url+"/certificate", "owner", []byte(raw), nil)
+		wantStatus(t, name, r, fiber.StatusBadRequest, "INVALID_CERTIFICATE")
+		if r.body["field"] != "body" || r.body["reason"] != "bad_json" {
+			t.Errorf("%s: field %v reason %v: %s", name, r.body["field"], r.body["reason"], r.raw)
+		}
+	}
+	if tf.certificates(t, tf.appID) != 0 {
+		t.Error("a body with a repeated field stored a certificate")
+	}
 	// Empty fields are the same refusal as text that is no PEM.
 	r := tf.raw(t, http.MethodPost, tf.url+"/certificate", "owner", []byte(`{}`), nil)
 	wantStatus(t, "no fields", r, fiber.StatusBadRequest, "INVALID_CERTIFICATE")
@@ -457,6 +476,9 @@ func TestDBAppTLSUploadLogsNothingOfTheKey(t *testing.T) {
 	check("a body cut off in the key")
 	tf.raw(t, http.MethodPost, tf.url+"/certificate", "owner", mustJSON(t, map[string]any{"chain_pem": 5, "key_pem": good.key}), nil)
 	check("a body with the key and a chain that is no string")
+	quoted := string(mustJSON(t, good.key))
+	tf.raw(t, http.MethodPost, tf.url+"/certificate", "owner", []byte(`{"key_pem": `+quoted+`, "KEY_PEM": `+quoted+`}`), nil)
+	check("a body with the key twice")
 
 	wantStatus(t, "success", tf.upload(t, "owner", good), fiber.StatusCreated, "")
 	check("a stored upload")
@@ -502,6 +524,11 @@ func TestDBAppTLSUploadClearsTheRequestBody(t *testing.T) {
 		"refused":       {mustJSON(t, map[string]any{"chain_pem": "hello", "key_pem": good.key}), fiber.StatusBadRequest},
 		"cut off":       {valid[:len(valid)-40], fiber.StatusBadRequest},
 		"wrong content": {mustJSON(t, map[string]any{"chain_pem": 5, "key_pem": good.key}), fiber.StatusBadRequest},
+		// The key is in the chain too: a combined file, with and without a key of its own.
+		"combined file":          {mustJSON(t, map[string]any{"chain_pem": good.chain + good.key, "key_pem": good.key}), fiber.StatusBadRequest},
+		"combined file alone":    {mustJSON(t, map[string]any{"chain_pem": good.chain + good.key}), fiber.StatusBadRequest},
+		"key twice":              {[]byte(`{"key_pem": ` + string(mustJSON(t, good.key)) + `, "KEY_PEM": ` + string(mustJSON(t, good.key)) + `}`), fiber.StatusBadRequest},
+		"key under another name": {[]byte(`{"chain_pem": "x", "note": ` + string(mustJSON(t, good.key)) + `}`), fiber.StatusBadRequest},
 	} {
 		if got := send(c.body); got != c.status {
 			t.Fatalf("%s: status %d, want %d", name, got, c.status)

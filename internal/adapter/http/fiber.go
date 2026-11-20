@@ -179,6 +179,10 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 		ReadTimeout:           httpReadTimeout,
 		WriteTimeout:          httpWriteTimeout,
 		IdleTimeout:           httpIdleTimeout,
+		// No handler reads a form or a file; they all read JSON. Without the pre-parse a multipart
+		// body is not copied into form values before a handler looks at it, which an upload of a
+		// private key would otherwise leave behind.
+		DisablePreParseMultipartForm: true,
 	})
 	// First: every later middleware and handler reads the resolved client
 	// address through c.IP() (server.trusted_proxies; never Fiber's

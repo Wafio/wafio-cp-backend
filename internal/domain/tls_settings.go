@@ -30,9 +30,8 @@ const (
 
 // Codes of a TLSConflictError, the ones the HTTP API answers with.
 const (
-	TLSConflictListen           = "LISTEN_CONFLICT"
-	TLSConflictListenerSettings = "LISTENER_SETTINGS_DIFFER"
-	TLSConflictHost             = "HOST_CONFLICT"
+	TLSConflictListen = "LISTEN_CONFLICT"
+	TLSConflictHost   = "HOST_CONFLICT"
 )
 
 // TLSSettings is what the dashboard saves for the TLS of one application. Normalize turns it into
@@ -183,25 +182,12 @@ func canonicalTLSListen(field, v string) (string, error) {
 	return ap.String(), nil
 }
 
-// ListenerLimits are the settings of proxy_config that a listener cannot change while it runs, so
-// that applications sharing a TLS listener must agree on them. A zero value in proxy_config is
-// already replaced by its default.
-type ListenerLimits struct {
-	ReadMs, WriteMs, MaxBodyBytes, ReadBuf int
-}
-
-// ListenerLimitsOf picks the listener settings out of a parsed proxy_config.
-func ListenerLimitsOf(pc ProxyConfig) ListenerLimits {
-	return ListenerLimits{ReadMs: pc.Timeouts.ReadMs, WriteMs: pc.Timeouts.WriteMs, MaxBodyBytes: pc.MaxBodyBytes, ReadBuf: pc.ReadBuf}
-}
-
 // TLSSite is one application in gateway mode as far as the placement checks need it.
 type TLSSite struct {
 	AppID, Name    string
 	Listen         string
 	RedirectListen string
 	Hosts          []string
-	Limits         ListenerLimits
 }
 
 // PlainListener is the listener an application opens for itself (listen_host and listen_port of
@@ -229,8 +215,6 @@ func (e *TLSConflictError) Error() string {
 	switch e.Code {
 	case TLSConflictHost:
 		return fmt.Sprintf("host %s on %s is already served by application %s", e.Host, e.Address, e.OtherAppName)
-	case TLSConflictListenerSettings:
-		return fmt.Sprintf("listener %s is shared with application %s, whose timeouts or limits differ", e.Address, e.OtherAppName)
 	default:
 		return fmt.Sprintf("address %s is already used by application %s", e.Address, e.OtherAppName)
 	}
@@ -283,9 +267,10 @@ func listenersClash(a, b string) bool {
 // only (a plain listener, HTTPS, or a redirect), except that several applications may share one
 // HTTPS listener and one redirect listener by naming the same address; two addresses on one port
 // cannot both be bound when one of them is a wildcard (a plain listener counts as well); a host
-// once per HTTPS listener; equal timeouts and limits on a shared HTTPS listener; and a host that
-// one redirect listener sends to one HTTPS port only. Two plain listeners are only compared by the
-// database, which refuses the same address twice on an agent.
+// once per HTTPS listener; and a host that one redirect listener sends to one HTTPS port only. Two
+// plain listeners are only compared by the database, which refuses the same address twice on an
+// agent. Applications that share an HTTPS listener may have different limits: the agent applies the
+// largest value per listener and the limits of each application after routing.
 func CheckTLSPlacement(self TLSSite, others []TLSSite, plain []PlainListener) error {
 	gateway := self.Listen != ""
 	if gateway {
@@ -352,9 +337,6 @@ func CheckTLSPlacement(self TLSSite, others []TLSSite, plain []PlainListener) er
 		if o.Listen == self.Listen {
 			if host, ok := sharedTLSHost(self.Hosts, o.Hosts); ok {
 				return &TLSConflictError{Code: TLSConflictHost, Field: "hosts", Address: self.Listen, Host: host, OtherAppID: o.AppID, OtherAppName: o.Name}
-			}
-			if o.Limits != self.Limits {
-				return &TLSConflictError{Code: TLSConflictListenerSettings, Field: "listen", Address: self.Listen, OtherAppID: o.AppID, OtherAppName: o.Name}
 			}
 		}
 		// One redirect listener answers a host with one HTTPS port. Two applications that share it

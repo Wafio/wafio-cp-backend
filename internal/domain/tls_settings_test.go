@@ -142,8 +142,8 @@ func TestTLSHostErrorShowsAShortenedName(t *testing.T) {
 	}
 }
 
-func site(app, listen, redirect string, limits ListenerLimits, hosts ...string) TLSSite {
-	return TLSSite{AppID: app, Name: "app-" + app, Listen: listen, RedirectListen: redirect, Hosts: hosts, Limits: limits}
+func site(app, listen, redirect string, hosts ...string) TLSSite {
+	return TLSSite{AppID: app, Name: "app-" + app, Listen: listen, RedirectListen: redirect, Hosts: hosts}
 }
 
 func plain(app, addr string) PlainListener {
@@ -151,9 +151,7 @@ func plain(app, addr string) PlainListener {
 }
 
 func TestCheckTLSPlacement(t *testing.T) {
-	std := ListenerLimits{ReadMs: 30000, WriteMs: 30000, MaxBodyBytes: 10 << 20, ReadBuf: 16384}
-	big := ListenerLimits{ReadMs: 30000, WriteMs: 30000, MaxBodyBytes: 20 << 20, ReadBuf: 16384}
-	self := site("self", "0.0.0.0:443", "0.0.0.0:80", std, "shop.example.com", "www.example.com")
+	self := site("self", "0.0.0.0:443", "0.0.0.0:80", "shop.example.com", "www.example.com")
 	tests := []struct {
 		name   string
 		self   TLSSite
@@ -165,18 +163,15 @@ func TestCheckTLSPlacement(t *testing.T) {
 		other  string
 	}{
 		{name: "alone"},
-		{name: "same listener, other hosts, same limits",
-			others: []TLSSite{site("b", "0.0.0.0:443", "0.0.0.0:80", std, "blog.example.com")}},
+		{name: "same listener, other hosts",
+			others: []TLSSite{site("b", "0.0.0.0:443", "0.0.0.0:80", "blog.example.com")}},
 		{name: "same host on another listener",
-			others: []TLSSite{site("b", "0.0.0.0:8443", "", big, "shop.example.com")}},
-		{name: "the other listener may differ in limits",
-			others: []TLSSite{site("b", "10.0.0.1:8443", "", big, "blog.example.com")}},
+			others: []TLSSite{site("b", "0.0.0.0:8443", "", "shop.example.com")}},
+		{name: "another host on another address",
+			others: []TLSSite{site("b", "10.0.0.1:8443", "", "blog.example.com")}},
 		{name: "a host on a shared listener",
-			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "x.example.com", "www.example.com")},
+			others: []TLSSite{site("b", "0.0.0.0:443", "", "x.example.com", "www.example.com")},
 			code:   TLSConflictHost, field: "hosts", host: "www.example.com", other: "b"},
-		{name: "limits of a shared listener",
-			others: []TLSSite{site("b", "0.0.0.0:443", "0.0.0.0:80", big, "blog.example.com")},
-			code:   TLSConflictListenerSettings, field: "listen", other: "b"},
 		{name: "the listener of a plain application",
 			plain: []PlainListener{plain("p", "0.0.0.0:443")},
 			code:  TLSConflictListen, field: "listen", other: "p"},
@@ -195,63 +190,63 @@ func TestCheckTLSPlacement(t *testing.T) {
 			plain: []PlainListener{plain("r", "[::]:443")},
 			code:  TLSConflictListen, field: "listen", other: "r"},
 		{name: "a wildcard plain listener on the port of a specific redirect listener",
-			self:  site("self", "10.0.0.5:8443", "10.0.0.5:80", std, "shop.example.com"),
+			self:  site("self", "10.0.0.5:8443", "10.0.0.5:80", "shop.example.com"),
 			plain: []PlainListener{plain("p", "0.0.0.0:80")},
 			code:  TLSConflictListen, field: "redirect_listen", other: "p"},
 		{name: "a plain listener of another address family next to a wildcard",
 			plain: []PlainListener{plain("p", "[2001:db8::1]:443")}},
 		{name: "a redirect listener that is the HTTPS listener of another",
-			others: []TLSSite{site("b", "0.0.0.0:80", "", std, "blog.example.com")},
+			others: []TLSSite{site("b", "0.0.0.0:80", "", "blog.example.com")},
 			code:   TLSConflictListen, field: "redirect_listen", other: "b"},
 		{name: "a listener that is the redirect listener of another",
-			others: []TLSSite{site("b", "0.0.0.0:8443", "0.0.0.0:443", std, "blog.example.com")},
+			others: []TLSSite{site("b", "0.0.0.0:8443", "0.0.0.0:443", "blog.example.com")},
 			code:   TLSConflictListen, field: "listen", other: "b"},
 		{name: "a host that one redirect listener sends to two ports",
-			others: []TLSSite{site("b", "0.0.0.0:8443", "0.0.0.0:80", big, "www.example.com")},
+			others: []TLSSite{site("b", "0.0.0.0:8443", "0.0.0.0:80", "www.example.com")},
 			code:   TLSConflictListen, field: "redirect_listen", host: "www.example.com", other: "b"},
 		{name: "two ports on one redirect listener for different hosts",
-			others: []TLSSite{site("b", "0.0.0.0:8443", "0.0.0.0:80", big, "blog.example.com")}},
+			others: []TLSSite{site("b", "0.0.0.0:8443", "0.0.0.0:80", "blog.example.com")}},
 		{name: "the same port on two addresses sends a host to one port",
-			self:   site("self", "10.0.0.5:443", "0.0.0.0:80", std, "shop.example.com", "www.example.com"),
-			others: []TLSSite{site("b", "10.0.0.6:443", "0.0.0.0:80", std, "www.example.com")}},
+			self:   site("self", "10.0.0.5:443", "0.0.0.0:80", "shop.example.com", "www.example.com"),
+			others: []TLSSite{site("b", "10.0.0.6:443", "0.0.0.0:80", "www.example.com")}},
 		// Two different addresses on one port cannot both be bound when one of them is a wildcard.
 		{name: "a wildcard HTTPS listener and a specific one on its port",
-			others: []TLSSite{site("b", "10.0.0.1:443", "", std, "blog.example.com")},
+			others: []TLSSite{site("b", "10.0.0.1:443", "", "blog.example.com")},
 			code:   TLSConflictListen, field: "listen", other: "b"},
 		{name: "a specific HTTPS listener and a wildcard on its port",
-			self:   site("self", "10.0.0.1:443", "", std, "shop.example.com"),
-			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "blog.example.com")},
+			self:   site("self", "10.0.0.1:443", "", "shop.example.com"),
+			others: []TLSSite{site("b", "0.0.0.0:443", "", "blog.example.com")},
 			code:   TLSConflictListen, field: "listen", other: "b"},
 		{name: "an IPv6 wildcard takes an IPv4 address",
-			self:   site("self", "[::]:443", "", std, "shop.example.com"),
-			others: []TLSSite{site("b", "10.0.0.1:443", "", std, "blog.example.com")},
+			self:   site("self", "[::]:443", "", "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.1:443", "", "blog.example.com")},
 			code:   TLSConflictListen, field: "listen", other: "b"},
 		{name: "the two wildcards",
-			self:   site("self", "[::]:443", "", std, "shop.example.com"),
-			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "blog.example.com")},
+			self:   site("self", "[::]:443", "", "shop.example.com"),
+			others: []TLSSite{site("b", "0.0.0.0:443", "", "blog.example.com")},
 			code:   TLSConflictListen, field: "listen", other: "b"},
 		{name: "an IPv4 wildcard does not take an IPv6 address",
-			others: []TLSSite{site("b", "[2001:db8::1]:443", "", std, "blog.example.com")}},
+			others: []TLSSite{site("b", "[2001:db8::1]:443", "", "blog.example.com")}},
 		{name: "two specific addresses on one port",
-			self:   site("self", "10.0.0.1:443", "", std, "shop.example.com"),
-			others: []TLSSite{site("b", "10.0.0.2:443", "", big, "blog.example.com")}},
+			self:   site("self", "10.0.0.1:443", "", "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.2:443", "", "blog.example.com")}},
 		{name: "a wildcard on another port",
-			others: []TLSSite{site("b", "10.0.0.1:8443", "", std, "blog.example.com")}},
+			others: []TLSSite{site("b", "10.0.0.1:8443", "", "blog.example.com")}},
 		{name: "the same wildcard address is one shared listener",
-			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "blog.example.com")}},
+			others: []TLSSite{site("b", "0.0.0.0:443", "", "blog.example.com")}},
 		{name: "wildcard and specific redirect listeners on one port",
-			others: []TLSSite{site("b", "0.0.0.0:8443", "10.0.0.1:80", std, "blog.example.com")},
+			others: []TLSSite{site("b", "0.0.0.0:8443", "10.0.0.1:80", "blog.example.com")},
 			code:   TLSConflictListen, field: "redirect_listen", other: "b"},
 		{name: "a redirect listener that overlaps the HTTPS listener of another",
-			self:   site("self", "10.0.0.5:443", "0.0.0.0:8080", std, "shop.example.com"),
-			others: []TLSSite{site("b", "10.0.0.9:8080", "", std, "blog.example.com")},
+			self:   site("self", "10.0.0.5:443", "0.0.0.0:8080", "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.9:8080", "", "blog.example.com")},
 			code:   TLSConflictListen, field: "redirect_listen", other: "b"},
 		{name: "an HTTPS listener that overlaps the redirect listener of another",
-			self:   site("self", "10.0.0.5:8080", "", std, "shop.example.com"),
-			others: []TLSSite{site("b", "10.0.0.9:443", "0.0.0.0:8080", std, "blog.example.com")},
+			self:   site("self", "10.0.0.5:8080", "", "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.9:443", "0.0.0.0:8080", "blog.example.com")},
 			code:   TLSConflictListen, field: "listen", other: "b"},
 		{name: "the application itself among the others is skipped",
-			others: []TLSSite{site("self", "0.0.0.0:443", "0.0.0.0:80", big, "shop.example.com")}},
+			others: []TLSSite{site("self", "0.0.0.0:443", "0.0.0.0:80", "shop.example.com")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -281,9 +276,8 @@ func TestCheckTLSPlacement(t *testing.T) {
 }
 
 func TestCheckTLSPlacementWithoutARedirectListener(t *testing.T) {
-	std := ListenerLimits{ReadMs: 1}
-	self := site("self", "0.0.0.0:443", "", std, "a.example.com")
-	if err := CheckTLSPlacement(self, []TLSSite{site("b", "0.0.0.0:8443", "", std, "a.example.com"), site("c", "0.0.0.0:9443", "", std, "a.example.com")}, nil); err != nil {
+	self := site("self", "0.0.0.0:443", "", "a.example.com")
+	if err := CheckTLSPlacement(self, []TLSSite{site("b", "0.0.0.0:8443", "", "a.example.com"), site("c", "0.0.0.0:9443", "", "a.example.com")}, nil); err != nil {
 		t.Fatalf("empty redirect listeners clash: %v", err)
 	}
 	if err := CheckTLSPlacement(self, nil, []PlainListener{plain("p", "0.0.0.0:80")}); err != nil {
@@ -291,30 +285,11 @@ func TestCheckTLSPlacementWithoutARedirectListener(t *testing.T) {
 	}
 }
 
-func TestListenerLimitsOfUsesTheEffectiveValues(t *testing.T) {
-	empty, err := ParseProxyConfig([]byte(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	set, err := ParseProxyConfig([]byte(`{"timeouts":{"read_ms":60000,"write_ms":60000},"max_body_bytes":67108864,"read_buf":16384}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a, b := ListenerLimitsOf(empty), ListenerLimitsOf(set); a != b || a.ReadMs == 0 || a.WriteMs == 0 || a.MaxBodyBytes == 0 || a.ReadBuf == 0 {
-		t.Errorf("an unset value and its default differ: %+v and %+v", a, b)
-	}
-	other, _ := ParseProxyConfig([]byte(`{"read_buf":32768}`))
-	if ListenerLimitsOf(other) == ListenerLimitsOf(empty) {
-		t.Error("read_buf is not compared")
-	}
-}
-
 // An application that is not in gateway mode only has its plain listener to place, which must not be
 // an address that an HTTPS or redirect listener of the agent uses.
 func TestCheckTLSPlacementOfAPlainListener(t *testing.T) {
-	std := ListenerLimits{ReadMs: 1}
 	mover := TLSSite{AppID: "mover", Name: "app-mover"}
-	gateway := site("g", "0.0.0.0:443", "0.0.0.0:80", std, "shop.example.com")
+	gateway := site("g", "0.0.0.0:443", "0.0.0.0:80", "shop.example.com")
 	tests := []struct {
 		name   string
 		self   TLSSite
@@ -326,12 +301,12 @@ func TestCheckTLSPlacementOfAPlainListener(t *testing.T) {
 		{"the redirect listener of another", mover, []PlainListener{plain("mover", "0.0.0.0:80")}, []TLSSite{gateway}, "listen_port"},
 		{"another address on the port of a wildcard", mover, []PlainListener{plain("mover", "127.0.0.1:443")}, []TLSSite{gateway}, "listen_port"},
 		{"an IPv6 wildcard on the port of a wildcard", mover, []PlainListener{plain("mover", "[::]:443")}, []TLSSite{gateway}, "listen_port"},
-		{"a specific address next to a specific one", mover, []PlainListener{plain("mover", "127.0.0.1:443")}, []TLSSite{site("g", "10.0.0.1:443", "", std, "shop.example.com")}, ""},
+		{"a specific address next to a specific one", mover, []PlainListener{plain("mover", "127.0.0.1:443")}, []TLSSite{site("g", "10.0.0.1:443", "", "shop.example.com")}, ""},
 		{"an IPv6 address next to an IPv4 wildcard", mover, []PlainListener{plain("mover", "[2001:db8::1]:443")}, []TLSSite{gateway}, ""},
 		{"another port", mover, []PlainListener{plain("mover", "0.0.0.0:8080")}, []TLSSite{gateway}, ""},
 		{"no plain listener", mover, nil, []TLSSite{gateway}, ""},
 		{"a plain listener of another application", mover, []PlainListener{plain("other", "0.0.0.0:443")}, []TLSSite{gateway}, ""},
-		{"an application in gateway mode with its own plain listener", site("self", "0.0.0.0:9443", "", std, "a.example.com"),
+		{"an application in gateway mode with its own plain listener", site("self", "0.0.0.0:9443", "", "a.example.com"),
 			[]PlainListener{plain("self", "0.0.0.0:443")}, []TLSSite{gateway}, "listen_port"},
 	}
 	for _, tt := range tests {
@@ -350,7 +325,7 @@ func TestCheckTLSPlacementOfAPlainListener(t *testing.T) {
 		})
 	}
 	// The hosts and limits of an application that has no HTTPS listener are nobody's business.
-	other := site("o", "0.0.0.0:443", "", ListenerLimits{ReadMs: 9}, "shop.example.com")
+	other := site("o", "0.0.0.0:443", "", "shop.example.com")
 	if err := CheckTLSPlacement(TLSSite{AppID: "x", Name: "app-x", Hosts: []string{"shop.example.com"}}, []TLSSite{other}, nil); err != nil {
 		t.Errorf("a proxy application was judged by hosts: %v", err)
 	}
