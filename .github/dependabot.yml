@@ -1,18 +1,23 @@
 # Dependabot opens weekly pull requests for the Go modules (the root module and shared/) and for the actions used in
 # the workflows. It leaves out the Dockerfile and the compose file, so base image tags are not updated by it.
+#
+# The root module replaces shared/ with the local directory, so a version raised in shared/go.mod has to be raised in
+# go.mod too, or the root build stops with "updates to go.mod needed". group-by: dependency-name puts both directories
+# into one pull request for each dependency.
 
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /shared
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-  - package-ecosystem: gomod
-    directory: /shared
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns: ['*']
+        group-by: dependency-name
   - package-ecosystem: github-actions
     directory: /
     schedule:
