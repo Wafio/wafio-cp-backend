@@ -212,6 +212,9 @@ func (h *AppsHandler) Update(c *fiber.Ctx) error {
 		if errors.As(err, &refuse) {
 			return c.Status(refuse.status).JSON(refuse.body)
 		}
+		if handled, answered := tlsRefused(c, err); handled {
+			return answered
+		}
 		if conflict, ok := appUniqueConflict(err); ok {
 			return c.Status(fiber.StatusConflict).JSON(conflict)
 		}

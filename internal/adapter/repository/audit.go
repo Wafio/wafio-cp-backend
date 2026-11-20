@@ -58,6 +58,13 @@ const (
 	AuditAppMaintenanceDisabled = "app.maintenance_disabled"
 	AuditAppMaintenanceUpdated  = "app.maintenance_updated"
 
+	// TLS of an application: the settings saved, a certificate uploaded or deleted, an ACME
+	// certificate requested.
+	AuditAppTLSUpdated             = "app.tls_updated"
+	AuditAppTLSCertificateUploaded = "app.tls_certificate_uploaded"
+	AuditAppTLSCertificateDeleted  = "app.tls_certificate_deleted"
+	AuditAppTLSACMERequested       = "app.tls_acme_requested"
+
 	// WAF (project-level) config
 	AuditWafConfigSaved      = "waf.config_saved"
 	AuditWafAppAssigned      = "waf.app_assigned" //nolint:gosec // audit action name, not a credential

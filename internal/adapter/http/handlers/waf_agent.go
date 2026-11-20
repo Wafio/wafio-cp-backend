@@ -146,6 +146,9 @@ func (h *WAFAgentHandler) AssignAppAgent(c *fiber.Ctx) error {
 		if errors.As(err, &refuse) {
 			return c.Status(refuse.status).JSON(refuse.body)
 		}
+		if handled, answered := tlsRefused(c, err); handled {
+			return answered
+		}
 		if isListenAddrTaken(err) {
 			conflict, _ := appUniqueConflict(err)
 			return c.Status(fiber.StatusConflict).JSON(conflict)
@@ -690,6 +693,9 @@ func (h *WAFAgentHandler) CreateAgentRoute(c *fiber.Ctx) error {
 	}
 	if err := h.Repo.WAF.AssignApp(c.UserContext(), agentID, created.ID, mode); err != nil {
 		_ = h.Repo.App.Delete(c.UserContext(), created.ID)
+		if handled, answered := tlsRefused(c, err); handled {
+			return answered
+		}
 		if conflict, ok := appUniqueConflict(err); ok {
 			return c.Status(fiber.StatusConflict).JSON(conflict)
 		}
@@ -801,6 +807,9 @@ func (h *WAFAgentHandler) UpdateAgentRoute(c *fiber.Ctx) error {
 		var refuse *refusal
 		if errors.As(err, &refuse) {
 			return c.Status(refuse.status).JSON(refuse.body)
+		}
+		if handled, answered := tlsRefused(c, err); handled {
+			return answered
 		}
 		if conflict, ok := appUniqueConflict(err); ok {
 			return c.Status(fiber.StatusConflict).JSON(conflict)

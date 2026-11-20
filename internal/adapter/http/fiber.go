@@ -512,6 +512,19 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	}
 	pViewer.Get("/apps/:appId/maintenance", RequireAppInProject(repo), rateReadByUser, maintenance.Get)
 	pViewer.Put("/apps/:appId/maintenance", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, maintenance.Put)
+	// TLS of an application: settings, uploaded certificate (the key is sealed with totp.enc_key),
+	// ACME request. Uploads have a budget of their own on top of the write limiter.
+	tlsOpts := resolveOptions(opts)
+	appTLS := &handlers.AppTLSHandler{Repo: repo, Resolver: tlsOpts.tlsResolver, Roots: tlsOpts.tlsRoots}
+	if agentServer != nil {
+		appTLS.AgentServer = agentServer
+	}
+	rateCertUploadByUser := RateLimitCertUploadByUser(cfg)
+	pViewer.Get("/apps/:appId/tls", RequireAppInProject(repo), rateReadByUser, appTLS.Get)
+	pViewer.Put("/apps/:appId/tls", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.Put)
+	pViewer.Post("/apps/:appId/tls/certificate", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, rateCertUploadByUser, appTLS.UploadCertificate)
+	pViewer.Delete("/apps/:appId/tls/certificate", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.DeleteCertificate)
+	pViewer.Post("/apps/:appId/tls/acme", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.RequestACME)
 	// Per-app WAF dashboard (decisions + counters pushed by the WAF agents)
 	pViewer.Get("/apps/:appId/waf/decisions", RequireAppInProject(repo), rateReadByUser, wafAgent.AppDecisions)
 	feedbackH := &handlers.WAFFeedbackHandler{Repo: repo, SummarySvc: &application.FeedbackSummary{Store: repo.WAF}}

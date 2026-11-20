@@ -8564,7 +8564,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE). Nothing is saved.
+          description: 'Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or a new listen address or proxy_config clashes with the TLS settings of the applications on the agent: the address is used by an HTTPS or redirect listener (LISTEN_CONFLICT) or applications that share an HTTPS listener would get different timeouts or limits (LISTENER_SETTINGS_DIFFER; field names the setting). Nothing is saved.'
           content:
             application/json:
               schema:
@@ -9336,6 +9336,444 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/tls:
+    get:
+      operationId: AppTLSHandler_Get
+      summary: Get how an application is served over TLS
+      description: 'Returns the TLS settings of the application (mode proxy or gateway, hosts, listen, redirect_listen and source), its current uploaded certificate, the ACME request, the last status its WAF agent reported, and warnings. A certificate is described by its names, issuer, dates, days_left, SHA-256 of the leaf, key type and trusted flag. No answer of the TLS operations carries a private key, and none ever will: the key is sealed at upload and only sent to the agent. certificate is null while the application has none, acme is null until a certificate was requested, and status is null until the agent reported since the settings last changed. agent_supported is whether the WAF agent that serves the application said in its Hello that it serves TLS certificates (null: no agent serves the application, or it never said), and agent_host_bound is whether its credential is bound to its host, which an uploaded key needs (null: no agent serves the application). listen is the HTTPS address the agent binds, 0.0.0.0:443 until another one is saved. warnings lists not_trusted (the uploaded chain does not verify to the system roots, which is fine for a private CA), and expires_soon (an uploaded certificate with 30 days or fewer left, an ACME certificate with 14 or fewer, which for ACME means that the renewal is late; days_left is 0 or less once the certificate expired).'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: viewer
+      x-rate-limiter: rateReadByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      responses:
+        '200':
+          description: The TLS state of the application.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSState'
+              example:
+                mode: gateway
+                hosts:
+                  - shop.example.com
+                listen: 0.0.0.0:443
+                redirect_listen: 0.0.0.0:80
+                source: uploaded
+                certificate:
+                  id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                  source: uploaded
+                  names:
+                    - shop.example.com
+                  issuer: Example Issuing CA
+                  not_before: '2026-10-01T00:00:00Z'
+                  not_after: '2027-01-01T00:00:00Z'
+                  days_left: 41
+                  leaf_sha256: 9b0c2b1f5d6a4f0b8a6c1e3d7f2a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
+                  key_type: ecdsa-p256
+                  trusted: true
+                  created_at: '2026-11-20T09:30:00Z'
+                acme: null
+                status:
+                  agent_id: a1f0c2d4-8e5b-4a77-b1c9-5d1c2e3f4a5b
+                  source: uploaded
+                  state: active
+                  certificate_id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                  leaf_sha256: 9b0c2b1f5d6a4f0b8a6c1e3d7f2a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
+                  error: ''
+                  next_attempt_at: null
+                  request_id: ''
+                  received_at: '2026-11-20T09:31:00Z'
+                  names:
+                    - shop.example.com
+                  issuer: Example Issuing CA
+                  not_before: '2026-10-01T00:00:00Z'
+                  not_after: '2027-01-01T00:00:00Z'
+                agent_supported: true
+                agent_host_bound: true
+                warnings: []
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The state could not be read. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      operationId: AppTLSHandler_Put
+      summary: Set how an application is served over TLS
+      description: 'Replaces the TLS settings: mode, hosts (1 to 100 lower-case DNS names without wildcard, IP address or port, unique on one listener of one agent), listen (ip:port or [ipv6]:port, default 0.0.0.0:443), redirect_listen (optional, differs from listen) and source (acme or uploaded, required in gateway mode). A proxy application keeps its settings as a draft and the agent never sees them. The first field that is not valid is answered with INVALID_TLS_SETTINGS and its name. Switching to gateway, or changing the source or the hosts of a gateway application, is checked under a lock on the application and on the bundle of its WAF agent: the agent must not have said that it cannot serve TLS certificates (TLS_UNSUPPORTED; an agent that never said is let through); for the uploaded source the application needs a current certificate that has not expired (CERTIFICATE_REQUIRED) and covers every host (CERTIFICATE_DOES_NOT_COVER), and its agent needs a credential bound to its host, kind and name (AGENT_NOT_HOST_BOUND: enroll the agent again with a host key); for acme a request id is minted when there is none. Every PUT of a gateway application is also checked against the other applications on its agent, which the agent would otherwise refuse as a whole: a listener address is used by one kind of listener only (LISTEN_CONFLICT: an address of a plain listener, an HTTPS listener or a redirect listener, or two addresses on one port where one is a wildcard), a host is served once per HTTPS listener (HOST_CONFLICT), and applications that share an HTTPS listener need equal read and write timeouts, body limit and read buffer in proxy_config (LISTENER_SETTINGS_DIFFER). Nothing is saved when a check fails. Saves the settings, drops the status the agent reported for another source, raises the bundle generation and pushes it to the project agents when the bundle changed, and writes an audit entry (app.tls_updated). The answer has the shape of GET and carries a dns_mismatch warning for each host that resolves to addresses none of which is a public address the agent host reported (the public_ip and primary_ip of its host information): the lookups share 2 seconds, a host that does not resolve in time or at all gives no warning, and there is no warning when the host reported no public address. Nothing about DNS is stored.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppTLSInput'
+            example:
+              mode: gateway
+              hosts:
+                - shop.example.com
+              listen: 0.0.0.0:443
+              redirect_listen: 0.0.0.0:80
+              source: acme
+      responses:
+        '200':
+          description: The settings as stored, in the shape of the GET answer, with the dns_mismatch warnings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSState'
+              example:
+                mode: gateway
+                hosts:
+                  - shop.example.com
+                listen: 0.0.0.0:443
+                redirect_listen: 0.0.0.0:80
+                source: acme
+                certificate: null
+                acme:
+                  request_id: 0f5d3a84-52f8-4c5f-8c5e-4e9d6d1f21aa
+                  requested_at: '2026-11-20T09:30:00Z'
+                status: null
+                agent_supported: true
+                agent_host_bound: true
+                warnings:
+                  - code: dns_mismatch
+                    host: shop.example.com
+                    resolved:
+                      - 198.51.100.7
+                    agent_addresses:
+                      - 203.0.113.10
+        '400':
+          description: 'The body is not valid JSON (BAD_REQUEST), or a field is not valid (INVALID_TLS_SETTINGS). The answer then carries field, the JSON key that was rejected (mode, source, hosts, listen or redirect_listen), and error holds the reason.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: 'hosts: at least one host is required when mode is "gateway"'
+                code: INVALID_TLS_SETTINGS
+                field: hosts
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A check failed and nothing is saved. Codes: TLS_UNSUPPORTED (the agent said it cannot serve TLS certificates), CERTIFICATE_REQUIRED (an uploaded source needs a current certificate that has not expired), CERTIFICATE_DOES_NOT_COVER (the certificate does not cover a host; the answer carries host), AGENT_NOT_HOST_BOUND (the agent has no credential bound to its host, kind and name), LISTEN_CONFLICT, LISTENER_SETTINGS_DIFFER and HOST_CONFLICT (another application on the agent; field names the setting that must change).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: The WAF agent that serves this application does not serve TLS certificates. Upgrade the agent first.
+                code: TLS_UNSUPPORTED
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The settings could not be saved. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/tls/acme:
+    post:
+      operationId: AppTLSHandler_RequestACME
+      summary: Ask the agent to order an ACME certificate
+      description: 'Sets the source to acme and gives the application a new ACME request id, which the WAF agent reads as an order to start now (also a retry after a failed order). The application needs at least one host (INVALID_TLS_SETTINGS) and one request is accepted per application every 5 minutes (ACME_REQUEST_TOO_SOON, with retry_after in seconds). The status the agent reported for another source is dropped. Raises the bundle generation and pushes it when the application is in gateway mode, and writes an audit entry (app.tls_acme_requested). The answer has the shape of GET.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      responses:
+        '200':
+          description: The state of the application with the new request id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSState'
+              example:
+                mode: gateway
+                hosts:
+                  - shop.example.com
+                listen: 0.0.0.0:443
+                redirect_listen: ''
+                source: acme
+                certificate: null
+                acme:
+                  request_id: 0f5d3a84-52f8-4c5f-8c5e-4e9d6d1f21aa
+                  requested_at: '2026-11-20T09:30:00Z'
+                status: null
+                agent_supported: true
+                agent_host_bound: true
+                warnings: []
+        '400':
+          description: 'The application has no host (INVALID_TLS_SETTINGS, field hosts).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: 'hosts: at least one host is required'
+                code: INVALID_TLS_SETTINGS
+                field: hosts
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A request was made less than 5 minutes ago (ACME_REQUEST_TOO_SOON). retry_after is the number of seconds to wait. Nothing is saved.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: an ACME request was made recently; try again in 212 seconds
+                code: ACME_REQUEST_TOO_SOON
+                retry_after: 212
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The request could not be saved. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/tls/certificate:
+    post:
+      operationId: AppTLSHandler_UploadCertificate
+      summary: Upload the certificate and private key of an application
+      description: 'Stores a certificate chain and its private key as the current certificate of the application and sets the source to uploaded. The body is at most 96 KiB. chain_pem holds only CERTIFICATE blocks, leaf first (1 to 10 certificates, at most 64 KiB; a root at the end is dropped); key_pem holds one unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block (at most 16 KiB; RSA of 2048 to 4096 bits or ECDSA P-256 or P-384). The control plane checks the order of the chain, that the leaf is no CA, the dates (a certificate valid from at most 24 hours ahead is accepted), that no certificate is signed with SHA-1 or MD5, that the leaf covers every host of the application, and that the key matches the leaf. Every refusal is 400 INVALID_CERTIFICATE with field (chain_pem, key_pem, or body when the request is larger than 96 KiB) and reason: bad_pem, private_key_in_chain, too_large, chain_order, ca_leaf, expired, not_yet_valid, weak_signature, names_do_not_cover (the answer carries host), key_encrypted (the message names the openssl command that removes the passphrase), pkcs12 (the message names the openssl command that converts the file), unsupported_key or key_mismatch. The answer never repeats the input. A chain that does not verify to the system roots is stored (a private CA is a legitimate source) and shown with trusted false. The key is sealed with the key from totp.enc_key before it is stored and is never returned or logged; without that key the upload is refused with 503 KEY_ENCRYPTION_UNAVAILABLE. A new upload gets a new certificate id and the previous certificate loses its key. When the application is in gateway mode the bundle generation goes up and the bundle is pushed; the certificate itself goes to the agent over its gRPC stream, and only to an agent whose credential is bound to its host. An application in gateway mode with another source switches to uploaded with this upload, and is refused with 409 AGENT_NOT_HOST_BOUND when its agent has no such credential. Writes an audit entry (app.tls_certificate_uploaded: id, names, expiry, leaf, replaced id). Uploads are limited to 10 per minute per user, refused ones included.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser, rateCertUploadByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppTLSCertificateInput'
+            example:
+              chain_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n"
+              key_pem: "-----BEGIN PRIVATE KEY-----\nMIGH...\n-----END PRIVATE KEY-----\n"
+      responses:
+        '201':
+          description: The certificate as stored. It is now the current one of the application.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSCertificate'
+              example:
+                id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                source: uploaded
+                names:
+                  - shop.example.com
+                issuer: Example Issuing CA
+                not_before: '2026-10-01T00:00:00Z'
+                not_after: '2027-01-01T00:00:00Z'
+                days_left: 41
+                leaf_sha256: 9b0c2b1f5d6a4f0b8a6c1e3d7f2a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
+                key_type: ecdsa-p256
+                trusted: true
+                created_at: '2026-11-20T09:30:00Z'
+        '400':
+          description: 'The body is not valid JSON (BAD_REQUEST), or the chain or the key is refused (INVALID_CERTIFICATE, with field and reason). Nothing is stored.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: 'the key is protected by a passphrase; remove it first: openssl pkey -in key.pem -out key-plain.pem'
+                code: INVALID_CERTIFICATE
+                field: key_pem
+                reason: key_encrypted
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'The application is in gateway mode with another source and its agent has no credential bound to its host (AGENT_NOT_HOST_BOUND). Nothing is stored.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: The WAF agent that serves this application has no credential bound to its host, so it cannot receive a private key. Enroll the agent again with a host key, then retry.
+                code: AGENT_NOT_HOST_BOUND
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The certificate could not be stored. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'No encryption key is configured on the control plane (KEY_ENCRYPTION_UNAVAILABLE). Nothing is stored.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'Certificate keys cannot be stored: no encryption key is configured on the control plane (totp.enc_key).'
+                code: KEY_ENCRYPTION_UNAVAILABLE
+    delete:
+      operationId: AppTLSHandler_DeleteCertificate
+      summary: Delete the certificates of an application
+      description: 'Deletes the private key of every certificate of the application and the pointer to the current one. The certificate rows stay as a record of what was uploaded. It is refused while the application is in gateway mode with the uploaded source (CERTIFICATE_IN_USE): switch it to acme or to proxy mode first, or upload a replacement. A key that an agent already holds is not recalled: replace the certificate after a move or a removal. The bundle does not change. Writes an audit entry (app.tls_certificate_deleted).'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      responses:
+        '200':
+          description: The certificate and its key were deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                    description: Always true.
+                required:
+                  - deleted
+                additionalProperties: false
+              example:
+                deleted: true
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request), or the application has no current certificate (CERTIFICATE_NOT_FOUND).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'The application serves from the uploaded certificate (CERTIFICATE_IN_USE). Nothing is deleted.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: This certificate is serving traffic. Switch the application to ACME or to proxy mode first, or upload a replacement.
+                code: CERTIFICATE_IN_USE
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The certificate could not be deleted. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/projects/{id}/apps/{appId}/waf-agent:
     get:
       operationId: WAFAgentHandler_GetAppAgent
@@ -9381,7 +9819,7 @@ paths:
     put:
       operationId: WAFAgentHandler_AssignAppAgent
       summary: Assign an application to a WAF agent
-      description: Replaces the assignment of the application with the given WAF agent and mode (default block). While the application is in maintenance mode, it can only move to a different agent that supports maintenance mode (an agent that never reported is let through) and whose bundle, with this application added, stays within the 4,193,280 bytes an agent accepts; otherwise the answer is 409 and the assignment does not change. Changing only the mode on the agent that serves the application is not a move. Pushes a new bundle to the project agents and writes an audit entry (waf.app_assigned).
+      description: 'Replaces the assignment of the application with the given WAF agent and mode (default block). While the application is in maintenance mode, it can only move to a different agent that supports maintenance mode (an agent that never reported is let through) and whose bundle, with this application added, stays within the 4,193,280 bytes an agent accepts; otherwise the answer is 409 and the assignment does not change. An application in gateway mode also needs what a switch to gateway needs on the new agent (the agent must not have said that it cannot serve TLS certificates, and for the uploaded source it needs a credential bound to its host), and every application is checked against the TLS listeners, hosts and listener settings of the applications already on that agent; otherwise the answer is 409 and the assignment does not change. A key that the previous agent already holds is not recalled: replace the certificate after a move. Changing only the mode on the agent that serves the application is not a move. Pushes a new bundle to the project agents and writes an audit entry (waf.app_assigned).'
       tags:
         - Applications
         - WAF agents
@@ -9469,7 +9907,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Another application on the agent already uses the listen address (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the agent does not support it (MAINTENANCE_UNSUPPORTED), or its bundle with this application would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE).'
+          description: 'Another application on the agent already uses the listen address (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the agent does not support it (MAINTENANCE_UNSUPPORTED), or its bundle with this application would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or the move breaks a TLS rule on the target agent: the application is in gateway mode and the agent said it cannot serve TLS certificates (TLS_UNSUPPORTED), the application uses the uploaded source and the agent has no credential bound to its host (AGENT_NOT_HOST_BOUND), or next to the applications already on the agent its plain listener, HTTPS or redirect listener, hosts or listener settings would clash (LISTEN_CONFLICT, HOST_CONFLICT, LISTENER_SETTINGS_DIFFER; field names the setting). Nothing changes.'
           content:
             application/json:
               schema:
@@ -15257,7 +15695,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (an application with this name exists in the project), LISTEN_HOST_TAKEN (another application on this agent uses the listen address).'
+          description: 'Codes: CONFLICT (an application with this name exists in the project), LISTEN_HOST_TAKEN (another application on this agent uses the listen address), LISTEN_CONFLICT (the listen address is used by an HTTPS or redirect listener of another application on this agent; field names the setting). Nothing is created.'
           content:
             application/json:
               schema:
@@ -15372,7 +15810,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts). Nothing is saved.'
+          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts), LISTEN_CONFLICT (the new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one), LISTENER_SETTINGS_DIFFER (applications that share an HTTPS listener would get different timeouts or limits). field names the setting. Nothing is saved.'
           content:
             application/json:
               schema:
@@ -18762,6 +19200,340 @@ components:
         - client_ip
         - default_message
         - stock_html
+      additionalProperties: false
+    AppTLSCertificate:
+      type: object
+      description: An uploaded certificate without its chain and its private key.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Certificate id. An upload or a replace always gets a new one, so an id never names other bytes.
+        source:
+          type: string
+          enum:
+            - uploaded
+        names:
+          type: array
+          description: The DNS names the leaf covers, lower case.
+          items:
+            type: string
+        issuer:
+          type: string
+          description: Common name of the issuer, else its organisation, at most 255 bytes.
+        not_before:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+        days_left:
+          type: integer
+          description: Whole days until not_after; 0 or less once it expired.
+        leaf_sha256:
+          type: string
+          description: Lower-case hex SHA-256 of the DER of the leaf.
+          pattern: ^[0-9a-f]{64}$
+        key_type:
+          type: string
+          description: rsa-<bits>, ecdsa-p256 or ecdsa-p384.
+          pattern: ^(rsa-[0-9]+|ecdsa-p256|ecdsa-p384)$
+        trusted:
+          type: boolean
+          description: Whether the chain verifies to the system roots. false is a warning, not a refusal.
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - source
+        - names
+        - issuer
+        - not_before
+        - not_after
+        - days_left
+        - leaf_sha256
+        - key_type
+        - trusted
+        - created_at
+      additionalProperties: false
+    AppTLSCertificateInput:
+      type: object
+      description: A certificate chain and its private key.
+      properties:
+        chain_pem:
+          type: string
+          description: PEM text with CERTIFICATE blocks only, leaf first.
+          maxLength: 65536
+        key_pem:
+          type: string
+          description: One unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block. It is sealed before it is stored and never returned.
+          maxLength: 16384
+      required:
+        - chain_pem
+        - key_pem
+      additionalProperties: false
+    AppTLSError:
+      type: object
+      description: An error of the TLS operations. Like Error, with the reason of a refused certificate, the host that is not covered and the seconds to wait for a new ACME request.
+      properties:
+        error:
+          type: string
+          maxLength: 512
+          description: Message for people. Do not parse it. It never repeats an uploaded certificate or key.
+        code:
+          type: string
+          maxLength: 64
+          pattern: ^[A-Z0-9_]+$
+          description: 'Machine code: INVALID_TLS_SETTINGS, INVALID_CERTIFICATE, KEY_ENCRYPTION_UNAVAILABLE, TLS_UNSUPPORTED, CERTIFICATE_REQUIRED, CERTIFICATE_DOES_NOT_COVER, AGENT_NOT_HOST_BOUND, CERTIFICATE_IN_USE, ACME_REQUEST_TOO_SOON, LISTEN_CONFLICT, LISTENER_SETTINGS_DIFFER, HOST_CONFLICT, BAD_REQUEST, and the generic codes of Error.'
+        field:
+          type: string
+          maxLength: 64
+          description: The request field or setting that was refused or must change.
+        reason:
+          type: string
+          description: Why a certificate was refused (INVALID_CERTIFICATE).
+          enum:
+            - bad_pem
+            - private_key_in_chain
+            - too_large
+            - chain_order
+            - ca_leaf
+            - expired
+            - not_yet_valid
+            - weak_signature
+            - names_do_not_cover
+            - key_encrypted
+            - pkcs12
+            - unsupported_key
+            - key_mismatch
+        host:
+          type: string
+          maxLength: 253
+          description: The host that the certificate does not cover (names_do_not_cover, CERTIFICATE_DOES_NOT_COVER).
+        retry_after:
+          type: integer
+          minimum: 1
+          description: Seconds until a new ACME request is accepted (ACME_REQUEST_TOO_SOON).
+      required:
+        - error
+      additionalProperties: false
+    AppTLSInput:
+      type: object
+      description: The TLS settings of an application.
+      properties:
+        mode:
+          type: string
+          description: proxy leaves TLS to whatever sits in front of the agent; gateway lets the agent terminate it for the hosts.
+          enum:
+            - proxy
+            - gateway
+        hosts:
+          type: array
+          description: 1 to 100 lower-case DNS names (at least one dot, no wildcard, IP address, port or trailing dot). A name is trimmed and lower-cased, and a repeat is dropped. A proxy application may have none.
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 253
+        listen:
+          type: string
+          description: The HTTPS address the agent binds, ip:port or [ipv6]:port. Empty or absent means 0.0.0.0:443. Applications on one agent that share an address must have equal read and write timeouts, body limit and read buffer.
+          maxLength: 64
+        redirect_listen:
+          type: string
+          description: Optional address that answers plain HTTP with a redirect to HTTPS. It differs from listen, and no other kind of listener on the agent may use it.
+          maxLength: 64
+        source:
+          type: string
+          description: Where the certificate comes from. Required in gateway mode.
+          enum:
+            - ''
+            - acme
+            - uploaded
+      required:
+        - mode
+      additionalProperties: false
+    AppTLSState:
+      type: object
+      description: How an application is served over TLS, with what the dashboard needs to show it. No field holds key material.
+      properties:
+        mode:
+          type: string
+          enum:
+            - proxy
+            - gateway
+        hosts:
+          type: array
+          items:
+            type: string
+        listen:
+          type: string
+          description: The HTTPS address; 0.0.0.0:443 until another one is saved.
+        redirect_listen:
+          type: string
+          description: Empty when there is none.
+        source:
+          type: string
+          enum:
+            - ''
+            - acme
+            - uploaded
+        certificate:
+          description: The current uploaded certificate; null when there is none.
+          oneOf:
+            - $ref: '#/components/schemas/AppTLSCertificate'
+            - type: 'null'
+        acme:
+          description: The last ACME request; null until there was one.
+          oneOf:
+            - $ref: '#/components/schemas/AppTLSACMERequest'
+            - type: 'null'
+        status:
+          description: What the agent last reported; null until it reported since the settings last changed.
+          oneOf:
+            - $ref: '#/components/schemas/AppTLSStatus'
+            - type: 'null'
+        agent_supported:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the WAF agent that serves the application said in its Hello that it serves TLS certificates. null = no agent serves the application, or it never said; false = it said something else, and switching to gateway is refused.
+        agent_host_bound:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the agent has a credential bound to its host, kind and name, which an uploaded key needs. null = no agent serves the application.
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/AppTLSWarning'
+      required:
+        - mode
+        - hosts
+        - listen
+        - redirect_listen
+        - source
+        - certificate
+        - acme
+        - status
+        - agent_supported
+        - agent_host_bound
+        - warnings
+      additionalProperties: false
+    AppTLSACMERequest:
+      type: object
+      description: The ACME request that the bundle names. A new id asks the agent to order now.
+      properties:
+        request_id:
+          type: string
+        requested_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      required:
+        - request_id
+        - requested_at
+      additionalProperties: false
+    AppTLSStatus:
+      type: object
+      description: What the WAF agent last reported about the TLS of the application. The parsed fields (names, issuer, dates) are the server's own reading of the chain the agent serves.
+      properties:
+        agent_id:
+          type: string
+        source:
+          type: string
+          enum:
+            - acme
+            - uploaded
+        state:
+          type: string
+          description: pending (an ACME order is running), active (a certificate is in use), failed (the last order or install failed; the previous certificate may still be in use) or missing (TLS is on and there is nothing to serve yet).
+          enum:
+            - pending
+            - active
+            - failed
+            - missing
+        certificate_id:
+          type:
+            - string
+            - 'null'
+          description: The uploaded certificate the report is about; null for acme.
+        leaf_sha256:
+          type: string
+        error:
+          type: string
+          maxLength: 1024
+          description: For failed, cleaned of control characters. Escape it when you show it.
+        next_attempt_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        request_id:
+          type: string
+        received_at:
+          type: string
+          format: date-time
+          description: When the control plane received the report.
+        names:
+          type: array
+          items:
+            type: string
+        issuer:
+          type: string
+        not_before:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        not_after:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      required:
+        - agent_id
+        - source
+        - state
+        - certificate_id
+        - leaf_sha256
+        - error
+        - next_attempt_at
+        - request_id
+        - received_at
+        - names
+        - issuer
+        - not_before
+        - not_after
+      additionalProperties: false
+    AppTLSWarning:
+      type: object
+      description: 'A warning, not a refusal. not_trusted: the uploaded chain does not verify to the system roots. expires_soon: the certificate in use has 30 days or fewer left (14 for acme); days_left and not_after say when. dns_mismatch: host resolves, and none of its addresses is a public address the agent host reported; resolved lists the public addresses it resolves to (at most 8) and agent_addresses the ones the agent host reported.'
+      properties:
+        code:
+          type: string
+          enum:
+            - not_trusted
+            - expires_soon
+            - dns_mismatch
+        host:
+          type: string
+        resolved:
+          type: array
+          items:
+            type: string
+        agent_addresses:
+          type: array
+          items:
+            type: string
+        days_left:
+          type: integer
+        not_after:
+          type: string
+          format: date-time
+      required:
+        - code
       additionalProperties: false
     AppWafAgentAssignment:
       type: object
