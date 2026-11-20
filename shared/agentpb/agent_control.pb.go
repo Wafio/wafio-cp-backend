@@ -3,8 +3,10 @@
 // Bidirectional gRPC stream shared by two agent types:
 //
 //   WAF agent (cmd/wafio-waf-agent):
-//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation ack)
-//     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping
+//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation and
+//               CertificateInstall ack), CertificateStatus
+//     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping,
+//                 CertificateInstall
 //
 //   eBPF/host agent (cmd/wafio-host-agent):
 //     → sends : Hello, Heartbeat, CommandAck{id="ebpf:telemetry"} (telemetry)
@@ -49,6 +51,7 @@ type AgentMessage struct {
 	//	*AgentMessage_Heartbeat
 	//	*AgentMessage_Decision
 	//	*AgentMessage_Ack
+	//	*AgentMessage_CertificateStatus
 	Kind          isAgentMessage_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -127,6 +130,15 @@ func (x *AgentMessage) GetAck() *CommandAck {
 	return nil
 }
 
+func (x *AgentMessage) GetCertificateStatus() *CertificateStatus {
+	if x != nil {
+		if x, ok := x.Kind.(*AgentMessage_CertificateStatus); ok {
+			return x.CertificateStatus
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Kind interface {
 	isAgentMessage_Kind()
 }
@@ -144,7 +156,12 @@ type AgentMessage_Decision struct {
 }
 
 type AgentMessage_Ack struct {
-	Ack *CommandAck `protobuf:"bytes,4,opt,name=ack,proto3,oneof"` // WAF agent: KeyRotation ack
+	Ack *CommandAck `protobuf:"bytes,4,opt,name=ack,proto3,oneof"` // WAF agent: KeyRotation and CertificateInstall ack
+}
+
+type AgentMessage_CertificateStatus struct {
+	// eBPF agent: telemetry (id="ebpf:telemetry")
+	CertificateStatus *CertificateStatus `protobuf:"bytes,5,opt,name=certificate_status,json=certificateStatus,proto3,oneof"` // WAF agent only, with feature "tls_certificates"
 }
 
 func (*AgentMessage_Hello) isAgentMessage_Kind() {}
@@ -154,6 +171,8 @@ func (*AgentMessage_Heartbeat) isAgentMessage_Kind() {}
 func (*AgentMessage_Decision) isAgentMessage_Kind() {}
 
 func (*AgentMessage_Ack) isAgentMessage_Kind() {}
+
+func (*AgentMessage_CertificateStatus) isAgentMessage_Kind() {}
 
 // Hello is the first message every agent sends after opening the stream.
 // Both agent types use Hello; fields used differ slightly:
@@ -184,7 +203,9 @@ type Hello struct {
 	// cannot (it ships without the script sidecar). A v1 agent sent other names
 	// (semantic_only, semantic_keys_jwt_graphql, field_rules_v2,
 	// custom_rule_field_paths); the server ignores them, and every agent gets
-	// the same bundle. Unknown names are ignored.
+	// the same bundle. "tls_certificates": the WAF agent serves an app over TLS
+	// from the bundle's settings, accepts CertificateInstall and sends
+	// CertificateStatus. Unknown names are ignored.
 	Features      []string `protobuf:"bytes,8,rep,name=features,proto3" json:"features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -849,6 +870,147 @@ func (x *CommandAck) GetPayload() []byte {
 	return nil
 }
 
+// CertificateStatus is sent by a WAF agent with the feature "tls_certificates"
+// for each app whose bundle entry turns TLS on: once after each applied bundle,
+// and again whenever the state or the certificate in use changes. Only a
+// control plane that sends TLS settings in the bundle receives it; an older
+// one ignores the unknown message. It never carries private key material.
+// The server treats every field as untrusted input: it parses chain_pem
+// itself and checks leaf_sha256 against it.
+type CertificateStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	// "acme" (the agent orders and renews the certificate) or "uploaded"
+	// (the certificate came in a CertificateInstall).
+	Source string `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
+	// "pending"  an ACME order is in progress
+	// "active"   a certificate is in use (after an order, a renewal or an install)
+	// "failed"   the last order or install failed; chain_pem is set when an
+	//
+	//	older certificate is still in use
+	//
+	// "missing"  TLS is on but there is no certificate to serve yet
+	State string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	// For "uploaded": the certificate_id the bundle names. Empty for "acme".
+	CertificateId string `protobuf:"bytes,4,opt,name=certificate_id,json=certificateId,proto3" json:"certificate_id,omitempty"`
+	// The chain in use, leaf first (public material). Empty when none is in use.
+	// At most 64 KiB.
+	ChainPem []byte `protobuf:"bytes,5,opt,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"`
+	// Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
+	LeafSha256 string `protobuf:"bytes,6,opt,name=leaf_sha256,json=leafSha256,proto3" json:"leaf_sha256,omitempty"`
+	// "failed": why, for the dashboard. At most 1 KiB, never key material.
+	Error string `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
+	// "pending" or "failed": when the agent tries again; 0 when nothing is planned.
+	NextAttemptUnix int64 `protobuf:"varint,8,opt,name=next_attempt_unix,json=nextAttemptUnix,proto3" json:"next_attempt_unix,omitempty"`
+	// The ACME request id of the bundle entry this state answers (a new id in
+	// the bundle asks the agent to order now). Empty for "uploaded".
+	RequestId string `protobuf:"bytes,9,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// When the agent saw this state.
+	UnixTime      int64 `protobuf:"varint,10,opt,name=unix_time,json=unixTime,proto3" json:"unix_time,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CertificateStatus) Reset() {
+	*x = CertificateStatus{}
+	mi := &file_agent_v1_agent_control_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CertificateStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CertificateStatus) ProtoMessage() {}
+
+func (x *CertificateStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_control_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CertificateStatus.ProtoReflect.Descriptor instead.
+func (*CertificateStatus) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *CertificateStatus) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *CertificateStatus) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *CertificateStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *CertificateStatus) GetCertificateId() string {
+	if x != nil {
+		return x.CertificateId
+	}
+	return ""
+}
+
+func (x *CertificateStatus) GetChainPem() []byte {
+	if x != nil {
+		return x.ChainPem
+	}
+	return nil
+}
+
+func (x *CertificateStatus) GetLeafSha256() string {
+	if x != nil {
+		return x.LeafSha256
+	}
+	return ""
+}
+
+func (x *CertificateStatus) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *CertificateStatus) GetNextAttemptUnix() int64 {
+	if x != nil {
+		return x.NextAttemptUnix
+	}
+	return 0
+}
+
+func (x *CertificateStatus) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *CertificateStatus) GetUnixTime() int64 {
+	if x != nil {
+		return x.UnixTime
+	}
+	return 0
+}
+
 // ServerMessage is the union of all messages the server can push.
 type ServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -859,6 +1021,7 @@ type ServerMessage struct {
 	//	*ServerMessage_KeyRotation
 	//	*ServerMessage_Ping
 	//	*ServerMessage_FetchSecurityData
+	//	*ServerMessage_CertificateInstall
 	Kind          isServerMessage_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -866,7 +1029,7 @@ type ServerMessage struct {
 
 func (x *ServerMessage) Reset() {
 	*x = ServerMessage{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[5]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -878,7 +1041,7 @@ func (x *ServerMessage) String() string {
 func (*ServerMessage) ProtoMessage() {}
 
 func (x *ServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[5]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -891,7 +1054,7 @@ func (x *ServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMessage.ProtoReflect.Descriptor instead.
 func (*ServerMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{5}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ServerMessage) GetKind() isServerMessage_Kind {
@@ -946,6 +1109,15 @@ func (x *ServerMessage) GetFetchSecurityData() *FetchSecurityData {
 	return nil
 }
 
+func (x *ServerMessage) GetCertificateInstall() *CertificateInstall {
+	if x != nil {
+		if x, ok := x.Kind.(*ServerMessage_CertificateInstall); ok {
+			return x.CertificateInstall
+		}
+	}
+	return nil
+}
+
 type isServerMessage_Kind interface {
 	isServerMessage_Kind()
 }
@@ -971,6 +1143,10 @@ type ServerMessage_FetchSecurityData struct {
 	FetchSecurityData *FetchSecurityData `protobuf:"bytes,5,opt,name=fetch_security_data,json=fetchSecurityData,proto3,oneof"` // both agents — refresh local security data
 }
 
+type ServerMessage_CertificateInstall struct {
+	CertificateInstall *CertificateInstall `protobuf:"bytes,7,opt,name=certificate_install,json=certificateInstall,proto3,oneof"` // WAF agent with feature "tls_certificates" only
+}
+
 func (*ServerMessage_Welcome) isServerMessage_Kind() {}
 
 func (*ServerMessage_Bundle) isServerMessage_Kind() {}
@@ -980,6 +1156,8 @@ func (*ServerMessage_KeyRotation) isServerMessage_Kind() {}
 func (*ServerMessage_Ping) isServerMessage_Kind() {}
 
 func (*ServerMessage_FetchSecurityData) isServerMessage_Kind() {}
+
+func (*ServerMessage_CertificateInstall) isServerMessage_Kind() {}
 
 // Welcome is sent by the server to both agents immediately after Hello validation.
 type Welcome struct {
@@ -993,7 +1171,7 @@ type Welcome struct {
 
 func (x *Welcome) Reset() {
 	*x = Welcome{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1005,7 +1183,7 @@ func (x *Welcome) String() string {
 func (*Welcome) ProtoMessage() {}
 
 func (x *Welcome) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1018,7 +1196,7 @@ func (x *Welcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Welcome.ProtoReflect.Descriptor instead.
 func (*Welcome) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{6}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Welcome) GetAgentId() string {
@@ -1062,7 +1240,7 @@ type BundleUpdate struct {
 
 func (x *BundleUpdate) Reset() {
 	*x = BundleUpdate{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1074,7 +1252,7 @@ func (x *BundleUpdate) String() string {
 func (*BundleUpdate) ProtoMessage() {}
 
 func (x *BundleUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1087,7 +1265,7 @@ func (x *BundleUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BundleUpdate.ProtoReflect.Descriptor instead.
 func (*BundleUpdate) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{7}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *BundleUpdate) GetCommandId() string {
@@ -1125,7 +1303,7 @@ type KeyRotation struct {
 
 func (x *KeyRotation) Reset() {
 	*x = KeyRotation{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1137,7 +1315,7 @@ func (x *KeyRotation) String() string {
 func (*KeyRotation) ProtoMessage() {}
 
 func (x *KeyRotation) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1150,7 +1328,7 @@ func (x *KeyRotation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyRotation.ProtoReflect.Descriptor instead.
 func (*KeyRotation) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{8}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *KeyRotation) GetCommandId() string {
@@ -1167,6 +1345,105 @@ func (x *KeyRotation) GetNewHostKey() string {
 	return ""
 }
 
+// CertificateInstall carries an uploaded certificate chain and its private key
+// to the WAF agent that serves the app. Sent only to an agent whose Hello
+// features hold "tls_certificates": after each Hello for every uploaded
+// certificate its bundle names, and after an upload or a replace. The agent
+// checks that the key matches the leaf and that leaf_sha256 matches the
+// chain, writes the pair into its key directory, and acks with
+// CommandAck{command_id, ok, error}; an agent that already holds the same
+// leaf_sha256 acks ok without writing. It serves a certificate only while the
+// bundle names it by certificate_id and leaf_sha256, and deletes the files of
+// one the bundle no longer names. Key material is never logged, never put in
+// an ack and never sent in a BundleUpdate.
+type CertificateInstall struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CommandId     string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	AppId         string                 `protobuf:"bytes,2,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	CertificateId string                 `protobuf:"bytes,3,opt,name=certificate_id,json=certificateId,proto3" json:"certificate_id,omitempty"`
+	// Leaf first, PEM. At most 64 KiB.
+	ChainPem []byte `protobuf:"bytes,4,opt,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"`
+	// One PKCS#8, PKCS#1 or SEC1 private key, PEM, without a passphrase.
+	// At most 16 KiB.
+	KeyPem []byte `protobuf:"bytes,5,opt,name=key_pem,json=keyPem,proto3" json:"key_pem,omitempty"`
+	// Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
+	LeafSha256    string `protobuf:"bytes,6,opt,name=leaf_sha256,json=leafSha256,proto3" json:"leaf_sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CertificateInstall) Reset() {
+	*x = CertificateInstall{}
+	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CertificateInstall) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CertificateInstall) ProtoMessage() {}
+
+func (x *CertificateInstall) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CertificateInstall.ProtoReflect.Descriptor instead.
+func (*CertificateInstall) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *CertificateInstall) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *CertificateInstall) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *CertificateInstall) GetCertificateId() string {
+	if x != nil {
+		return x.CertificateId
+	}
+	return ""
+}
+
+func (x *CertificateInstall) GetChainPem() []byte {
+	if x != nil {
+		return x.ChainPem
+	}
+	return nil
+}
+
+func (x *CertificateInstall) GetKeyPem() []byte {
+	if x != nil {
+		return x.KeyPem
+	}
+	return nil
+}
+
+func (x *CertificateInstall) GetLeafSha256() string {
+	if x != nil {
+		return x.LeafSha256
+	}
+	return ""
+}
+
 // Ping is sent by the server to both agents as a liveness probe.
 // Agents reply with a bare Heartbeat (unix_time only).
 type Ping struct {
@@ -1178,7 +1455,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1190,7 +1467,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1203,7 +1480,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{9}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Ping) GetNonce() int64 {
@@ -1233,7 +1510,7 @@ type FetchSecurityData struct {
 
 func (x *FetchSecurityData) Reset() {
 	*x = FetchSecurityData{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1245,7 +1522,7 @@ func (x *FetchSecurityData) String() string {
 func (*FetchSecurityData) ProtoMessage() {}
 
 func (x *FetchSecurityData) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1258,7 +1535,7 @@ func (x *FetchSecurityData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchSecurityData.ProtoReflect.Descriptor instead.
 func (*FetchSecurityData) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{10}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *FetchSecurityData) GetCommandId() string {
@@ -1297,7 +1574,7 @@ type MalwareDatabaseRequest struct {
 
 func (x *MalwareDatabaseRequest) Reset() {
 	*x = MalwareDatabaseRequest{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1309,7 +1586,7 @@ func (x *MalwareDatabaseRequest) String() string {
 func (*MalwareDatabaseRequest) ProtoMessage() {}
 
 func (x *MalwareDatabaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1322,7 +1599,7 @@ func (x *MalwareDatabaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MalwareDatabaseRequest.ProtoReflect.Descriptor instead.
 func (*MalwareDatabaseRequest) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{11}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{13}
 }
 
 type MalwareDatabaseChunk struct {
@@ -1336,7 +1613,7 @@ type MalwareDatabaseChunk struct {
 
 func (x *MalwareDatabaseChunk) Reset() {
 	*x = MalwareDatabaseChunk{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1348,7 +1625,7 @@ func (x *MalwareDatabaseChunk) String() string {
 func (*MalwareDatabaseChunk) ProtoMessage() {}
 
 func (x *MalwareDatabaseChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1361,7 +1638,7 @@ func (x *MalwareDatabaseChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MalwareDatabaseChunk.ProtoReflect.Descriptor instead.
 func (*MalwareDatabaseChunk) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{12}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *MalwareDatabaseChunk) GetData() []byte {
@@ -1382,12 +1659,13 @@ var File_agent_v1_agent_control_proto protoreflect.FileDescriptor
 
 const file_agent_v1_agent_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1cagent/v1/agent_control.proto\x12\x0ewafio.agent.v1\"\xf0\x01\n" +
+	"\x1cagent/v1/agent_control.proto\x12\x0ewafio.agent.v1\"\xc4\x02\n" +
 	"\fAgentMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.wafio.agent.v1.HelloH\x00R\x05hello\x129\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x19.wafio.agent.v1.HeartbeatH\x00R\theartbeat\x12>\n" +
 	"\bdecision\x18\x03 \x01(\v2 .wafio.agent.v1.WAFDecisionEventH\x00R\bdecision\x12.\n" +
-	"\x03ack\x18\x04 \x01(\v2\x1a.wafio.agent.v1.CommandAckH\x00R\x03ackB\x06\n" +
+	"\x03ack\x18\x04 \x01(\v2\x1a.wafio.agent.v1.CommandAckH\x00R\x03ack\x12R\n" +
+	"\x12certificate_status\x18\x05 \x01(\v2!.wafio.agent.v1.CertificateStatusH\x00R\x11certificateStatusB\x06\n" +
 	"\x04kind\"\xf9\x01\n" +
 	"\x05Hello\x12\x1d\n" +
 	"\n" +
@@ -1478,13 +1756,28 @@ const file_agent_v1_agent_control_proto_rawDesc = "" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x0e\n" +
 	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x18\n" +
-	"\apayload\x18\x04 \x01(\fR\apayload\"\xda\x02\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload\"\xbb\x02\n" +
+	"\x11CertificateStatus\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x16\n" +
+	"\x06source\x18\x02 \x01(\tR\x06source\x12\x14\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\x12%\n" +
+	"\x0ecertificate_id\x18\x04 \x01(\tR\rcertificateId\x12\x1b\n" +
+	"\tchain_pem\x18\x05 \x01(\fR\bchainPem\x12\x1f\n" +
+	"\vleaf_sha256\x18\x06 \x01(\tR\n" +
+	"leafSha256\x12\x14\n" +
+	"\x05error\x18\a \x01(\tR\x05error\x12*\n" +
+	"\x11next_attempt_unix\x18\b \x01(\x03R\x0fnextAttemptUnix\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\t \x01(\tR\trequestId\x12\x1b\n" +
+	"\tunix_time\x18\n" +
+	" \x01(\x03R\bunixTime\"\xb1\x03\n" +
 	"\rServerMessage\x123\n" +
 	"\awelcome\x18\x01 \x01(\v2\x17.wafio.agent.v1.WelcomeH\x00R\awelcome\x126\n" +
 	"\x06bundle\x18\x02 \x01(\v2\x1c.wafio.agent.v1.BundleUpdateH\x00R\x06bundle\x12@\n" +
 	"\fkey_rotation\x18\x03 \x01(\v2\x1b.wafio.agent.v1.KeyRotationH\x00R\vkeyRotation\x12*\n" +
 	"\x04ping\x18\x04 \x01(\v2\x14.wafio.agent.v1.PingH\x00R\x04ping\x12S\n" +
-	"\x13fetch_security_data\x18\x05 \x01(\v2!.wafio.agent.v1.FetchSecurityDataH\x00R\x11fetchSecurityDataB\x06\n" +
+	"\x13fetch_security_data\x18\x05 \x01(\v2!.wafio.agent.v1.FetchSecurityDataH\x00R\x11fetchSecurityData\x12U\n" +
+	"\x13certificate_install\x18\a \x01(\v2\".wafio.agent.v1.CertificateInstallH\x00R\x12certificateInstallB\x06\n" +
 	"\x04kindJ\x04\b\x06\x10\aR\vself_update\"{\n" +
 	"\aWelcome\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12(\n" +
@@ -1502,7 +1795,16 @@ const file_agent_v1_agent_control_proto_rawDesc = "" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12 \n" +
 	"\fnew_host_key\x18\x02 \x01(\tR\n" +
-	"newHostKeyJ\x04\b\x03\x10\x04R\fnew_waf_keys\"\x1c\n" +
+	"newHostKeyJ\x04\b\x03\x10\x04R\fnew_waf_keys\"\xc8\x01\n" +
+	"\x12CertificateInstall\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x15\n" +
+	"\x06app_id\x18\x02 \x01(\tR\x05appId\x12%\n" +
+	"\x0ecertificate_id\x18\x03 \x01(\tR\rcertificateId\x12\x1b\n" +
+	"\tchain_pem\x18\x04 \x01(\fR\bchainPem\x12\x17\n" +
+	"\akey_pem\x18\x05 \x01(\fR\x06keyPem\x12\x1f\n" +
+	"\vleaf_sha256\x18\x06 \x01(\tR\n" +
+	"leafSha256\"\x1c\n" +
 	"\x04Ping\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\x03R\x05nonce\"\xa5\x01\n" +
 	"\x11FetchSecurityData\x12\x1d\n" +
@@ -1533,43 +1835,47 @@ func file_agent_v1_agent_control_proto_rawDescGZIP() []byte {
 	return file_agent_v1_agent_control_proto_rawDescData
 }
 
-var file_agent_v1_agent_control_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_agent_v1_agent_control_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_agent_v1_agent_control_proto_goTypes = []any{
 	(*AgentMessage)(nil),           // 0: wafio.agent.v1.AgentMessage
 	(*Hello)(nil),                  // 1: wafio.agent.v1.Hello
 	(*Heartbeat)(nil),              // 2: wafio.agent.v1.Heartbeat
 	(*WAFDecisionEvent)(nil),       // 3: wafio.agent.v1.WAFDecisionEvent
 	(*CommandAck)(nil),             // 4: wafio.agent.v1.CommandAck
-	(*ServerMessage)(nil),          // 5: wafio.agent.v1.ServerMessage
-	(*Welcome)(nil),                // 6: wafio.agent.v1.Welcome
-	(*BundleUpdate)(nil),           // 7: wafio.agent.v1.BundleUpdate
-	(*KeyRotation)(nil),            // 8: wafio.agent.v1.KeyRotation
-	(*Ping)(nil),                   // 9: wafio.agent.v1.Ping
-	(*FetchSecurityData)(nil),      // 10: wafio.agent.v1.FetchSecurityData
-	(*MalwareDatabaseRequest)(nil), // 11: wafio.agent.v1.MalwareDatabaseRequest
-	(*MalwareDatabaseChunk)(nil),   // 12: wafio.agent.v1.MalwareDatabaseChunk
-	nil,                            // 13: wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
+	(*CertificateStatus)(nil),      // 5: wafio.agent.v1.CertificateStatus
+	(*ServerMessage)(nil),          // 6: wafio.agent.v1.ServerMessage
+	(*Welcome)(nil),                // 7: wafio.agent.v1.Welcome
+	(*BundleUpdate)(nil),           // 8: wafio.agent.v1.BundleUpdate
+	(*KeyRotation)(nil),            // 9: wafio.agent.v1.KeyRotation
+	(*CertificateInstall)(nil),     // 10: wafio.agent.v1.CertificateInstall
+	(*Ping)(nil),                   // 11: wafio.agent.v1.Ping
+	(*FetchSecurityData)(nil),      // 12: wafio.agent.v1.FetchSecurityData
+	(*MalwareDatabaseRequest)(nil), // 13: wafio.agent.v1.MalwareDatabaseRequest
+	(*MalwareDatabaseChunk)(nil),   // 14: wafio.agent.v1.MalwareDatabaseChunk
+	nil,                            // 15: wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
 }
 var file_agent_v1_agent_control_proto_depIdxs = []int32{
 	1,  // 0: wafio.agent.v1.AgentMessage.hello:type_name -> wafio.agent.v1.Hello
 	2,  // 1: wafio.agent.v1.AgentMessage.heartbeat:type_name -> wafio.agent.v1.Heartbeat
 	3,  // 2: wafio.agent.v1.AgentMessage.decision:type_name -> wafio.agent.v1.WAFDecisionEvent
 	4,  // 3: wafio.agent.v1.AgentMessage.ack:type_name -> wafio.agent.v1.CommandAck
-	13, // 4: wafio.agent.v1.WAFDecisionEvent.request_headers:type_name -> wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
-	6,  // 5: wafio.agent.v1.ServerMessage.welcome:type_name -> wafio.agent.v1.Welcome
-	7,  // 6: wafio.agent.v1.ServerMessage.bundle:type_name -> wafio.agent.v1.BundleUpdate
-	8,  // 7: wafio.agent.v1.ServerMessage.key_rotation:type_name -> wafio.agent.v1.KeyRotation
-	9,  // 8: wafio.agent.v1.ServerMessage.ping:type_name -> wafio.agent.v1.Ping
-	10, // 9: wafio.agent.v1.ServerMessage.fetch_security_data:type_name -> wafio.agent.v1.FetchSecurityData
-	0,  // 10: wafio.agent.v1.AgentControl.Stream:input_type -> wafio.agent.v1.AgentMessage
-	11, // 11: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:input_type -> wafio.agent.v1.MalwareDatabaseRequest
-	5,  // 12: wafio.agent.v1.AgentControl.Stream:output_type -> wafio.agent.v1.ServerMessage
-	12, // 13: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:output_type -> wafio.agent.v1.MalwareDatabaseChunk
-	12, // [12:14] is the sub-list for method output_type
-	10, // [10:12] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	5,  // 4: wafio.agent.v1.AgentMessage.certificate_status:type_name -> wafio.agent.v1.CertificateStatus
+	15, // 5: wafio.agent.v1.WAFDecisionEvent.request_headers:type_name -> wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
+	7,  // 6: wafio.agent.v1.ServerMessage.welcome:type_name -> wafio.agent.v1.Welcome
+	8,  // 7: wafio.agent.v1.ServerMessage.bundle:type_name -> wafio.agent.v1.BundleUpdate
+	9,  // 8: wafio.agent.v1.ServerMessage.key_rotation:type_name -> wafio.agent.v1.KeyRotation
+	11, // 9: wafio.agent.v1.ServerMessage.ping:type_name -> wafio.agent.v1.Ping
+	12, // 10: wafio.agent.v1.ServerMessage.fetch_security_data:type_name -> wafio.agent.v1.FetchSecurityData
+	10, // 11: wafio.agent.v1.ServerMessage.certificate_install:type_name -> wafio.agent.v1.CertificateInstall
+	0,  // 12: wafio.agent.v1.AgentControl.Stream:input_type -> wafio.agent.v1.AgentMessage
+	13, // 13: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:input_type -> wafio.agent.v1.MalwareDatabaseRequest
+	6,  // 14: wafio.agent.v1.AgentControl.Stream:output_type -> wafio.agent.v1.ServerMessage
+	14, // 15: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:output_type -> wafio.agent.v1.MalwareDatabaseChunk
+	14, // [14:16] is the sub-list for method output_type
+	12, // [12:14] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_agent_v1_agent_control_proto_init() }
@@ -1582,14 +1888,16 @@ func file_agent_v1_agent_control_proto_init() {
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_Decision)(nil),
 		(*AgentMessage_Ack)(nil),
+		(*AgentMessage_CertificateStatus)(nil),
 	}
 	file_agent_v1_agent_control_proto_msgTypes[2].OneofWrappers = []any{}
-	file_agent_v1_agent_control_proto_msgTypes[5].OneofWrappers = []any{
+	file_agent_v1_agent_control_proto_msgTypes[6].OneofWrappers = []any{
 		(*ServerMessage_Welcome)(nil),
 		(*ServerMessage_Bundle)(nil),
 		(*ServerMessage_KeyRotation)(nil),
 		(*ServerMessage_Ping)(nil),
 		(*ServerMessage_FetchSecurityData)(nil),
+		(*ServerMessage_CertificateInstall)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1597,7 +1905,7 @@ func file_agent_v1_agent_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_v1_agent_control_proto_rawDesc), len(file_agent_v1_agent_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
