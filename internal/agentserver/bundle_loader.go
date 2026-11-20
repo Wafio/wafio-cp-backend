@@ -61,6 +61,10 @@ type bundleAppLite struct {
 	// Maintenance is the stored maintenance object, present only while it is switched on
 	// (migration 000119). An agent that does not know the key ignores it.
 	Maintenance json.RawMessage `json:"maintenance,omitempty"`
+	// TLS is present only while the app is in gateway mode (migration 000124): the agent then
+	// terminates TLS for the hosts. It names an uploaded certificate by id and leaf and never carries
+	// key material, since the agent keeps the bundle in plain text.
+	TLS *repository.BundleTLS `json:"tls,omitempty"`
 }
 
 // LoadBundle returns the bundle for a specific agent. Only apps assigned to
@@ -161,6 +165,7 @@ func (l *projectBundleLoader) build(ctx context.Context, projectID, agentID stri
 		if maintenanceOn(a.Maintenance) {
 			app.Maintenance = json.RawMessage(a.Maintenance)
 		}
+		app.TLS = a.TLS
 		if guiRules, err := l.repo.WafCustomRules.ListGUIRulesRaw(ctx, a.AppID); err == nil && len(guiRules) > 0 {
 			app.CustomGUIRules = guiRules
 		}

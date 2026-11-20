@@ -84,6 +84,18 @@ func (l *liveStream) isRevoked() bool {
 	}
 }
 
+// ending reports whether the stream was told to end: a revoke of its credential or of its host, or a
+// push that missed its send deadline. The handler returns soon after, so nothing secret should still
+// be sent to it.
+func (l *liveStream) ending() bool {
+	select {
+	case <-l.stuck:
+		return true
+	default:
+	}
+	return l.isRevoked() || l.hostRevokedNow()
+}
+
 // markStuck ends the stream because a push could not be delivered in time.
 func (l *liveStream) markStuck() { l.stuckOnce.Do(func() { close(l.stuck) }) }
 

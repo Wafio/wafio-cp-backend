@@ -51,6 +51,10 @@ Reject any update with a missing or invalid signature, a signature for another v
 
 For database unavailability, preserve `/health` liveness evidence and the `/ready` failure, stop release activity, and follow the database recovery procedure. Restore into a distinct target first and compare schema and representative tenant data before switching. The measured local schema-72 rehearsal is evidence for its small fixture only and is not a production RTO promise.
 
+## Settings that must stay off
+
+Never set `GRPC_BINARY_LOG_FILTER` in the environment of the control plane: grpc-go would then write whole messages to a file, and a certificate install carries a private key.
+
 ## Isolated verification evidence
 
 The repository tests cover invalid/mismatched release signatures, missing trusted keys, downgrade refusal, telemetry retry retention, disconnect state, and reconnect/application retry. Run the bounded suites without external services:

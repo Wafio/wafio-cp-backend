@@ -2,8 +2,10 @@ package agentserver
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -124,11 +126,18 @@ type fakeHealthWriter struct {
 		h                  repository.AgentWAFHealth
 	}
 	features []featuresCall
+	// onFeatures runs inside UpdateAgentFeatures; featuresErr is what it returns.
+	onFeatures  func()
+	featuresErr error
 }
 
-// featuresCall is one UpdateAgentFeatures call; scripts and maintenance are "true", "false" or
+// featuresCall is one UpdateAgentFeatures call; scripts, maintenance and tls are "true", "false" or
 // "unknown".
-type featuresCall struct{ projectID, agentID, scripts, maintenance string }
+// hostBound is what the stream's credential was.
+type featuresCall struct {
+	projectID, agentID, scripts, maintenance, tls string
+	hostBound                                     bool
+}
 
 func tristate(v *bool) string {
 	if v == nil {
@@ -137,11 +146,14 @@ func tristate(v *bool) string {
 	return strconv.FormatBool(*v)
 }
 
-func (f *fakeHealthWriter) UpdateAgentFeatures(_ context.Context, projectID, agentID string, scriptRules, maintenance *bool) error {
+func (f *fakeHealthWriter) UpdateAgentFeatures(_ context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool, hostBound bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.features = append(f.features, featuresCall{projectID, agentID, tristate(scriptRules), tristate(maintenance)})
-	return nil
+	f.features = append(f.features, featuresCall{projectID, agentID, tristate(scriptRules), tristate(maintenance), tristate(tlsCertificates), hostBound})
+	if f.onFeatures != nil {
+		f.onFeatures()
+	}
+	return f.featuresErr
 }
 
 func (f *fakeHealthWriter) featuresCalls() []featuresCall {
@@ -190,28 +202,29 @@ func TestStoreWAFHealthResolvesAgentAndStores(t *testing.T) {
 
 func TestStoreAgentFeaturesFromHello(t *testing.T) {
 	for _, tc := range []struct {
-		name                 string
-		features             []string
-		wantScripts, wantMnt string
+		name                      string
+		features                  []string
+		wantScripts, wantMnt, tls string
 	}{
-		{"an agent that runs scripts", []string{engine.FeatureScriptRules}, "true", "false"},
-		{"an agent without scripts", []string{engine.FeatureNoScriptRules}, "false", "false"},
-		{"an agent with maintenance mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true"},
-		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true", "false"},
-		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false"},
-		{"agent without features", nil, "unknown", "false"},
+		{"an agent that runs scripts", []string{engine.FeatureScriptRules}, "true", "false", "false"},
+		{"an agent without scripts", []string{engine.FeatureNoScriptRules}, "false", "false", "false"},
+		{"an agent with maintenance mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true", "false"},
+		{"an agent that serves TLS", []string{engine.FeatureScriptRules, engine.FeatureTLSCertificates}, "true", "false", "true"},
+		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true", "false", "false"},
+		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false", "false"},
+		{"agent without features", nil, "unknown", "false", "false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fw := &fakeHealthWriter{}
 			s := &Server{wafHealth: fw}
-			s.storeAgentFeatures("proj-1", "agent-uuid", tc.features)
-			if got := fw.featuresCalls(); len(got) != 1 || got[0] != (featuresCall{"proj-1", "agent-uuid", tc.wantScripts, tc.wantMnt}) {
-				t.Fatalf("stored features %+v, want scripts %s and maintenance %s for agent-uuid", got, tc.wantScripts, tc.wantMnt)
+			s.storeAgentFeatures("proj-1", "agent-uuid", tc.features, false)
+			if got := fw.featuresCalls(); len(got) != 1 || got[0] != (featuresCall{"proj-1", "agent-uuid", tc.wantScripts, tc.wantMnt, tc.tls, false}) {
+				t.Fatalf("stored features %+v, want scripts %s, maintenance %s and TLS %s for agent-uuid", got, tc.wantScripts, tc.wantMnt, tc.tls)
 			}
 		})
 	}
 	fw := &fakeHealthWriter{}
-	(&Server{wafHealth: fw}).storeAgentFeatures("proj-1", "", []string{engine.FeatureScriptRules})
+	(&Server{wafHealth: fw}).storeAgentFeatures("proj-1", "", []string{engine.FeatureScriptRules}, true)
 	if stored := fw.featuresCalls(); len(stored) != 0 {
 		t.Fatalf("an unresolved agent must store nothing, got %+v", stored)
 	}
@@ -234,5 +247,40 @@ func TestDecisionRowFromEventStatusAndMethod(t *testing.T) {
 		if row.Status != int(tc.status) || row.AnalyzeMethod != tc.wantMethod {
 			t.Errorf("%+v: row status %d method %q, want %d %q", tc, row.Status, row.AnalyzeMethod, tc.status, tc.wantMethod)
 		}
+	}
+}
+
+// The stream passes on whether its credential is bound to a host, which decides in the repository
+// whether it may write the TLS flag of an agent row that has a host.
+func TestStoreAgentFeaturesPassesTheBindingOfTheStream(t *testing.T) {
+	for _, bound := range []bool{true, false} {
+		fw := &fakeHealthWriter{}
+		(&Server{wafHealth: fw}).storeAgentFeatures("proj-1", "agent-uuid", []string{engine.FeatureTLSCertificates}, bound)
+		if got := fw.featuresCalls(); len(got) != 1 || got[0].hostBound != bound || got[0].tls != "true" {
+			t.Fatalf("bound %v: stored %+v", bound, got)
+		}
+	}
+}
+
+// Without the flag no key is sent and nothing else says why, so a feature write that cannot happen or
+// fails is logged.
+func TestStoreAgentFeaturesLogsWhatItCannotStore(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		s       *Server
+		agentID string
+		want    string
+	}{
+		{"an agent with no row", &Server{wafHealth: &fakeHealthWriter{}}, "", "features not stored, the agent has no row"},
+		{"no store", &Server{}, "agent-uuid", "features not stored, no store"},
+		{"a store that fails", &Server{wafHealth: &fakeHealthWriter{featuresErr: errors.New("db down")}}, "agent-uuid", "store agent features failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureLog(t)
+			tc.s.storeAgentFeatures("proj-1", tc.agentID, nil, false)
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("log %q does not say %q", out.String(), tc.want)
+			}
+		})
 	}
 }

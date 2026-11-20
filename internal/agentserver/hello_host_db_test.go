@@ -15,7 +15,7 @@ import (
 // Hello looked at neither the host of an agent it already knew
 // nor the host_key such an agent presented, so a revoked host's agents
 // reconnected and were served. Now every path refuses them.
-func TestHelloRefusesAgentsOfRevokedHost(t *testing.T) {
+func TestDBHelloRefusesAgentsOfRevokedHost(t *testing.T) {
 	dsn := os.Getenv("TEST_DB_URL")
 	if dsn == "" {
 		t.Skip("TEST_DB_URL not set")

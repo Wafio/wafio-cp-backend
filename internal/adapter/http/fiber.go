@@ -522,6 +522,7 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	appTLS := &handlers.AppTLSHandler{Repo: repo, Resolver: tlsOpts.tlsResolver, Roots: tlsOpts.tlsRoots}
 	if agentServer != nil {
 		appTLS.AgentServer = agentServer
+		appTLS.Bundles = agentServer
 	}
 	rateCertUploadByUser := RateLimitCertUploadByUser(cfg)
 	pViewer.Get("/apps/:appId/tls", RequireAppInProject(repo), rateReadByUser, appTLS.Get)

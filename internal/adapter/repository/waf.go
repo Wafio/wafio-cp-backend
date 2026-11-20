@@ -41,6 +41,8 @@ type WAFBundleAppRow struct {
 	FCGIKeepConn bool
 	// Maintenance is apps.maintenance (migration 000119), raw JSON.
 	Maintenance []byte
+	// TLS is the TLS entry of the bundle, nil unless the application is in gateway mode (migration 000124).
+	TLS *BundleTLS
 }
 
 // ── Assignment ────────────────────────────────────────────────────────────
@@ -98,14 +100,29 @@ const (
 		       COALESCE(a.fcgi_doc_root, ''),
 		       COALESCE(a.fcgi_index, 'index.php'),
 		       a.fcgi_keep_conn,
-		       COALESCE(a.maintenance, '{}'::jsonb)`
+		       COALESCE(a.maintenance, '{}'::jsonb),
+		       a.tls_mode, a.tls_hosts, a.tls_listen, a.tls_redirect_listen, a.tls_source,
+		       COALESCE(tc.id::text, ''), COALESCE(tc.leaf_sha256, ''), a.acme_request_id`
+	// bundleRowCertificate joins the current uploaded certificate of the application. It names the
+	// public columns id and leaf_sha256 only, and never the key (see TestOnlyTheDeliveryQuerySelectsTheKey).
+	bundleRowCertificate = `
+		LEFT JOIN app_certificates tc ON tc.id = a.tls_certificate_id AND tc.app_id = a.id
+		     AND tc.project_id = a.project_id AND tc.replaced_at IS NULL`
 )
 
 func scanBundleRow(rows pgx.Row, row *WAFBundleAppRow) error {
-	return rows.Scan(&row.AppID, &row.ListenHost, &row.ListenPort, &row.Upstream, &row.Mode,
+	var tls BundleTLS
+	var tlsMode string
+	if err := rows.Scan(&row.AppID, &row.ListenHost, &row.ListenPort, &row.Upstream, &row.Mode,
 		&row.RulesJSON, &row.Sensitivity,
 		&row.ProxyConfig,
-		&row.FCGIDocRoot, &row.FCGIIndex, &row.FCGIKeepConn, &row.Maintenance)
+		&row.FCGIDocRoot, &row.FCGIIndex, &row.FCGIKeepConn, &row.Maintenance,
+		&tlsMode, &tls.Hosts, &tls.Listen, &tls.RedirectListen, &tls.Source,
+		&tls.CertificateID, &tls.LeafSHA256, &tls.ACMERequestID); err != nil {
+		return err
+	}
+	row.TLS = tls.forBundle(tlsMode)
+	return nil
 }
 
 // ListAssignmentsForAgent returns active (enabled) assignments for an agent,
@@ -115,7 +132,7 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 	rows, err := r.pool.Query(ctx, bundleRowHead+` waa.mode,`+bundleRowTail+`
 		FROM waf_agent_apps waa
 		JOIN apps a ON a.id = waa.app_id
-		LEFT JOIN app_configs ac ON ac.app_id = a.id
+		LEFT JOIN app_configs ac ON ac.app_id = a.id`+bundleRowCertificate+`
 		WHERE waa.agent_id = $1 AND waa.enabled = TRUE
 		ORDER BY waa.priority, waa.assigned_at`, agentID)
 	if err != nil {
@@ -142,7 +159,7 @@ func (r *WAFRepo) ListAssignmentsForAgent(ctx context.Context, agentID string) (
 func (r *WAFRepo) BundleRowForApp(ctx context.Context, appID, mode string) (row WAFBundleAppRow, sent bool, err error) {
 	err = scanBundleRow(r.pool.QueryRow(ctx, bundleRowHead+` $2::text,`+bundleRowTail+`
 		FROM apps a
-		LEFT JOIN app_configs ac ON ac.app_id = a.id
+		LEFT JOIN app_configs ac ON ac.app_id = a.id`+bundleRowCertificate+`
 		WHERE a.id = $1`, appID, mode), &row)
 	if err != nil {
 		return row, false, err
