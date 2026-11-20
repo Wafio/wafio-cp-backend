@@ -81,8 +81,9 @@ func TestIdentityMigrationMatchesBuiltins(t *testing.T) {
 	// TestJITRuntimeMigrationMatchesBuiltins; 000114:
 	// TestAlreadyRootMigrationMatchesBuiltins; 000118:
 	// TestRuntimeNoiseMigrationMatchesBuiltins; 000121:
-	// TestWAFAgentTLSKeyMigrationMatchesBuiltins).
-	later := map[string]bool{tlsKeyRuleName: true}
+	// TestWAFAgentTLSKeyMigrationMatchesBuiltins; 000125:
+	// TestWAFAgentTLSKeyDirMigrationMatchesBuiltins).
+	later := map[string]bool{tlsKeyRuleName: true, tlsKeyWriteRuleName: true}
 	for _, r := range authSessionRules("p") {
 		later[r.Name] = true
 	}

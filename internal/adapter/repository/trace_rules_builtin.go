@@ -6,6 +6,9 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 )
 
+// tlsKeyWriteRuleName is the built-in that lowers the writes of the WAF agent to its own key directory.
+const tlsKeyWriteRuleName = "Downgrade verified WAF agent TLS key writes"
+
 // builtinRules returns the built-in detection rule library seeded for every
 // new host. These cover the most common false-positive patterns seen in
 // production container + Linux environments.
@@ -22,7 +25,7 @@ import (
 // unprivileged user and is verified too, and it can name any of its threads
 // as it likes. So a rule that trusts a root daemon's name and exe_verified
 // also requires uid 0. Existing hosts get the same library from migrations
-// 000093, 000106, 000111, 000113, 000114, 000118, 000121 and 000122.
+// 000093, 000106, 000111, 000113, 000114, 000118, 000121, 000122 and 000125.
 func builtinRules(projectID, hostID string) []domain.DetectionRule {
 	sev := func(n int) *int { return &n }
 	verified := domain.RuleCondition{Field: "exe_verified", Op: "eq", Value: true}
@@ -168,19 +171,44 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 			// has already cleaned the path).
 			ProjectID:         projectID,
 			Name:              "Downgrade verified WAF agent TLS key reads",
-			Description:       "The WAF agent reads its own TLS keys under /etc/ssl/private and /etc/letsencrypt/live at start, on reload and on a poll, as an unprivileged user. Only for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A write, any other file, an unverified reader and any other name keep their severity.",
+			Description:       "The WAF agent reads its own TLS keys under /etc/ssl/private, /etc/letsencrypt/live and /var/lib/wafio-waf-agent/tls at start, on reload and on a poll, as an unprivileged user. Only for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A write, any other file, an unverified reader and any other name keep their severity.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SkipSeverityGuard: true,
 			SeverityOverride:  sev(1),
 			Conditions: []domain.RuleCondition{
 				{Field: "event_name", Op: "eq", Value: "openat"},
-				{Field: "filename", Op: "starts_with_any", Value: []string{"/etc/ssl/private/", "/etc/letsencrypt/live/"}},
+				{Field: "filename", Op: "starts_with_any", Value: []string{"/etc/ssl/private/", "/etc/letsencrypt/live/", "/var/lib/wafio-waf-agent/tls/"}},
 				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
 				{Field: "uid", Op: "neq", Value: 0},
 				verified,
 			},
 			Priority: 62,
+			Tags:     []string{"wafio", "tls", "expected"},
+		},
+		{
+			// The agent installs a certificate by writing the new key next to the old one in its own
+			// state directory, renaming it into place and removing what it replaced, and it sets the
+			// mode of what it wrote. The names and the identity are those of the reads above. There is
+			// no open-flags condition, because conditions are all required and the flags of rename,
+			// unlink and chmod are not open flags: a read-only open also matches, and the rule above
+			// already gives it the same LOW. A rename is matched by the path it moves from.
+			ProjectID:         projectID,
+			Name:              tlsKeyWriteRuleName,
+			Description:       "The WAF agent writes, renames, removes and changes the mode of its own TLS keys under /var/lib/wafio-waf-agent/tls when it installs or renews a certificate, as an unprivileged user. Only for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. Any other process, any other file and an unverified writer keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "in", Value: []string{"openat", "rename", "unlink", "chmod"}},
+				{Field: "filename", Op: "starts_with", Value: "/var/lib/wafio-waf-agent/tls/"},
+				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+			},
+			Priority: 74,
 			Tags:     []string{"wafio", "tls", "expected"},
 		},
 

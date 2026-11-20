@@ -12,7 +12,27 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 )
 
-const tlsKeyRuleName = "Downgrade verified WAF agent TLS key reads"
+const (
+	tlsKeyRuleName = "Downgrade verified WAF agent TLS key reads"
+	// tlsKeyDir is where the WAF agent keeps its certificate keys and its ACME account key.
+	tlsKeyDir = "/var/lib/wafio-waf-agent/tls/"
+)
+
+// beforeKeyDir is the read rule as migration 000121 inserted it, before 000125 added the key
+// directory of the agent to its files. Every other rule is returned as it is.
+func beforeKeyDir(r domain.DetectionRule) domain.DetectionRule {
+	if r.Name != tlsKeyRuleName {
+		return r
+	}
+	r.Conditions = slices.Clone(r.Conditions)
+	r.Description = strings.Replace(r.Description, "under /etc/ssl/private, /etc/letsencrypt/live and /var/lib/wafio-waf-agent/tls at start", "under /etc/ssl/private and /etc/letsencrypt/live at start", 1)
+	for i, c := range r.Conditions {
+		if c.Field == "filename" {
+			r.Conditions[i].Value = []string{"/etc/ssl/private/", "/etc/letsencrypt/live/"}
+		}
+	}
+	return r
+}
 
 // tlsKeyMigrationUpdates are the built-ins that migration 000121 changed after
 // the migration that created them: each trusts a root daemon's name together
@@ -73,6 +93,9 @@ func TestWAFAgentTLSKeyReads(t *testing.T) {
 		{name: "worker thread reads a key under /etc/ssl/private", ev: read("tokio-rt-worker", private, 999, true)},
 		{name: "agent run under another service account", ev: read("wafio-waf-agent", private, 1001, true)},
 		{name: "agent reads a key through a doubled slash", ev: read("wafio-waf-agent", "/etc/ssl//private/./site.key", 999, true)},
+		{name: "agent reads a key of its own directory", ev: read("wafio-waf-agent", tlsKeyDir+"shop.example.com/key.pem", 999, true)},
+		{name: "worker thread reads its ACME account key", ev: read("tokio-rt-worker", tlsKeyDir+"acme-account.key", 999, true)},
+		{name: "agent reads its own directory through a doubled slash", ev: read("wafio-waf-agent", "/var/lib//wafio-waf-agent/./tls/shop.key", 999, true)},
 	}
 	for _, c := range low {
 		got, stored := replayEvent(t, c.ev)
@@ -93,6 +116,11 @@ func TestWAFAgentTLSKeyReads(t *testing.T) {
 		{name: "worker thread reads /etc/shadow", ev: read("tokio-rt-worker", "/etc/shadow", 999, true), minSeverity: 4},
 		{name: "agent reads an ssh host key", ev: read("wafio-waf-agent", "/etc/ssh/ssh_host_ed25519_key", 999, true), minSeverity: 4},
 		{name: "agent reads a key in a home directory", ev: read("wafio-waf-agent", "/home/alice/.ssh/id_ed25519", 999, true), minSeverity: 4},
+		{name: "unverified agent reads a key of its own directory", ev: read("wafio-waf-agent", tlsKeyDir+"shop.example.com/key.pem", 999, false), minSeverity: 4},
+		{name: "unverified worker thread reads its own directory", ev: read("tokio-rt-worker", tlsKeyDir+"acme-account.key", 999, false), minSeverity: 4},
+		{name: "root agent reads a key of its own directory", ev: read("wafio-waf-agent", tlsKeyDir+"shop.example.com/key.pem", 0, true), minSeverity: 3},
+		{name: "verified shell reads a key of the agent directory", ev: read("bash", tlsKeyDir+"shop.example.com/key.pem", 999, true), minSeverity: 4},
+		{name: "path cleans out of the agent directory", ev: read("wafio-waf-agent", tlsKeyDir+"../../../../etc/shadow", 999, true), minSeverity: 4},
 		{name: "path cleans to /etc/shadow", ev: read("wafio-waf-agent", "/etc/ssl/private/../../shadow", 999, true), minSeverity: 4},
 		{name: "Let's Encrypt path cleans to /etc/shadow", ev: read("tokio-rt-worker", "/etc/letsencrypt/live/../../shadow", 999, true), minSeverity: 4},
 		{name: "path cleans to an ssh host key", ev: read("wafio-waf-agent", "/etc/ssl/private/../../ssh/ssh_host_rsa_key", 999, true), minSeverity: 4},
@@ -213,7 +241,7 @@ func TestWAFAgentTLSKeyRuleSeeded(t *testing.T) {
 				}
 			}
 		case "filename":
-			if c.Op != "starts_with_any" || !slices.Equal(c.Value.([]string), []string{"/etc/ssl/private/", "/etc/letsencrypt/live/"}) {
+			if c.Op != "starts_with_any" || !slices.Equal(c.Value.([]string), []string{"/etc/ssl/private/", "/etc/letsencrypt/live/", tlsKeyDir}) {
 				t.Errorf("filename condition %s %v", c.Op, c.Value)
 			}
 		}
@@ -287,6 +315,11 @@ func TestWAFAgentTLSKeyMigrationMatchesBuiltins(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s is not seeded", tlsKeyRuleName)
 	}
+	// Migration 000125 added the key directory afterwards.
+	if beforeKeyDir(r).Description == r.Description {
+		t.Fatal("the read rule does not name the key directory of the agent")
+	}
+	r = beforeKeyDir(r)
 	conds, _ := json.Marshal(r.Conditions)
 	tags, _ := json.Marshal(r.Tags)
 	want := "'" + q(r.Name) + "', '" + q(r.Description) + "', true, '" + r.Action + "', '" + q(string(conds)) + "'::jsonb, " +
