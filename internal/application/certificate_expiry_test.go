@@ -690,7 +690,7 @@ func TestShortLivedACMECertificateGetsTheFinalMailOnly(t *testing.T) {
 		t.Fatalf("an uploaded certificate of six days with 5 days left: %d mails, level %d", len(got), up.store.notified(up.store.candidates[0].AppID))
 	}
 	// A 90 day certificate keeps its levels, and an unknown start skips none.
-	for _, notBefore := range []time.Time{{}, notAfter.Add(-90 * expiryDay), notAfter.Add(-45 * expiryDay)} {
+	for _, notBefore := range []time.Time{{}, notAfter.Add(-90 * expiryDay), notAfter.Add(-60 * expiryDay), notAfter.Add(-46 * expiryDay)} {
 		r2 := newExpiryRig(domain.TLSSourceACME)
 		r2.now = notAfter.Add(-10 * expiryDay)
 		r2.store.candidates[0].NotAfter = notAfter
@@ -702,10 +702,38 @@ func TestShortLivedACMECertificateGetsTheFinalMailOnly(t *testing.T) {
 	}
 }
 
+// The agent starts to renew an ACME certificate at a third of its lifetime left. A level that is due
+// as it starts, or before, would call the ordinary renewal late: a certificate of 45 days is renewed
+// from 15 days left, so the 14 day level is not for it, and the 3 day level is.
+func TestACMELevelIsNotDueBeforeRenewalHadItsTime(t *testing.T) {
+	for _, c := range []struct {
+		life    time.Duration
+		left    time.Duration
+		mails   int
+		wantLvl int
+	}{
+		{45 * expiryDay, 14*expiryDay + time.Hour, 0, -1},
+		{45 * expiryDay, 3*expiryDay + time.Hour, 2, 3},
+		{44 * expiryDay, 10 * expiryDay, 0, -1},
+		{46 * expiryDay, 14*expiryDay + time.Hour, 2, 14},
+		{90 * expiryDay, 14*expiryDay + time.Hour, 2, 14},
+	} {
+		r := newExpiryRig(domain.TLSSourceACME)
+		notAfter := r.now.Add(100 * expiryDay)
+		r.now = notAfter.Add(-c.left)
+		r.store.candidates[0].NotAfter = notAfter
+		r.store.candidates[0].NotBefore = notAfter.Add(-c.life)
+		got := r.check(t)
+		if len(got) != c.mails || r.store.notified(r.store.candidates[0].AppID) != c.wantLvl {
+			t.Errorf("a certificate of %s with %s left: %d mails, level %d; want %d, %d", c.life, c.left, len(got), r.store.notified(r.store.candidates[0].AppID), c.mails, c.wantLvl)
+		}
+	}
+}
+
 // Whatever the lifetime, an ACME certificate that is about to expire gets exactly one mail, the
 // final one, and the dashboard shows expires_soon from the same day.
 func TestFinalMailForEveryLifetime(t *testing.T) {
-	for _, life := range []time.Duration{90 * expiryDay, 45 * expiryDay, 6 * expiryDay, 2 * expiryDay, 12 * time.Hour} {
+	for _, life := range []time.Duration{90 * expiryDay, 46 * expiryDay, 45 * expiryDay, 6 * expiryDay, 2 * expiryDay, 12 * time.Hour} {
 		r := newExpiryRig(domain.TLSSourceACME)
 		notAfter := r.now.Add(100 * expiryDay)
 		// Passes every 6 hours across the last days.

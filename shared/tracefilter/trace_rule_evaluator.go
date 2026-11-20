@@ -220,7 +220,7 @@ func NewTraceRuleEvaluator(rules []DetectionRule) *TraceRuleEvaluator {
 			}
 			conditions = append(conditions, preparedDetectionCondition{condition: condition, match: match})
 		}
-		if valid {
+		if valid && argsNameTheirEvent(rule.Conditions) {
 			prepared = append(prepared, preparedDetectionRule{DetectionRule: rule, conditions: conditions})
 		}
 	}

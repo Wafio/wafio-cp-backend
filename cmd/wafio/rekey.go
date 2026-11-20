@@ -36,7 +36,7 @@ var rekeyCmd = &cobra.Command{
 		"stop them all, run it, and start them again with the new key. A control plane that is started with a key\n" +
 		"other than the one the database was sealed with refuses to start. The key is best given on the one\n" +
 		"command line, WAFIO_OLD_TOTP_ENC_KEY=\"$old\" wafio rekey --apply; the command removes it from its own\n" +
-		"environment as soon as it has read it.",
+		"environment as soon as it has read it, so nothing it starts inherits it.",
 	Args: cobra.NoArgs,
 	// A refusal is a message about keys or rows; the usage text would bury it.
 	SilenceUsage: true,
@@ -83,8 +83,11 @@ func runRekey(cmd *cobra.Command, _ []string) error {
 	if err := cfg.ValidateDatabase(); err != nil {
 		return err
 	}
-	// The old key is read once and then removed from the environment, so that nothing this
-	// process starts or writes (a core dump, a child) carries it.
+	// The old key is read once and then removed from the environment of this process, so that no
+	// child it starts and nothing that reads its environment through Go carries it. The copy the
+	// kernel keeps of the environment it was started with (/proc/<pid>/environ) and a core dump
+	// are not touched: the shell line that sets it, and the account that runs this command, are
+	// what protect it.
 	oldRaw := os.Getenv(oldKeyEnv)
 	_ = os.Unsetenv(oldKeyEnv)
 	oldKey, newKey, err := rekeyKeys(oldRaw, cfg.TOTP.EncKey)

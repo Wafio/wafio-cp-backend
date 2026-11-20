@@ -14,7 +14,7 @@ Every control plane holds a lock on the key for as long as it runs, and `wafio r
 2. Generate the new key: `openssl rand -hex 32`.
 3. Stop every control plane (every `wafio serve`, on every host that runs one). `--apply` refuses while any of them runs.
 4. Put the new key in `totp.enc_key` (or `WAFIO_TOTP_ENC_KEY`).
-5. Read the old key into a shell variable without echoing it, and run the command with it on the same line, so that it is in the environment of that one command only (the command removes it from its own environment as soon as it has read it):
+5. Read the old key into a shell variable without echoing it, and run the command with it on the same line, so that it is in the environment of that one command only (the command drops it from its own environment as soon as it has read it, so nothing it starts inherits it; the kernel copy in `/proc/<pid>/environ` stays until the command ends, so run it under an account that others cannot read):
 
    ```
    read -rs old

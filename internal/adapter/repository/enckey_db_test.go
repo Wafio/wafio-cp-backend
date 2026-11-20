@@ -353,3 +353,62 @@ func TestHoldReportsAKeyThatChangedWhileItWasAway(t *testing.T) {
 		t.Error("a hold that was lost keeps the lock")
 	}
 }
+
+// A rekey that takes the lock while the control plane is without it must stop the control plane: it
+// still has the old key in memory, and the apply may already have rewritten the values. The test is in
+// the gap, after the connection broke and before the lock is asked for again.
+func TestHoldStopsWhenARekeyHoldsTheLockAfterAReconnect(t *testing.T) {
+	f := newRekeyFixture(t)
+	reached, proceed := make(chan struct{}, 1), make(chan struct{})
+	f.repo.keyTuning.beforeReconnect = func() {
+		reached <- struct{}{}
+		<-proceed
+	}
+	ctx := context.Background()
+	h, err := f.repo.HoldEncryptionKey(ctx, f.oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	h.mu.Lock()
+	pid := h.conn.PgConn().PID()
+	h.mu.Unlock()
+	if _, err := f.repo.DB.Exec(ctx, `SELECT pg_terminate_backend($1)`, int32(pid)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reached:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the control plane did not notice that its connection broke")
+	}
+
+	// The rekey: the exclusive lock, free now that the control plane's connection is gone.
+	tx, err := f.repo.DB.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	f.waitFor("the lock to be free for the rekey", func() bool {
+		var got bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, f.repo.keyTuning.lockKey).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	})
+	close(proceed)
+
+	select {
+	case err := <-h.Lost():
+		if !errors.Is(err, ErrEncryptionKeyLocked) {
+			t.Fatalf("lost with %v, want ErrEncryptionKeyLocked", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("a control plane that found the lock taken went on")
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.lockHeld() {
+		t.Error("a control plane that was lost keeps the lock")
+	}
+}

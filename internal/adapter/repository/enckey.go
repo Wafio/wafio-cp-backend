@@ -63,6 +63,9 @@ type keyTuning struct {
 	lockWait time.Duration // how long a control plane waits for a rekey to end
 	ping     time.Duration // how often a held lock is checked
 	rowWait  time.Duration // how long a rekey waits for a row that another transaction holds
+	// beforeReconnect runs when a lost lock is about to be taken again; a test uses it to be in
+	// that gap.
+	beforeReconnect func()
 }
 
 func (r *Repository) keyTunings() keyTuning {
@@ -98,8 +101,8 @@ type EncryptionKeyHold struct {
 
 // HoldEncryptionKey takes the shared key lock on a connection of its own, stores the id of enc when
 // the database has none, and refuses when the database holds another. The lock is held until Close,
-// and taken again when the connection breaks. Lost reports the one thing that cannot be mended
-// while running: the key of the database changed while the lock was not held.
+// and taken again when the connection breaks. Lost reports what cannot be mended while running: the
+// key of the database changed, or a rekey holds the lock, while this process was without it.
 func (r *Repository) HoldEncryptionKey(ctx context.Context, enc *otp.Encryptor) (*EncryptionKeyHold, error) {
 	if enc == nil {
 		return nil, otp.ErrNoEncryptionKey
@@ -220,12 +223,17 @@ func (h *EncryptionKeyHold) watch(ctx context.Context) {
 	}
 }
 
-// reconnect takes the lock again, for as long as the database is away. It gives up only when the
-// key of the database is not the key of this process.
+// reconnect takes the lock again, for as long as the database is away. It gives up, and reports the
+// loss, when the lock is no longer free for it or the key of the database is no longer its own: while
+// the connection was away a rekey may have run or be running, and this process still holds the old
+// key in memory, so it must not serve on.
 func (h *EncryptionKeyHold) reconnect(ctx context.Context) bool {
 	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = h.conn.Close(closeCtx)
 	cancel()
+	if h.tune.beforeReconnect != nil {
+		h.tune.beforeReconnect()
+	}
 	for wait := time.Second; ; {
 		conn, err := h.connect(ctx)
 		switch {
@@ -235,7 +243,7 @@ func (h *EncryptionKeyHold) reconnect(ctx context.Context) bool {
 			h.mu.Unlock()
 			slog.Info("encryption key lock: taken again")
 			return true
-		case errors.Is(err, ErrEncryptionKeyChanged):
+		case errors.Is(err, ErrEncryptionKeyChanged), errors.Is(err, ErrEncryptionKeyLocked):
 			h.lost <- err
 			return false
 		case ctx.Err() != nil:

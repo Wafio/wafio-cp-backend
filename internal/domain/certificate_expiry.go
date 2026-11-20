@@ -46,10 +46,12 @@ func DaysLeft(notAfter, now time.Time) int {
 // expired is at the last level, and when the passes were far apart a certificate is at its current
 // level only, not at the ones it passed.
 //
-// An ACME level is skipped when it is a third of the lifetime or more (notBefore to notAfter): the
-// agent starts to renew at a third, so a certificate that is merely renewing in the ordinary way
-// would be reported as late. The final level is never skipped, so a certificate of a few days has
-// that one only. An unknown start (the zero time) skips nothing.
+// An ACME level is skipped when it is due before the agent has had its time to renew. The agent
+// starts at a third of the lifetime (notBefore to notAfter) left, and a level of d days is due once
+// fewer than d+1 days are left, so it is skipped when d+1 days are a third of the lifetime or more:
+// a certificate that is merely renewing in the ordinary way would be reported as late. The final
+// level is never skipped, so a certificate of a few days has that one only. An unknown start (the
+// zero time) skips nothing.
 func ExpiryLevel(source string, notBefore, notAfter, now time.Time) (days int, due bool) {
 	var levels []int
 	switch source {
@@ -61,7 +63,7 @@ func ExpiryLevel(source string, notBefore, notAfter, now time.Time) (days int, d
 	left := DaysLeft(notAfter, now)
 	lifetime := notAfter.Sub(notBefore)
 	for _, d := range levels {
-		if source == TLSSourceACME && d != FinalExpiryDays && !notBefore.IsZero() && lifetime > 0 && time.Duration(d)*24*time.Hour*3 >= lifetime {
+		if source == TLSSourceACME && d != FinalExpiryDays && !notBefore.IsZero() && lifetime > 0 && time.Duration(d+1)*24*time.Hour*3 >= lifetime {
 			continue
 		}
 		if left <= d {

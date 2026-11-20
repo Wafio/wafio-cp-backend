@@ -160,10 +160,10 @@ func TestOnlyTheDeliveryQuerySelectsTheKey(t *testing.T) {
 	}
 }
 
-// keyCall judges one call of a function that opens or hands out sealed keys. sealedKeys and
-// replaceSealedKey are the rotation's alone, called by the loader of the certificate keys; OpenBound
-// is called by the rotation to read what it rewrites, and by the delivery to an agent, nowhere else.
-// An agent that is sent a key opens it in agentserver/certificate_install.go.
+// keyCall judges one mention of a function that opens or hands out sealed keys. sealedKeys and
+// replaceSealedKey are the rotation's alone, used by the loader of the certificate keys; OpenBound is
+// used by the rotation to read what it rewrites, and by the delivery to an agent, nowhere else. An
+// agent that is sent a key opens it in agentserver/certificate_install.go.
 func keyCall(callee, file, fn string) string {
 	file = filepath.ToSlash(file)
 	switch callee {
@@ -179,15 +179,56 @@ func keyCall(callee, file, fn string) string {
 			return ""
 		}
 	}
-	return callee + " is called from " + fn + " in " + file
+	return callee + " is used by " + fn + " in " + file
+}
+
+var keyHelperNames = map[string]bool{"sealedKeys": true, "replaceSealedKey": true, "OpenBound": true}
+
+// keyRef is one mention of a key helper: the name, the function it is in, and where.
+type keyRef struct {
+	name, fn string
+	pos      token.Pos
+}
+
+// keyReferences finds every mention of a key helper in a file, not only the calls: a function value
+// (f := sealedKeys, passing replaceSealedKey on), a method value (g := enc.OpenBound) and a method
+// expression ((*otp.Encryptor).OpenBound) reach the same key as a call does. The declaration of a
+// helper is not a mention. A method named OpenBound in an interface or a struct is one, which is more
+// than needed and errs on the side of asking.
+func keyReferences(file *ast.File) []keyRef {
+	var out []keyRef
+	for _, decl := range file.Decls {
+		fn := ""
+		var declared *ast.Ident
+		if f, ok := decl.(*ast.FuncDecl); ok {
+			fn, declared = f.Name.Name, f.Name
+		}
+		qualified := map[token.Pos]bool{}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				// The selected name is also visited as an identifier of its own: count it once.
+				qualified[x.Sel.Pos()] = true
+				if keyHelperNames[x.Sel.Name] {
+					out = append(out, keyRef{x.Sel.Name, fn, x.Sel.Pos()})
+				}
+			case *ast.Ident:
+				if keyHelperNames[x.Name] && x != declared && !qualified[x.Pos()] {
+					out = append(out, keyRef{x.Name, fn, x.Pos()})
+				}
+			}
+			return true
+		})
+	}
+	return out
 }
 
 // The two helpers of the rotation and OpenBound are the ways to a sealed key. This test finds every
-// call of them in the program and fails on one that is not where it may be.
-func TestKeyHelpersAreCalledOnlyWhereTheyMayBe(t *testing.T) {
+// mention of them in the program, calls and values alike, and fails on one that is not where it may be.
+func TestKeyHelpersAreUsedOnlyWhereTheyMayBe(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	fset := token.NewFileSet()
-	calls := map[string]int{}
+	mentions := map[string]int{}
 	for _, dir := range []string{"internal", "cmd"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
@@ -197,32 +238,11 @@ func TestKeyHelpersAreCalledOnlyWhereTheyMayBe(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			for _, decl := range file.Decls {
-				fn := ""
-				if f, ok := decl.(*ast.FuncDecl); ok {
-					fn = f.Name.Name
+			for _, ref := range keyReferences(file) {
+				mentions[ref.name]++
+				if problem := keyCall(ref.name, path, ref.fn); problem != "" {
+					t.Errorf("%s: %s", fset.Position(ref.pos), problem)
 				}
-				ast.Inspect(decl, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					var callee string
-					switch f := call.Fun.(type) {
-					case *ast.Ident:
-						callee = f.Name
-					case *ast.SelectorExpr:
-						callee = f.Sel.Name
-					}
-					if callee != "sealedKeys" && callee != "replaceSealedKey" && callee != "OpenBound" {
-						return true
-					}
-					calls[callee]++
-					if problem := keyCall(callee, path, fn); problem != "" {
-						t.Errorf("%s: %s", fset.Position(call.Pos()), problem)
-					}
-					return true
-				})
 			}
 			return nil
 		})
@@ -230,8 +250,46 @@ func TestKeyHelpersAreCalledOnlyWhereTheyMayBe(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if calls["sealedKeys"] != 1 || calls["replaceSealedKey"] != 1 || calls["OpenBound"] < 1 {
-		t.Fatalf("calls found: %v; the scan is blind (want sealedKeys 1, replaceSealedKey 1, OpenBound at least 1)", calls)
+	if mentions["sealedKeys"] != 1 || mentions["replaceSealedKey"] != 1 || mentions["OpenBound"] < 1 {
+		t.Fatalf("mentions found: %v; the scan is blind (want sealedKeys 1, replaceSealedKey 1, OpenBound at least 1)", mentions)
+	}
+}
+
+// The scan finds a helper however it is reached.
+func TestKeyReferencesFindEveryWayToAHelper(t *testing.T) {
+	for name, tt := range map[string]struct {
+		src  string
+		want []string // name in fn, in source order
+	}{
+		"a call":                          {`func f() { sealedKeys(ctx, tx, true) }`, []string{"sealedKeys in f"}},
+		"a function value":                {`func f() { g := sealedKeys; _ = g }`, []string{"sealedKeys in f"}},
+		"a function passed on":            {`func f() { use(replaceSealedKey) }`, []string{"replaceSealedKey in f"}},
+		"a function in a struct":          {`func f() { _ = loader{read: sealedKeys} }`, []string{"sealedKeys in f"}},
+		"a method call":                   {`func f() { enc.OpenBound(a, b) }`, []string{"OpenBound in f"}},
+		"a method value":                  {`func f() { g := enc.OpenBound; _ = g }`, []string{"OpenBound in f"}},
+		"a method expression":             {`func f() { g := (*otp.Encryptor).OpenBound; _ = g }`, []string{"OpenBound in f"}},
+		"a method value of a field":       {`func f() { g := s.KeyCrypto.OpenBound; _ = g }`, []string{"OpenBound in f"}},
+		"in a function literal":           {`func f() { go func() { sealedKeys(ctx, tx, false) }() }`, []string{"sealedKeys in f"}},
+		"in a package variable":           {`var open = enc.OpenBound`, []string{"OpenBound in "}},
+		"two in one function":             {`func f() { replaceSealedKey(b); sealedKeys(c) }`, []string{"replaceSealedKey in f", "sealedKeys in f"}},
+		"the declaration of a function":   {`func sealedKeys() {}`, nil},
+		"the declaration of a method":     {`func (e *Encryptor) OpenBound() {}`, nil},
+		"the declaration of the other":    {`func replaceSealedKey() {}`, nil},
+		"a method in an interface":        {`type opener interface{ OpenBound(a, b string) ([]byte, error) }`, []string{"OpenBound in "}},
+		"other names":                     {`func f() { sealedKey(); enc.Open(); OpenBounds() }`, nil},
+		"a helper named in a string only": {`func f() { _ = "sealedKeys OpenBound" }`, nil},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), "x.go", "package x\n"+tt.src, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var got []string
+		for _, r := range keyReferences(file) {
+			got = append(got, r.name+" in "+r.fn)
+		}
+		if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+			t.Errorf("%s: found %v, want %v", name, got, tt.want)
+		}
 	}
 }
 

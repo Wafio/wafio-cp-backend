@@ -51,9 +51,9 @@ type RuleCondition struct {
 	//                           // category, severity, filename, args, addr, port, uid, gid,
 	//                           // addr_family, flags, detail, ret_val, is_container,
 	//                           // exe_verified, container_image, container_name
-	// args (string): what the event carries besides its path. For a rename it is the
-	// destination, cleaned like filename; for an exec it is the argument text. A rule that
-	// reads it names the event as well, since the text means nothing without it.
+	// args (string, rename only): the destination of a rename, cleaned like filename. A rule
+	// with a condition on it must also have event_name eq rename: DetectionRule.Validate
+	// refuses it otherwise, and the evaluator never applies one that got past that.
 	// exe_verified (bool): the kernel saw the process in the agent-verified
 	// protected set when it produced the event. comm and the lineage
 	// names are chosen by the process itself; a rule that drops events keys
@@ -99,7 +99,22 @@ func (r DetectionRule) Validate() error {
 			return err
 		}
 	}
+	if !argsNameTheirEvent(r.Conditions) {
+		return errors.New("a condition on args needs event_name eq rename")
+	}
 	return nil
+}
+
+// argsNameTheirEvent reports whether the conditions are fit to carry one on args: the field holds
+// the destination of a rename and nothing else, so a rule that reads it has to say that it is about
+// a rename.
+func argsNameTheirEvent(conds []RuleCondition) bool {
+	hasArgs, hasRename := false, false
+	for _, c := range conds {
+		hasArgs = hasArgs || c.Field == "args"
+		hasRename = hasRename || (c.Field == "event_name" && c.Op == "eq" && c.Value == "rename")
+	}
+	return !hasArgs || hasRename
 }
 
 func (c RuleCondition) Validate() error {
