@@ -89,10 +89,17 @@ step "script tests" script_tests
 step "race" env -u TEST_DB_URL go test -race -timeout 30m ./...
 step "race (shared)" shared_race
 step "govulncheck" go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+# The agent server has many tests that need no database and run in the steps above; only its
+# database tests (the TestDB prefix) run here.
+database_integration() {
+  go test -count=1 -race -p 1 ./internal/adapter/... ./internal/domain/... &&
+    go test -count=1 -race -p 1 -run '^TestDB' ./internal/agentserver/...
+}
+
 if [ -n "${TEST_DB_URL:-}" ]; then
   # -p 1: the packages share one database, and a migration test takes DDL locks
   # and can deadlock with another package's inserts when they run side by side.
-  step "database integration" go test -count=1 -race -p 1 ./internal/adapter/... ./internal/domain/... ./internal/agentserver/...
+  step "database integration" database_integration
 else
   notrun+=("database integration (set TEST_DB_URL)")
 fi

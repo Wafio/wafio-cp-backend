@@ -9,9 +9,11 @@ import (
 	"go/parser"
 	"go/token"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
@@ -215,7 +217,6 @@ func TestInstallAckIsHeardFromTheSendingStreamOnly(t *testing.T) {
 	id := f.s.onlyPending(t)
 
 	f.s.recordCertificateInstallAck(other, &agentv1.CommandAck{CommandId: id, Ok: false, Error: "bad_pem"})
-	time.Sleep(50 * time.Millisecond)
 	if f.s.pendingInstalls() != 1 || len(f.audit.of(repository.AuditAgentCertificateRefused)) != 0 || len(f.store.reportsOf("failed")) != 0 {
 		t.Fatal("an ack from another stream was acted on")
 	}
@@ -227,13 +228,11 @@ func TestInstallAckIsHeardFromTheSendingStreamOnly(t *testing.T) {
 	}
 
 	f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: id, Ok: false, Error: "bad_pem"})
-	f.waitAudit(t, repository.AuditAgentCertificateRefused, 1)
-	if f.s.pendingInstalls() != 0 {
-		t.Fatal("the install still waits after its ack")
+	if n := len(f.audit.of(repository.AuditAgentCertificateRefused)); n != 1 || f.s.pendingInstalls() != 0 {
+		t.Fatalf("the refusal is audited %d times, %d installs wait; want 1 and 0", n, f.s.pendingInstalls())
 	}
 	// The same ack again finds nothing.
 	f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: id, Ok: false, Error: "bad_pem"})
-	time.Sleep(50 * time.Millisecond)
 	if n := len(f.audit.of(repository.AuditAgentCertificateRefused)); n != 1 {
 		t.Fatalf("%d refusals audited, want 1", n)
 	}
@@ -265,14 +264,17 @@ func TestInstallAckCodes(t *testing.T) {
 			h := handleOf(true, &sentLog{})
 			f.deliver(h)
 			f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: f.s.onlyPending(t), Ok: tc.ok, Error: tc.errText})
-			rows := f.waitAudit(t, repository.AuditAgentCertificateRefused, 1)
-			if rows[0].MetadataJSON["code"] != tc.code {
-				t.Fatalf("audited code %v, want %s", rows[0].MetadataJSON["code"], tc.code)
+			// The refusal is handled on the receive loop, so it is written when the call returns.
+			rows := f.audit.of(repository.AuditAgentCertificateRefused)
+			if len(rows) != 1 || rows[0].MetadataJSON["code"] != tc.code {
+				t.Fatalf("audited %v, want code %s", rows, tc.code)
 			}
 			if tc.code == certAckInvalid && tc.errText != "" && strings.Contains(fmt.Sprint(rows[0].MetadataJSON), tc.errText) {
 				t.Fatalf("the audit row repeats the text of the ack: %v", rows[0].MetadataJSON)
 			}
-			time.Sleep(30 * time.Millisecond)
+			if tc.failed {
+				waitUntil(t, "failed status", func() bool { return len(f.store.reportsOf("failed")) == 1 })
+			}
 			failed := f.store.reportsOf("failed")
 			if !tc.failed {
 				if len(failed) != 0 {
@@ -291,7 +293,6 @@ func TestInstallAckCodes(t *testing.T) {
 		h := handleOf(true, &sentLog{})
 		f.deliver(h)
 		f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: f.s.onlyPending(t), Ok: true})
-		time.Sleep(50 * time.Millisecond)
 		if f.s.pendingInstalls() != 0 || len(f.audit.of(repository.AuditAgentCertificateRefused)) != 0 || len(f.store.reportsOf("failed")) != 0 {
 			t.Fatal("an accepted install left a refusal or kept waiting")
 		}
@@ -307,7 +308,6 @@ func TestInstallExpiresWithoutAnAck(t *testing.T) {
 	id := f.s.onlyPending(t)
 	waitUntil(t, "install to expire", func() bool { return f.s.pendingInstalls() == 0 })
 	f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: id, Ok: false, Error: "bad_pem"})
-	time.Sleep(50 * time.Millisecond)
 	if len(f.audit.of(repository.AuditAgentCertificateRefused)) != 0 || len(f.store.reportsOf("failed")) != 0 {
 		t.Fatal("an ack after the timeout was acted on")
 	}
@@ -334,9 +334,9 @@ func TestInstallTableIsBounded(t *testing.T) {
 	}
 }
 
-// One stream is sent the same certificate again only after a minute, unless a new bundle was sent to
-// it since: the first status after each generation is answered at once. Another certificate has its
-// own limit, and a new stream starts afresh.
+// One stream is sent the same certificate again only after 50 seconds, unless a new bundle was sent to
+// it since: the first status after each generation is answered at once. An agent repeats missing
+// about once a minute, which is never refused. A new stream starts afresh.
 func TestDeliveryResendLimit(t *testing.T) {
 	f := newCertFixture(t)
 	sent := &sentLog{}
@@ -357,16 +357,18 @@ func TestDeliveryResendLimit(t *testing.T) {
 	setGeneration(4)
 	step("first status", 1)
 	step("the same status at once", 1)
-	f.clock.advance(59 * time.Second)
-	step("after 59 seconds", 1)
+	f.clock.advance(certResendEvery - time.Second)
+	step("just before the window ends", 1)
 	f.clock.advance(2 * time.Second)
-	step("after a minute", 2)
+	step("after the window", 2)
 	step("again at once", 2)
+	f.clock.advance(time.Minute)
+	step("an agent that repeats once a minute", 3)
 	setGeneration(5)
-	step("a new bundle generation, without waiting", 3)
-	step("the same generation again", 3)
+	step("a new bundle generation, without waiting", 4)
+	step("the same generation again", 4)
 	setGeneration(6)
-	step("another generation", 4)
+	step("another generation", 5)
 
 	// A stream that connects again has no memory of the old one.
 	fresh := &sentLog{}
@@ -420,11 +422,14 @@ func TestOnlyMissingStatusOfAnUploadedCertificateStartsADelivery(t *testing.T) {
 			cs := missingStatus()
 			tc.change(cs, f.store)
 			f.s.handleCertificateStatus(handleOf(true, sent), cs)
+			// The status is judged on this call; only the delivery it may start runs on a goroutine.
+			f.s.waitDeliveries(t)
 			if tc.starts {
-				waitUntil(t, "install", func() bool { return len(sent.installs()) == 1 })
+				if len(sent.installs()) != 1 {
+					t.Fatal("no install was sent")
+				}
 				return
 			}
-			time.Sleep(100 * time.Millisecond)
 			if agent, _ := f.store.counts(); agent != 0 || len(sent.installs()) != 0 {
 				t.Fatal("a delivery was started")
 			}
@@ -441,17 +446,22 @@ func TestStreamDeliversTheKeyToABoundWAFStreamOnly(t *testing.T) {
 		bound    bool
 		features []string
 		want     bool
+		// stored says that the status reaches the store, which gives a negative test something to wait for.
+		stored bool
 	}{
-		{"bound credential with the feature", true, []string{engine.FeatureTLSCertificates}, true},
-		{"project-wide credential under the same name", false, []string{engine.FeatureTLSCertificates}, false},
-		{"bound credential without the feature", true, []string{engine.FeatureScriptRules}, false},
+		{"bound credential with the feature", true, []string{engine.FeatureTLSCertificates}, true, true},
+		{"project-wide credential under the same name", false, []string{engine.FeatureTLSCertificates}, false, true},
+		{"bound credential without the feature", true, []string{engine.FeatureScriptRules}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, f := newCertEnv(t, tc.bound)
 			st := connectCertStream(t, env, tc.features...)
 			sendStatus(t, st, missingStatus())
 			if !tc.want {
-				st.noInstall(t, 300*time.Millisecond)
+				if tc.stored {
+					st.settle(t, f)
+				}
+				st.noInstall(t, 200*time.Millisecond)
 				if agent, delivery := f.store.counts(); agent != 0 || delivery != 0 {
 					t.Fatalf("the database was asked for a key: %d, %d", agent, delivery)
 				}
@@ -486,12 +496,9 @@ func TestStreamAckFromAnotherStreamIsIgnored(t *testing.T) {
 	sendStatus(t, st, missingStatus())
 	ins := st.install(t, 3*time.Second)
 	sendAck(t, stOther.st, ins.GetCommandId(), false, "bad_pem")
-	// Messages of a stream are handled in order: once the heartbeat of the other stream is
-	// through, its ack was handled too.
-	if err := stOther.st.Send(heartbeat()); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(150 * time.Millisecond)
+	// Messages of a stream are handled in order: once the status sent after the ack is stored, the
+	// ack was handled too.
+	stOther.settle(t, f)
 	if env.s.pendingInstalls() != 1 || len(f.audit.of(repository.AuditAgentCertificateRefused)) != 0 || len(f.store.reportsOf("failed")) != 0 {
 		t.Fatal("the ack of another stream was acted on")
 	}
@@ -511,7 +518,8 @@ func TestStreamResendLimitAndNewBundleGeneration(t *testing.T) {
 	sendStatus(t, st, missingStatus())
 	st.install(t, 3*time.Second)
 	sendStatus(t, st, missingStatus())
-	st.noInstall(t, 300*time.Millisecond)
+	st.settle(t, f)
+	st.noInstall(t, 200*time.Millisecond)
 
 	env.loader.set(8, `{"routes":[{"host":"shop.example"}]}`)
 	env.s.PushBundleToProject(e2eProject)
@@ -618,6 +626,254 @@ func TestDeliveryCodeNeverFormatsTheMessage(t *testing.T) {
 	}
 }
 
+// setGeneration makes h look as if the last WAF bundle sent to it had this generation.
+func setGeneration(h *streamHandle, g int64) {
+	h.bundleMu.Lock()
+	h.bundleStates = map[string]HostBundleApplyStatus{"waf_config": {DesiredGeneration: g}}
+	h.bundleMu.Unlock()
+}
+
+// A refusal that the same bytes would meet again blocks the certificate on that stream until it has
+// been sent another bundle, however long the stream waits; the other refusals leave the resend limit
+// as it is.
+func TestPermanentRefusalsBlockTheCertificateUntilTheNextGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		errText   string
+		permanent bool
+	}{
+		{"bad_pem", true}, {"too_large", true}, {"key_mismatch", true}, {"leaf_mismatch", true}, {"unsupported_key", true},
+		{"write_failed", false}, {"not_in_bundle", false}, {"free text", false}, {"", false},
+	} {
+		t.Run(tc.errText, func(t *testing.T) {
+			f := newCertFixture(t)
+			sent := &sentLog{}
+			h := handleOf(true, sent)
+			setGeneration(h, 4)
+			f.deliver(h)
+			f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: f.s.onlyPending(t), Ok: false, Error: tc.errText})
+
+			f.clock.advance(10 * certResendEvery)
+			f.deliver(h)
+			want := 2
+			if tc.permanent {
+				want = 1
+			}
+			if got := len(sent.installs()); got != want {
+				t.Fatalf("%d installs after a long wait, want %d", got, want)
+			}
+			setGeneration(h, 5)
+			f.deliver(h)
+			if got := len(sent.installs()); got != want+1 {
+				t.Fatalf("%d installs after a new bundle generation, want %d", got, want+1)
+			}
+		})
+	}
+	t.Run("a key that does not open", func(t *testing.T) {
+		f := newCertFixture(t)
+		good := f.store.delivery.KeyCiphertext
+		f.store.delivery.KeyCiphertext = "not sealed"
+		sent := &sentLog{}
+		h := handleOf(true, sent)
+		setGeneration(h, 4)
+		f.deliver(h)
+		f.store.delivery.KeyCiphertext = good // the certificate was uploaded again under the same id, say
+		f.clock.advance(10 * certResendEvery)
+		f.deliver(h)
+		if len(sent.installs()) != 0 {
+			t.Fatal("a certificate whose key did not open was sent again in the same generation")
+		}
+		setGeneration(h, 5)
+		f.deliver(h)
+		if len(sent.installs()) != 1 {
+			t.Fatal("a new bundle generation did not lift the block")
+		}
+	})
+}
+
+// The block of a certificate is not forgotten when the stream is full of entries: only an old entry
+// that is not blocked in this generation makes room.
+func TestBlockedCertificateSurvivesTheMakingOfRoom(t *testing.T) {
+	h := handleOf(true, &sentLog{})
+	now := time.Now()
+	h.blockCertificate("blocked", 1, now)
+	for i := 0; i < certClaimsMax-1; i++ {
+		h.claimCertificateDelivery(fmt.Sprintf("cert-%d", i), 1, now)
+	}
+	later := now.Add(10 * certResendEvery)
+	if !h.claimCertificateDelivery("new", 1, later) {
+		t.Fatal("old entries did not make room")
+	}
+	if h.claimCertificateDelivery("blocked", 1, later) {
+		t.Fatal("the block was swept with the old entries")
+	}
+	if !h.claimCertificateDelivery("blocked", 2, later) {
+		t.Fatal("the next generation did not lift the block")
+	}
+}
+
+// A refusal writes the state failed and knows nothing about the certificate the agent serves meanwhile,
+// so what is stored of it (the leaf, which keeps the chain, the expiry and the mailed warning) stays.
+// An agent that may not report on the app gets nothing written.
+func TestRefusalKeepsTheStoredLeaf(t *testing.T) {
+	stored := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name   string
+		act    func(f *certFixture, h *streamHandle)
+		failed int
+	}{
+		{"a refused install", func(f *certFixture, h *streamHandle) {
+			f.deliver(h)
+			f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: f.s.onlyPending(t), Ok: false, Error: "write_failed"})
+		}, 1},
+		{"a key that does not open", func(f *certFixture, h *streamHandle) {
+			f.store.delivery.KeyCiphertext = "not sealed"
+			f.deliver(h)
+		}, 1},
+		{"an app the agent may not report on", func(f *certFixture, h *streamHandle) {
+			f.store.priorOK = false
+			f.deliver(h)
+			f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: f.s.onlyPending(t), Ok: false, Error: "write_failed"})
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCertFixture(t)
+			f.store.prior = repository.StatusPrior{Stored: true, Leaf: stored}
+			tc.act(f, handleOf(true, &sentLog{}))
+			failed := f.store.reportsOf("failed")
+			if len(failed) != tc.failed {
+				t.Fatalf("%d failed statuses, want %d", len(failed), tc.failed)
+			}
+			if tc.failed == 1 && (failed[0].LeafSHA256 != stored || failed[0].Chain != nil || failed[0].Source != "uploaded") {
+				t.Fatalf("failed status: %+v", failed[0])
+			}
+		})
+	}
+}
+
+// The installs of a stream that ended are forgotten with it.
+func TestInstallsGoWithTheirStream(t *testing.T) {
+	f := newCertFixture(t)
+	gone, kept := handleOf(true, &sentLog{}), handleOf(true, &sentLog{})
+	f.deliver(gone)
+	goneID := f.s.onlyPending(t)
+	f.deliver(kept)
+	if f.s.pendingInstalls() != 2 {
+		t.Fatal("two installs were expected to wait")
+	}
+	f.s.unregisterStream(gone)
+	if f.s.pendingInstalls() != 1 {
+		t.Fatalf("%d installs wait after the stream ended, want the one of the other stream", f.s.pendingInstalls())
+	}
+	f.s.recordCertificateInstallAck(gone, &agentv1.CommandAck{CommandId: goneID, Ok: false, Error: "bad_pem"})
+	if len(f.audit.of(repository.AuditAgentCertificateRefused)) != 0 {
+		t.Fatal("an ack of a stream that ended was acted on")
+	}
+}
+
+// The key is zeroed when the Send returns, also when it returns after the deadline of the push, which
+// has cut the stream by then. Until it returns, nothing touches the buffer.
+func TestKeyIsZeroedWhenALateSendReturns(t *testing.T) {
+	f := newCertFixture(t)
+	f.s.pushSendTimeout = 30 * time.Millisecond
+	release := make(chan struct{})
+	wiped := make(chan []byte, 1)
+	f.s.afterWipe = func(k []byte) { wiped <- k }
+	var disconnected atomic.Bool
+	var alias, atSend []byte
+	h := handleOf(true, &sentLog{})
+	h.disconnect = func() { disconnected.Store(true) }
+	h.send = func(m *agentv1.ServerMessage) error {
+		alias = m.GetCertificateInstall().GetKeyPem()
+		atSend = append([]byte(nil), alias...)
+		<-release
+		return nil
+	}
+	f.deliver(h) // returns at the deadline
+	if !disconnected.Load() {
+		t.Fatal("the stream was not cut after the deadline")
+	}
+	if f.s.pendingInstalls() != 0 || len(f.audit.of(repository.AuditAgentCertificateDelivered)) != 0 {
+		t.Fatal("a send that missed its deadline counts as delivered")
+	}
+	close(release)
+	select {
+	case k := <-wiped:
+		if len(k) == 0 || !bytes.Equal(k, make([]byte, len(k))) || !bytes.Equal(alias, make([]byte, len(alias))) {
+			t.Fatal("the key was not zeroed after the late Send returned")
+		}
+		if !bytes.Equal(atSend, f.cert.key) {
+			t.Fatal("the message did not carry the stored key")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the key was never zeroed")
+	}
+}
+
+// A stream that was revoked or ended gets no key: not when it is already closed, and not when it
+// closes while the key is read and opened.
+func TestNoKeyGoesToAStreamThatIsClosing(t *testing.T) {
+	f := newCertFixture(t)
+	var open atomic.Bool
+	sent := &sentLog{}
+	h := handleOf(true, sent)
+	h.open = open.Load
+
+	f.deliver(h) // closed from the start: nothing is even read
+	if agent, _ := f.store.counts(); agent != 0 || len(sent.installs()) != 0 {
+		t.Fatal("a closed stream was served")
+	}
+	open.Store(true)
+	f.store.onDelivery = func() { open.Store(false) } // revoked while the key is read
+	f.clock.advance(time.Hour)
+	f.deliver(h)
+	if agent, delivery := f.store.counts(); agent != 1 || delivery != 1 {
+		t.Fatalf("the database was asked %d and %d times", agent, delivery)
+	}
+	if len(sent.installs()) != 0 || f.s.pendingInstalls() != 0 || len(f.audit.of(repository.AuditAgentCertificateDelivered)) != 0 {
+		t.Fatal("a stream that closed while the key was read was sent it")
+	}
+}
+
+// A stream that its credential's revoke ends stops counting as open at once.
+func TestStreamIsNotOpenAfterItsCredentialIsRevoked(t *testing.T) {
+	env, _ := newCertEnv(t, true)
+	connectCertStream(t, env, engine.FeatureTLSCertificates)
+	env.s.mu.RLock()
+	h := env.s.streams[e2eCred]
+	env.s.mu.RUnlock()
+	if h == nil || !h.stillOpen() {
+		t.Fatal("the connected stream is not open")
+	}
+	env.s.DisconnectCredential(e2eCred)
+	waitUntil(t, "the stream to stop being open", func() bool { return !h.stillOpen() })
+}
+
+// What Hello says about the features is stored before the stream is registered and before its first
+// bundle is built, so a status that the agent sends after applying that bundle finds the TLS flag
+// written. If it were written on a goroutine, the first key could be refused for a race.
+func TestFeaturesAreStoredBeforeTheStreamIsRegistered(t *testing.T) {
+	env := newE2EEnv(t)
+	registered, loads := -1, -1
+	env.health.onFeatures = func() {
+		env.s.mu.RLock()
+		registered = len(env.s.streams)
+		env.s.mu.RUnlock()
+		env.loader.mu.Lock()
+		loads = env.loader.calls
+		env.loader.mu.Unlock()
+	}
+	connectCertStream(t, env, engine.FeatureTLSCertificates)
+	waitUntil(t, "features stored", func() bool { return len(env.health.featuresCalls()) == 1 })
+	if registered != 0 || loads != 0 {
+		t.Fatalf("at the write of the features %d streams were registered and %d bundles loaded, want none of either", registered, loads)
+	}
+	env.s.mu.RLock()
+	defer env.s.mu.RUnlock()
+	if len(env.s.streams) != 1 {
+		t.Fatal("the stream was not registered after its features were stored")
+	}
+}
+
 // ---- helpers for the gRPC tests ----
 
 // newCertEnv is the server of stream_e2e_test.go with the TLS storage and the audit log replaced by
@@ -713,6 +969,25 @@ func connectCertStreamWith(t *testing.T, env *e2eEnv, cert *tls.Certificate, fea
 	c := startCertStream(st)
 	c.waitFor(t, func(m *agentv1.ServerMessage) bool { return m.GetBundle() != nil }, 5*time.Second)
 	return c
+}
+
+// settle waits until the stream has handled everything it was sent before this call. The statuses of
+// a stream are handled in the order they arrive, so once one sent last is stored, the ones before it
+// were handled, and the deliveries they started have been counted and are waited for. Each call uses
+// an app of its own, since the budget of one app is a few statuses.
+func (c *certStream) settle(t *testing.T, f *certFixture) {
+	t.Helper()
+	id := uuid.NewString()
+	sendStatus(t, c, &agentv1.CertificateStatus{AppId: uuid.NewString(), Source: "acme", State: "pending", RequestId: id})
+	waitUntil(t, "the stream to handle its messages", func() bool {
+		for _, r := range f.store.seenReports() {
+			if r.RequestID == id {
+				return true
+			}
+		}
+		return false
+	})
+	f.s.waitDeliveries(t)
 }
 
 func sendStatus(t *testing.T, c *certStream, cs *agentv1.CertificateStatus) {

@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -254,12 +255,6 @@ func (d *dbStream) send(m *agentv1.AgentMessage) { d.st.in <- m }
 
 func (d *dbStream) status(cs *agentv1.CertificateStatus) { d.send(statusMessage(cs)) }
 
-// quiet gives an install that would come a moment to arrive, then reports how many did.
-func (d *dbStream) quiet() int {
-	time.Sleep(300 * time.Millisecond)
-	return len(d.installs())
-}
-
 // ---- database reads ----
 
 func (f *tlsDB) auditRows(action string) []auditRow {
@@ -319,6 +314,38 @@ func (f *tlsDB) waitStatus(appID string, cond func(*repository.TLSStatus) bool) 
 	return st
 }
 
+// A sentinel is an app of an agent whose status a stream can change, so that a test can tell when the
+// stream has handled what it was sent before: the messages of a stream are handled in order, so a
+// status sent last that changes a stored row shows that the ones before it were handled.
+type sentinel struct{ app, request string }
+
+// sentinel adds one. It switches an app to the acme source, which the agent row must allow, so a test
+// that changes the agent row makes its sentinels first. Each use needs an app of its own, since the
+// budget of one app is a few statuses.
+func (f *tlsDB) sentinel(a *dbAgent) sentinel {
+	f.t.Helper()
+	app := f.app(a.id)
+	return sentinel{app: app, request: f.acme(app, "sentinel-"+uuid.NewString()[:8]+".example.com")}
+}
+
+// settleOn sends the sentinel's status on the stream, waits until it is stored and until the
+// deliveries that the statuses before it started have ended, and returns how many installs the
+// stream got.
+func (f *tlsDB) settleOn(s *dbStream, sn sentinel) int {
+	f.t.Helper()
+	token := uuid.NewString()
+	s.status(&agentv1.CertificateStatus{AppId: sn.app, Source: "acme", State: "failed", RequestId: sn.request, Error: token})
+	f.waitStatus(sn.app, func(st *repository.TLSStatus) bool { return st.Error == token })
+	f.s.waitDeliveries(f.t)
+	return len(s.installs())
+}
+
+// settle is settleOn with a sentinel made for the occasion.
+func (f *tlsDB) settle(s *dbStream, a *dbAgent) int {
+	f.t.Helper()
+	return f.settleOn(s, f.sentinel(a))
+}
+
 // ---- tests ----
 
 // Delivery against the real database and the real stream code. The agent whose credential is bound to
@@ -374,10 +401,15 @@ func TestDBCertificateDeliveryReachesOnlyTheBoundAgentOfTheApp(t *testing.T) {
 		t.Fatalf("status after the missing report: %+v", got)
 	}
 
-	// A second missing status within the minute is not answered; the ack of another agent's stream is not heard.
+	// A second missing status within the window is not answered. It says what is stored, so it is not
+	// written either, and the stored time stays.
+	stored := f.status(appA)
 	sa.status(&agentv1.CertificateStatus{AppId: appA, Source: "uploaded", State: "missing", CertificateId: certAID})
-	if n := sa.quiet(); n != 1 {
-		t.Fatalf("%d installs after a second status within a minute, want 1", n)
+	if n := f.settle(sa, a); n != 1 {
+		t.Fatalf("%d installs after a second status within the window, want 1", n)
+	}
+	if again := f.status(appA); !again.ReceivedAt.Equal(stored.ReceivedAt) {
+		t.Fatalf("a status that changed nothing was written: %v -> %v", stored.ReceivedAt, again.ReceivedAt)
 	}
 
 	// The other bound agent of the project asks for the key of the first agent's app, and for the
@@ -387,8 +419,7 @@ func TestDBCertificateDeliveryReachesOnlyTheBoundAgentOfTheApp(t *testing.T) {
 	sb.status(&agentv1.CertificateStatus{AppId: appA, Source: "uploaded", State: "missing", CertificateId: certAID})
 	sb.status(&agentv1.CertificateStatus{AppId: appB, Source: "uploaded", State: "missing", CertificateId: certAID})
 	sb.status(&agentv1.CertificateStatus{AppId: appB, Source: "uploaded", State: "missing", CertificateId: certBID})
-	waitUntil(t, "the install of its own app", func() bool { return len(sb.installs()) >= 1 })
-	if n := sb.quiet(); n != 1 {
+	if n := f.settle(sb, b); n != 1 {
 		t.Fatalf("agent b got %d installs, want 1 (its own)", n)
 	}
 	if got := sb.installs()[0]; got.GetAppId() != appB || got.GetCertificateId() != certBID || !bytes.Equal(got.GetKeyPem(), certB.key) || bytes.Equal(got.GetKeyPem(), certA.key) {
@@ -403,7 +434,7 @@ func TestDBCertificateDeliveryReachesOnlyTheBoundAgentOfTheApp(t *testing.T) {
 	wide := f.projectWideCredential()
 	sw := f.connect(wide, a.name, engine.FeatureTLSCertificates)
 	sw.status(&agentv1.CertificateStatus{AppId: appA, Source: "uploaded", State: "missing", CertificateId: certAID})
-	if n := sw.quiet(); n != 0 {
+	if n := f.settle(sw, a); n != 0 {
 		t.Fatalf("a project-wide credential under the name of agent a got %d installs", n)
 	}
 	if n := len(f.auditRows(repository.AuditAgentCertificateDelivered)); n != 2 {
@@ -414,7 +445,8 @@ func TestDBCertificateDeliveryReachesOnlyTheBoundAgentOfTheApp(t *testing.T) {
 	// app and in the audit log.
 	sb.send(&agentv1.AgentMessage{Kind: &agentv1.AgentMessage_Ack{Ack: &agentv1.CommandAck{CommandId: ins.GetCommandId(), Ok: false, Error: "bad_pem"}}})
 	sw.send(&agentv1.AgentMessage{Kind: &agentv1.AgentMessage_Ack{Ack: &agentv1.CommandAck{CommandId: ins.GetCommandId(), Ok: false, Error: "bad_pem"}}})
-	time.Sleep(300 * time.Millisecond)
+	f.settle(sb, b)
+	f.settle(sw, a)
 	if n := len(f.auditRows(repository.AuditAgentCertificateRefused)); n != 0 || f.status(appA).State == "failed" {
 		t.Fatal("the ack of another stream was acted on")
 	}
@@ -438,12 +470,15 @@ func TestDBCertificateDeliveryChecksTheDatabaseAtSendTime(t *testing.T) {
 	_, cert1 := f.uploaded(app1, "a.example.com")
 	_, cert2 := f.uploaded(app2, "b.example.com")
 
+	// The sentinels are made while the agent row still allows it.
+	sn1, sn2 := f.sentinel(a), f.sentinel(a)
+
 	// The agent row says it does not serve TLS certificates (another Hello wrote false after this
 	// stream connected), so no key goes out although the stream still carries the feature.
 	s1 := f.connect(a.cert, a.name, engine.FeatureTLSCertificates)
 	f.exec(`UPDATE agents SET tls_certificates = FALSE WHERE id = $1`, a.id)
 	s1.status(&agentv1.CertificateStatus{AppId: app1, Source: "uploaded", State: "missing", CertificateId: cert1})
-	if n := s1.quiet(); n != 0 {
+	if n := f.settleOn(s1, sn1); n != 0 {
 		t.Fatalf("an agent row without the feature got %d installs", n)
 	}
 	f.exec(`UPDATE agents SET tls_certificates = TRUE WHERE id = $1`, a.id)
@@ -452,7 +487,7 @@ func TestDBCertificateDeliveryChecksTheDatabaseAtSendTime(t *testing.T) {
 	// later). The other app has its own certificate, so the resend limit is not what refuses it.
 	f.exec(`DELETE FROM mtls_credentials WHERE project_id = $1 AND agent_name = $2`, f.project, a.name)
 	s1.status(&agentv1.CertificateStatus{AppId: app2, Source: "uploaded", State: "missing", CertificateId: cert2})
-	if n := s1.quiet(); n != 0 {
+	if n := f.settleOn(s1, sn2); n != 0 {
 		t.Fatalf("a stream whose credential was deleted got %d installs", n)
 	}
 	if n := len(f.auditRows(repository.AuditAgentCertificateDelivered)); n != 0 {
@@ -461,16 +496,18 @@ func TestDBCertificateDeliveryChecksTheDatabaseAtSendTime(t *testing.T) {
 }
 
 // A key that no longer opens (another totp.enc_key) is not sent; the app shows failed and the refusal
-// is audited, against the real database.
-func TestDBCertificateKeyThatDoesNotOpen(t *testing.T) {
+// is audited, against the real database. What the status row held of the certificate the agent
+// serves meanwhile stays: the leaf, the chain, the expiry and the warning already mailed.
+func TestDBCertificateKeyThatDoesNotOpenKeepsTheStoredCertificate(t *testing.T) {
 	f := newTLSDB(t)
 	a := f.boundAgent("edge-a@waf")
 	app := f.app(a.id)
 	_, certID := f.uploaded(app, "a.example.com")
 	f.s.KeyCrypto = nil
 
+	serving := newTestCert(t, "a.example.com")
 	s := f.connect(a.cert, a.name, engine.FeatureTLSCertificates)
-	s.status(&agentv1.CertificateStatus{AppId: app, Source: "uploaded", State: "missing", CertificateId: certID})
+	s.status(&agentv1.CertificateStatus{AppId: app, Source: "uploaded", State: "missing", CertificateId: certID, ChainPem: serving.chain, LeafSha256: serving.leaf})
 	rows := f.waitAudit(repository.AuditAgentCertificateRefused, 1)
 	if rows[0].meta["code"] != certKeyUnreadable {
 		t.Fatalf("refusal audit: %v", rows[0].meta)
@@ -479,14 +516,43 @@ func TestDBCertificateKeyThatDoesNotOpen(t *testing.T) {
 	if !strings.Contains(st.Error, certKeyUnreadable) || len(s.installs()) != 0 {
 		t.Fatalf("status %+v, %d installs", st, len(s.installs()))
 	}
+	if st.LeafSHA256 != serving.leaf || len(st.Names) != 1 || st.ChainPEM != string(serving.chain) || st.NotAfter == nil {
+		t.Fatalf("the certificate the agent serves was forgotten: %+v", st)
+	}
 }
 
-// Every check of the CertificateStatus table, against the real database: a status that is not for an
-// enabled app of this agent in this project, that names another request id, another certificate or
-// another source, or that is too large or holds a key, leaves no row. Statuses of one stream are
-// handled in order, so the valid one at the end shows that every earlier one was handled.
+// A refusal of an install, handled on the receive loop, keeps the certificate the status row holds:
+// the leaf, which keeps the chain, the expiry and the expiry warning that was mailed.
+func TestDBRefusedInstallKeepsTheStoredCertificate(t *testing.T) {
+	f := newTLSDB(t)
+	a := f.boundAgent("edge-a@waf")
+	app := f.app(a.id)
+	_, certID := f.uploaded(app, "a.example.com")
+	serving := newTestCert(t, "a.example.com")
+
+	s := f.connect(a.cert, a.name, engine.FeatureTLSCertificates)
+	s.status(&agentv1.CertificateStatus{AppId: app, Source: "uploaded", State: "missing", CertificateId: certID, ChainPem: serving.chain, LeafSha256: serving.leaf})
+	waitUntil(t, "the install", func() bool { return len(s.installs()) == 1 })
+	before := f.waitStatus(app, func(st *repository.TLSStatus) bool { return st.LeafSHA256 == serving.leaf && st.ChainPEM != "" })
+	f.exec(`UPDATE app_tls_status SET expiry_notified_days = 14 WHERE app_id = $1`, app)
+
+	s.send(&agentv1.AgentMessage{Kind: &agentv1.AgentMessage_Ack{Ack: &agentv1.CommandAck{CommandId: s.installs()[0].GetCommandId(), Ok: false, Error: "write_failed"}}})
+	after := f.waitStatus(app, func(st *repository.TLSStatus) bool { return st.State == "failed" })
+	if !strings.Contains(after.Error, "write_failed") || after.LeafSHA256 != before.LeafSHA256 || after.ChainPEM != before.ChainPEM ||
+		strings.Join(after.Names, ",") != strings.Join(before.Names, ",") || after.Issuer != before.Issuer ||
+		after.NotAfter == nil || !after.NotAfter.Equal(*before.NotAfter) || after.ExpiryNotifiedDays == nil || *after.ExpiryNotifiedDays != 14 {
+		t.Fatalf("the refusal changed what the row held of the certificate in use:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+// Every check of the CertificateStatus table, against the real database. Each negative is checked
+// against the stored row before anything else is sent: a status that is not for an enabled app of this
+// agent in this project, that names another request id, another certificate or another source, or
+// that is too large or holds a key, leaves the row exactly as it was.
 func TestDBCertificateStatusChecks(t *testing.T) {
 	f := newTLSDB(t)
+	clock := newFakeClock()
+	f.s.clock = clock.now
 	a, b := f.boundAgent("edge-a@waf"), f.boundAgent("edge-b@waf")
 	appUp, appAcme, appProxy, appUnassigned := f.app(a.id), f.app(a.id), f.app(a.id), f.app("")
 	foreign := f.app(b.id)
@@ -504,78 +570,92 @@ func TestDBCertificateStatusChecks(t *testing.T) {
 
 	cert := newTestCert(t, "acme.example.com")
 	s := f.connect(a.cert, a.name, engine.FeatureTLSCertificates)
-	send := func(cs *agentv1.CertificateStatus) { s.status(cs) }
 	good := func(app string) *agentv1.CertificateStatus {
 		return &agentv1.CertificateStatus{AppId: app, Source: "acme", State: "pending", RequestId: reqID}
 	}
 
-	send(&agentv1.CertificateStatus{AppId: foreign, Source: "acme", State: "pending", RequestId: foreignReq})     // another agent's app
-	send(&agentv1.CertificateStatus{AppId: otherApp, Source: "acme", State: "pending", RequestId: otherReq})      // another project's app
-	send(&agentv1.CertificateStatus{AppId: appDisabled, Source: "acme", State: "pending", RequestId: "x"})        // assignment not enabled
-	send(&agentv1.CertificateStatus{AppId: appUnassigned, Source: "acme", State: "pending", RequestId: reqID})    // no agent serves it
-	send(&agentv1.CertificateStatus{AppId: uuid.NewString(), Source: "acme", State: "pending", RequestId: reqID}) // no such app
-	send(&agentv1.CertificateStatus{AppId: appProxy, Source: "acme", State: "pending", RequestId: reqID})         // not in gateway mode
-	wrongReq := good(appAcme)
-	wrongReq.RequestId = "an-older-request"
-	send(wrongReq) // another request id than the current one
-	wrongSource := good(appAcme)
-	wrongSource.Source, wrongSource.RequestId, wrongSource.CertificateId = "uploaded", "", upID
-	send(wrongSource)                                                                                                     // source that is not the one of the app
-	send(&agentv1.CertificateStatus{AppId: appUp, Source: "acme", State: "pending", RequestId: reqID})                    // acme for an uploaded app
-	send(&agentv1.CertificateStatus{AppId: appUp, Source: "uploaded", State: "missing", CertificateId: uuid.NewString()}) // not the current certificate
-	unknownState := good(appAcme)
-	unknownState.State = "ready"
-	send(unknownState)
-	tooBig := good(appAcme)
-	tooBig.State, tooBig.ChainPem, tooBig.LeafSha256 = "active", bytes.Repeat([]byte("A"), domain.CertChainMaxBytes+1), cert.leaf
-	send(tooBig)
-	withKey := good(appAcme)
-	withKey.State, withKey.ChainPem, withKey.LeafSha256 = "active", append(append([]byte(nil), cert.chain...), cert.key...), cert.leaf
-	send(withKey)
-	wrongLeaf := good(appAcme)
-	wrongLeaf.State, wrongLeaf.ChainPem, wrongLeaf.LeafSha256 = "active", cert.chain, strings.Repeat("0", 64)
-	send(wrongLeaf)
-	send(good(appAcme)) // the valid one
+	// The valid status first, so that every negative has a row to leave alone.
+	s.status(good(appAcme))
+	base := f.waitStatus(appAcme, func(st *repository.TLSStatus) bool { return st.State == "pending" })
+	if base.RequestID != reqID || base.AgentID != a.id || base.Source != "acme" || len(base.Names) != 0 || base.ChainPEM != "" {
+		t.Fatalf("the valid status: %+v", base)
+	}
 
-	f.waitStatus(appAcme, func(st *repository.TLSStatus) bool { return st.State == "pending" })
-	for name, app := range map[string]string{"another agent": foreign, "disabled": appDisabled, "unassigned": appUnassigned, "proxy": appProxy, "uploaded": appUp} {
-		if st := f.status(app); st != nil {
-			t.Errorf("a status for the %s app left a row: %+v", name, st)
+	// negative sends the status, waits until the stream has handled it, and checks the row of the app
+	// it names: the row that was there, or none.
+	negative := func(what string, owner *tlsDB, app string, cs *agentv1.CertificateStatus) {
+		t.Helper()
+		clock.advance(certStatusRefill) // one more token for the app
+		s.status(cs)
+		f.settle(s, a)
+		got := owner.status(app)
+		switch {
+		case app == appAcme && !reflect.DeepEqual(got, base):
+			t.Errorf("%s: the stored row changed:\nbefore %+v\nafter  %+v", what, base, got)
+		case app != appAcme && got != nil:
+			t.Errorf("%s: a row was written: %+v", what, got)
 		}
 	}
-	if st := other.status(otherApp); st != nil {
-		t.Errorf("a status for another project's app left a row: %+v", st)
-	}
-	if st := f.status(appAcme); st.RequestID != reqID || st.AgentID != a.id || st.Source != "acme" || len(st.Names) != 0 || st.ChainPEM != "" {
-		t.Fatalf("the valid status: %+v", st)
-	}
+	negative("another agent's app", f, foreign, &agentv1.CertificateStatus{AppId: foreign, Source: "acme", State: "pending", RequestId: foreignReq})
+	negative("another project's app", other, otherApp, &agentv1.CertificateStatus{AppId: otherApp, Source: "acme", State: "pending", RequestId: otherReq})
+	negative("an assignment that is not enabled", f, appDisabled, &agentv1.CertificateStatus{AppId: appDisabled, Source: "acme", State: "pending", RequestId: "x"})
+	negative("an app no agent serves", f, appUnassigned, &agentv1.CertificateStatus{AppId: appUnassigned, Source: "acme", State: "pending", RequestId: reqID})
+	negative("an app that does not exist", f, uuid.NewString(), &agentv1.CertificateStatus{AppId: uuid.NewString(), Source: "acme", State: "pending", RequestId: reqID})
+	negative("an app that is not in gateway mode", f, appProxy, &agentv1.CertificateStatus{AppId: appProxy, Source: "acme", State: "pending", RequestId: reqID})
+	wrongReq := good(appAcme)
+	wrongReq.RequestId = "an-older-request"
+	negative("another request id than the current one", f, appAcme, wrongReq)
+	wrongSource := good(appAcme)
+	wrongSource.Source, wrongSource.RequestId, wrongSource.CertificateId = "uploaded", "", upID
+	negative("a source that is not the one of the app", f, appAcme, wrongSource)
+	negative("acme for an uploaded app", f, appUp, &agentv1.CertificateStatus{AppId: appUp, Source: "acme", State: "pending", RequestId: reqID})
+	negative("a certificate that is not the current one", f, appUp, &agentv1.CertificateStatus{AppId: appUp, Source: "uploaded", State: "missing", CertificateId: uuid.NewString()})
+	unknownState := good(appAcme)
+	unknownState.State = "ready"
+	negative("an unknown state", f, appAcme, unknownState)
+	tooBig := good(appAcme)
+	tooBig.State, tooBig.ChainPem, tooBig.LeafSha256 = "active", bytes.Repeat([]byte("A"), domain.CertChainMaxBytes+1), cert.leaf
+	negative("a chain over 64 KiB", f, appAcme, tooBig)
+	withKey := good(appAcme)
+	withKey.State, withKey.ChainPem, withKey.LeafSha256 = "active", append(append([]byte(nil), cert.chain...), cert.key...), cert.leaf
+	negative("a key block in the chain", f, appAcme, withKey)
+	wrongLeaf := good(appAcme)
+	wrongLeaf.State, wrongLeaf.ChainPem, wrongLeaf.LeafSha256 = "active", cert.chain, strings.Repeat("0", 64)
+	negative("a leaf that is not the one of the chain", f, appAcme, wrongLeaf)
 
 	// Active with its chain: the server reads the chain itself and the time is its own. The status of a
 	// leaf that is already stored does not parse the text that comes with it, and the stored chain stays.
+	clock.advance(certStatusRefill)
 	active := good(appAcme)
 	active.State, active.ChainPem, active.LeafSha256, active.UnixTime = "active", cert.chain, cert.leaf, 42
-	send(active)
+	s.status(active)
 	st := f.waitStatus(appAcme, func(s *repository.TLSStatus) bool { return s.State == "active" })
 	if len(st.Names) != 1 || st.Names[0] != "acme.example.com" || st.LeafSHA256 != cert.leaf || st.NotAfter == nil || st.ChainPEM != string(cert.chain) ||
 		time.Since(st.ReceivedAt) > time.Minute || st.ReceivedAt.Unix() == 42 {
 		t.Fatalf("active status: %+v", st)
 	}
 	stranger := newTestCert(t, "stranger.example.net")
-	again := good(appAcme)
-	again.State, again.ChainPem, again.LeafSha256 = "active", stranger.chain, cert.leaf
-	send(again)
+	clock.advance(certStatusRefill)
 	same := good(appAcme)
-	same.LeafSha256 = cert.leaf
-	send(same)
+	same.LeafSha256, same.ChainPem = cert.leaf, stranger.chain
+	s.status(same)
 	st = f.waitStatus(appAcme, func(s *repository.TLSStatus) bool { return s.State == "pending" })
 	if len(st.Names) != 1 || st.Names[0] != "acme.example.com" || st.ChainPEM != string(cert.chain) {
 		t.Fatalf("a chain that came with the stored leaf was read, or the stored one lost: %+v", st)
 	}
+	// The same status again changes nothing, so it is not written.
+	clock.advance(certStatusRefill)
+	s.status(same)
+	f.settle(s, a)
+	if again := f.status(appAcme); !again.ReceivedAt.Equal(st.ReceivedAt) {
+		t.Fatalf("a status that changed nothing was written: %v -> %v", st.ReceivedAt, again.ReceivedAt)
+	}
 
 	// A failed status: the error loses its control characters and is cut at 1 KiB, the retry time is kept.
+	clock.advance(certStatusRefill)
 	failed := good(appAcme)
-	failed.State, failed.Error, failed.NextAttemptUnix = "failed", "order failed\x00\x1b[31m "+strings.Repeat("e", 3000), time.Now().Add(time.Hour).Unix()
-	send(failed)
+	failed.State, failed.Error, failed.NextAttemptUnix = "failed", "order failed\x00\x1b[31m "+strings.Repeat("e", 3000), clock.now().Add(time.Hour).Unix()
+	s.status(failed)
 	st = f.waitStatus(appAcme, func(s *repository.TLSStatus) bool { return s.State == "failed" })
 	if len(st.Error) != 1024 || strings.ContainsAny(st.Error, "\x00\x1b") || !strings.HasPrefix(st.Error, "order failed[31m ") || st.NextAttemptAt == nil {
 		t.Fatalf("failed status: error of %d bytes, next %v", len(st.Error), st.NextAttemptAt)
@@ -593,13 +673,62 @@ func TestDBCertificateStatusOfAReplacedCertificate(t *testing.T) {
 
 	s := f.connect(a.cert, a.name, engine.FeatureTLSCertificates)
 	s.status(&agentv1.CertificateStatus{AppId: app, Source: "uploaded", State: "missing", CertificateId: oldID})
-	if n := s.quiet(); n != 0 || f.status(app) != nil {
+	if n := f.settle(s, a); n != 0 || f.status(app) != nil {
 		t.Fatalf("the old certificate id was accepted: %d installs, status %+v", n, f.status(app))
 	}
 	s.status(&agentv1.CertificateStatus{AppId: app, Source: "uploaded", State: "missing", CertificateId: newID})
 	waitUntil(t, "install", func() bool { return len(s.installs()) == 1 })
 	if got := s.installs()[0]; got.GetCertificateId() != newID || !bytes.Equal(got.GetKeyPem(), newCert.key) {
 		t.Fatalf("install for certificate %q", got.GetCertificateId())
+	}
+}
+
+// What an agent said in Hello about TLS certificates is written by a stream bound to a host when the
+// agent row has one. A project-wide credential connecting under the same name, with the feature or
+// without it, leaves the flag as the host's agent reported it; for a row without a host the stream
+// that connects writes it, as before.
+func TestDBProjectWideCredentialDoesNotFlipTheTLSFlagOfAHostAgent(t *testing.T) {
+	f := newTLSDB(t)
+	flag := func(agentID string) string {
+		t.Helper()
+		var c *bool
+		if err := f.repo.DB.QueryRow(context.Background(), `SELECT tls_certificates FROM agents WHERE id = $1`, agentID).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case c == nil:
+			return "null"
+		case *c:
+			return "true"
+		}
+		return "false"
+	}
+	a := f.boundAgent("edge-a@waf")
+	f.connect(a.cert, a.name, engine.FeatureTLSCertificates)
+	if got := flag(a.id); got != "true" {
+		t.Fatalf("the host-bound agent said it serves TLS certificates: flag %s", got)
+	}
+	wide := f.projectWideCredential()
+	f.connect(wide, a.name, engine.FeatureScriptRules)
+	if got := flag(a.id); got != "true" {
+		t.Fatalf("a project-wide credential switched the flag of a host agent off: %s", got)
+	}
+	f.exec(`UPDATE agents SET tls_certificates = FALSE WHERE id = $1`, a.id)
+	wide2 := f.projectWideCredential()
+	f.connect(wide2, a.name, engine.FeatureTLSCertificates)
+	if got := flag(a.id); got != "false" {
+		t.Fatalf("a project-wide credential switched the flag of a host agent on: %s", got)
+	}
+
+	// A row that has no host takes the flag from the stream that connects.
+	wide3 := f.projectWideCredential()
+	f.connect(wide3, "unattached-1", engine.FeatureTLSCertificates)
+	var free string
+	if err := f.repo.DB.QueryRow(context.Background(), `SELECT id::text FROM agents WHERE project_id = $1 AND name = 'unattached-1'`, f.project).Scan(&free); err != nil {
+		t.Fatal(err)
+	}
+	if got := flag(free); got != "true" {
+		t.Fatalf("an agent without a host: flag %s", got)
 	}
 }
 

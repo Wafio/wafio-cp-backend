@@ -635,7 +635,7 @@ func TestStreamStoresAgentFeaturesFromHello(t *testing.T) {
 			waitUntil(t, "features stored", func() bool {
 				return len(env.health.featuresCalls()) == 1
 			})
-			if got, want := env.health.featuresCalls()[0], (featuresCall{e2eProject, e2eAgentID, tc.wantScripts, tc.wantMaintMode, tc.tls}); got != want {
+			if got, want := env.health.featuresCalls()[0], (featuresCall{e2eProject, e2eAgentID, tc.wantScripts, tc.wantMaintMode, tc.tls, false}); got != want {
 				t.Fatalf("stored features %+v, want %+v", got, want)
 			}
 		})

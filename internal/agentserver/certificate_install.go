@@ -40,10 +40,13 @@ const (
 	// certCommandPrefix starts the command id of every CertificateInstall.
 	certCommandPrefix = "cert-"
 	// certResendEvery is how often one stream is sent the same certificate again while its bundle
-	// generation stays the same.
-	certResendEvery = time.Minute
-	// certClaimsMax bounds the certificates one stream is tracked for.
-	certClaimsMax = 64
+	// generation stays the same. An agent whose bundle names a certificate it does not hold repeats
+	// its missing status about once a minute; the window is shorter so that it is never refused.
+	certResendEvery = 50 * time.Second
+	// certClaimsMax bounds the certificates one stream is tracked for. An agent that serves more
+	// gateway apps than this is not refused: a certificate that does not fit waits until an entry is
+	// older than certResendEvery, which delays it by at most that long.
+	certClaimsMax = 512
 	// certPendingMax bounds the installs waiting for an ack, process-wide.
 	certPendingMax = 1024
 )
@@ -69,11 +72,16 @@ const (
 
 var certAckCodes = []string{"bad_pem", "too_large", "key_mismatch", "leaf_mismatch", "unsupported_key", certAckNotInBundle, "write_failed"}
 
+// certPermanentRefusals are the refusals that the same bytes would meet again: the stream is not
+// sent that certificate again until it has been sent another bundle. write_failed, not_in_bundle
+// and an ack that is no code can pass at a later try.
+var certPermanentRefusals = []string{"bad_pem", "too_large", "key_mismatch", "leaf_mismatch", "unsupported_key", certKeyUnreadable}
+
 // certificateStore is the part of the repository that delivery and status ingest use.
 type certificateStore interface {
 	DeliveryAgent(ctx context.Context, projectID, credentialID, agentID string) (repository.DeliveryAgent, error)
 	CertificateForDelivery(ctx context.Context, projectID, agentID, appID, certID string) (repository.CertificateDelivery, error)
-	TLSStatusLeaf(ctx context.Context, projectID, appID string) (string, error)
+	StatusPrior(ctx context.Context, projectID, agentID, appID, source, requestID, certificateID string) (repository.StatusPrior, bool, error)
 	UpsertTLSStatus(ctx context.Context, s repository.TLSStatusReport) (bool, error)
 }
 
@@ -113,15 +121,19 @@ func (s *Server) now() time.Time {
 type certInstall struct {
 	handle                        *streamHandle
 	appID, certificateID, leafSHA string
-	expires                       time.Time
-	timer                         *time.Timer
+	// generation is the bundle generation the stream had been sent when the install was claimed.
+	generation int64
+	expires    time.Time
+	timer      *time.Timer
 }
 
 // certClaim records the last delivery of a certificate on a stream: the bundle generation the
-// stream had been sent and when.
+// stream had been sent and when. blocked says that the agent refused the certificate for good in
+// that generation (certPermanentRefusals).
 type certClaim struct {
 	generation int64
 	at         time.Time
+	blocked    bool
 }
 
 // mayReceiveCertificateKeys is the part of the decision that the stream itself settles. The
@@ -140,18 +152,19 @@ func (h *streamHandle) desiredGeneration() int64 {
 
 // claimCertificateDelivery says whether certID may be sent now. The first request after each bundle
 // generation is answered at once, since the agent has looked at the bundle again; the same
-// generation allows one more only after certResendEvery. So an agent that keeps saying missing
-// cannot make the control plane read and send the same key over and over.
+// generation allows one more only after certResendEvery, and none after a refusal that is permanent.
+// So an agent that keeps saying missing cannot make the control plane read and send the same key
+// over and over.
 func (h *streamHandle) claimCertificateDelivery(certID string, generation int64, now time.Time) bool {
 	h.certMu.Lock()
 	defer h.certMu.Unlock()
 	last, known := h.certClaims[certID]
-	if known && last.generation == generation && now.Sub(last.at) < certResendEvery {
+	if known && last.generation == generation && (last.blocked || now.Sub(last.at) < certResendEvery) {
 		return false
 	}
 	if !known && len(h.certClaims) >= certClaimsMax {
 		for id, c := range h.certClaims {
-			if now.Sub(c.at) >= certResendEvery {
+			if now.Sub(c.at) >= certResendEvery && !(c.blocked && c.generation == generation) {
 				delete(h.certClaims, id)
 			}
 		}
@@ -166,16 +179,40 @@ func (h *streamHandle) claimCertificateDelivery(certID string, generation int64,
 	return true
 }
 
+// blockCertificate makes the stream refuse to send certID again for as long as it is in this bundle
+// generation: the agent refused the certificate for good.
+func (h *streamHandle) blockCertificate(certID string, generation int64, now time.Time) {
+	h.certMu.Lock()
+	defer h.certMu.Unlock()
+	if h.certClaims == nil {
+		h.certClaims = make(map[string]certClaim)
+	}
+	h.certClaims[certID] = certClaim{generation: generation, at: now, blocked: true}
+}
+
+// stillOpen says whether the stream takes part: not ended and not revoked.
+func (h *streamHandle) stillOpen() bool { return h.open == nil || h.open() }
+
+// startDelivery runs deliverCertificate on its own goroutine, counted so that a test can wait for it.
+func (s *Server) startDelivery(h *streamHandle, appID, certID string) {
+	s.certRuns.Add(1)
+	go func() {
+		defer s.certEnds.Add(1)
+		s.deliverCertificate(h, appID, certID)
+	}()
+}
+
 // deliverCertificate sends the key of the current uploaded certificate of the app to h, after every
 // check. It runs on its own goroutine: the ack arrives through the receive loop that started it. A
 // refusal at any step sends nothing and says nothing to the agent.
 func (s *Server) deliverCertificate(h *streamHandle, appID, certID string) {
 	defer recoverPanic("certificate-install")
 	store := s.certStore()
-	if store == nil || !h.mayReceiveCertificateKeys() {
+	if store == nil || !h.mayReceiveCertificateKeys() || !h.stillOpen() {
 		return
 	}
-	if !h.claimCertificateDelivery(certID, h.desiredGeneration(), s.now()) {
+	generation := h.desiredGeneration()
+	if !h.claimCertificateDelivery(certID, generation, s.now()) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -201,7 +238,7 @@ func (s *Server) deliverCertificate(h *streamHandle, appID, certID string) {
 
 	key, err := s.KeyCrypto.OpenBound(d.KeyCiphertext, domain.CertificateKeyAAD(h.projectID, d.CertificateID))
 	if err != nil {
-		s.certificateKeyUnreadable(h, d, err)
+		s.certificateKeyUnreadable(h, d, generation, err)
 		return
 	}
 	install := &agentv1.CertificateInstall{
@@ -212,21 +249,31 @@ func (s *Server) deliverCertificate(h *streamHandle, appID, certID string) {
 		KeyPem:        key,
 		LeafSha256:    d.LeafSHA256,
 	}
-	pending := &certInstall{handle: h, appID: d.AppID, certificateID: d.CertificateID, leafSHA: d.LeafSHA256}
+	pending := &certInstall{handle: h, appID: d.AppID, certificateID: d.CertificateID, leafSHA: d.LeafSHA256, generation: generation}
+	// The stream may have been revoked or ended while the key was read and opened.
+	if !h.stillOpen() {
+		clear(key)
+		return
+	}
 	if !s.addCertInstall(install.GetCommandId(), pending) {
 		clear(key)
 		log.Printf("[agentserver] certificate delivery skipped, too many installs waiting agent=%s app=%s", h.agentID, appID)
 		return
 	}
 	msg := &agentv1.ServerMessage{Kind: &agentv1.ServerMessage_CertificateInstall{CertificateInstall: install}}
-	err = s.sendBounded(h, func() error { return h.send(msg) })
-	// Zero the key once the Send has returned, which is when grpc-go has marshalled the message.
-	// After a deadline the Send may still be running on its goroutine, so nothing is touched then:
-	// the stream is cut and the buffers go to the collector.
-	if !errors.Is(err, errPushSendTimeout) {
-		clear(key)
-		install.KeyPem = nil
-	}
+	// The key is zeroed inside the bounded call, when the Send returns, which is when grpc-go has
+	// marshalled the message. After a deadline that is later, when the cut stream releases the Send,
+	// and the key is still zeroed then.
+	err = s.sendBounded(h, func() error {
+		defer func() {
+			clear(key)
+			install.KeyPem = nil
+			if s.afterWipe != nil {
+				s.afterWipe(key)
+			}
+		}()
+		return h.send(msg)
+	})
 	if err != nil {
 		s.dropCertInstall(install.GetCommandId())
 		log.Printf("[agentserver] certificate install not sent agent=%s app=%s certificate=%s: %v", h.agentID, d.AppID, d.CertificateID, err)
@@ -239,7 +286,7 @@ func (s *Server) deliverCertificate(h *streamHandle, appID, certID string) {
 // certificateKeyUnreadable handles a stored key that does not open: a changed totp.enc_key, a row
 // copied from another certificate, or damage. Nothing is sent. The app shows failed, so the owner
 // sees it and uploads the certificate again, and the refusal is audited.
-func (s *Server) certificateKeyUnreadable(h *streamHandle, d repository.CertificateDelivery, cause error) {
+func (s *Server) certificateKeyUnreadable(h *streamHandle, d repository.CertificateDelivery, generation int64, cause error) {
 	reason := "undecryptable"
 	var mismatch *otp.KeyIDMismatchError
 	switch {
@@ -249,12 +296,16 @@ func (s *Server) certificateKeyUnreadable(h *streamHandle, d repository.Certific
 		reason = "key_id_mismatch"
 	}
 	log.Printf("[agentserver] certificate key unreadable agent=%s app=%s certificate=%s cause=%s", h.agentID, d.AppID, d.CertificateID, reason)
-	p := &certInstall{handle: h, appID: d.AppID, certificateID: d.CertificateID, leafSHA: d.LeafSHA256}
+	p := &certInstall{handle: h, appID: d.AppID, certificateID: d.CertificateID, leafSHA: d.LeafSHA256, generation: generation}
 	s.auditCertificate(repository.AuditAgentCertificateRefused, h, p, certKeyUnreadable, "cause", reason)
+	// Reading the same row again would fail the same way until the certificate is uploaded again.
+	h.blockCertificate(p.certificateID, generation, s.now())
 	s.failCertificate(h, p, "the stored key cannot be read ("+certKeyUnreadable+"); upload the certificate again")
 }
 
 // failCertificate stores the state failed for the app, with a text that holds no agent-sent data.
+// It knows nothing about the certificate the agent serves meanwhile, so it keeps what is stored
+// of it: the leaf, and with the leaf the chain, the expiry and the expiry warning already mailed.
 func (s *Server) failCertificate(h *streamHandle, p *certInstall, text string) {
 	store := s.certStore()
 	if store == nil {
@@ -262,8 +313,15 @@ func (s *Server) failCertificate(h *streamHandle, p *certInstall, text string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	prior, ok, err := store.StatusPrior(ctx, h.projectID, h.agentID, p.appID, domain.TLSSourceUploaded, "", p.certificateID)
+	if err != nil || !ok {
+		if err != nil {
+			log.Printf("[agentserver] certificate status not read agent=%s app=%s: %v", h.agentID, p.appID, err)
+		}
+		return
+	}
 	if _, err := store.UpsertTLSStatus(ctx, repository.TLSStatusReport{
-		ProjectID: h.projectID, AgentID: h.agentID, AppID: p.appID,
+		ProjectID: h.projectID, AgentID: h.agentID, AppID: p.appID, LeafSHA256: prior.Leaf,
 		Source: domain.TLSSourceUploaded, State: "failed", CertificateID: p.certificateID, Error: text,
 	}); err != nil {
 		log.Printf("[agentserver] certificate status not stored agent=%s app=%s: %v", h.agentID, p.appID, err)
@@ -315,6 +373,18 @@ func (s *Server) addCertInstall(id string, p *certInstall) bool {
 	return true
 }
 
+// dropCertInstallsOf forgets the installs sent on a stream that ended.
+func (s *Server) dropCertInstallsOf(h *streamHandle) {
+	s.certMu.Lock()
+	defer s.certMu.Unlock()
+	for id, p := range s.certInstalls {
+		if p.handle == h {
+			p.timer.Stop()
+			delete(s.certInstalls, id)
+		}
+	}
+}
+
 // dropCertInstall forgets an install, after its ack, its expiry or a failed send.
 func (s *Server) dropCertInstall(id string) {
 	defer recoverPanic("certificate-install-expire") // runs on the timer goroutine
@@ -356,7 +426,11 @@ func ackCode(text string) string {
 // recordUnblockAck. Only the stream the install was sent on is heard. An accepted install needs
 // nothing here: the agent reports active in a CertificateStatus. A refusal is audited and shows as
 // failed on the app, except not_in_bundle, which means the agent has not applied the bundle that
-// names the certificate yet and will ask again when it has.
+// names the certificate yet and will ask again when it has. A refusal that the same bytes would meet
+// again blocks the certificate on this stream until its next bundle generation.
+//
+// It runs on the receive loop and writes there, not on a goroutine: the statuses of the stream are
+// stored in the order it sent them, and a later status cannot be overwritten by an earlier refusal.
 func (s *Server) recordCertificateInstallAck(h *streamHandle, ack *agentv1.CommandAck) {
 	id := ack.GetCommandId()
 	if !strings.HasPrefix(id, certCommandPrefix) {
@@ -367,11 +441,11 @@ func (s *Server) recordCertificateInstallAck(h *streamHandle, ack *agentv1.Comma
 		return
 	}
 	code := ackCode(ack.GetError())
-	go func() {
-		defer recoverPanic("certificate-install-refused")
-		s.auditCertificate(repository.AuditAgentCertificateRefused, h, p, code)
-		if code != certAckNotInBundle {
-			s.failCertificate(h, p, "the agent refused the certificate ("+code+")")
-		}
-	}()
+	if slices.Contains(certPermanentRefusals, code) {
+		h.blockCertificate(p.certificateID, p.generation, s.now())
+	}
+	s.auditCertificate(repository.AuditAgentCertificateRefused, h, p, code)
+	if code != certAckNotInBundle {
+		s.failCertificate(h, p, "the agent refused the certificate ("+code+")")
+	}
 }

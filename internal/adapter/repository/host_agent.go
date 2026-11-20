@@ -373,13 +373,20 @@ func (r *EBPFRepo) UpdateAgentWAFHealth(ctx context.Context, projectID, agentID 
 // (engine.AgentScriptRules), whether it supports maintenance mode (engine.AgentMaintenanceMode) and
 // whether it serves TLS certificates (engine.AgentTLSCertificates); nil = unknown. Written on every
 // connect, so an agent replaced by an older build goes back to unknown or false.
-func (r *EBPFRepo) UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool) error {
+//
+// hostBound says that the stream's credential is bound to a host. When the agent row has a host, only
+// such a stream writes the TLS flag: a project-wide credential connecting under the same name must
+// not switch off, or on, what the agent of that host reported, since the flag is one of the checks
+// before a key is sent. A row without a host takes the flag from any stream, as the other two flags.
+func (r *EBPFRepo) UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool, hostBound bool) error {
 	if r == nil || r.pool == nil {
 		return nil
 	}
 	_, err := r.pool.Exec(ctx,
-		`UPDATE agents SET script_rules = $3, maintenance_mode = $4, tls_certificates = $5 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
-		agentID, projectID, scriptRules, maintenance, tlsCertificates)
+		`UPDATE agents SET script_rules = $3, maintenance_mode = $4,
+		        tls_certificates = CASE WHEN host_id IS NULL OR $6::boolean THEN $5::boolean ELSE tls_certificates END
+		 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
+		agentID, projectID, scriptRules, maintenance, tlsCertificates, hostBound)
 	return err
 }
 

@@ -409,10 +409,10 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 		t.Fatalf("an agent that never reported script rules must read NULL: %+v", got)
 	}
 	no := false
-	if err := ebpf.UpdateAgentFeatures(ctx, projectID, wafID, &no, nil, nil); err != nil {
+	if err := ebpf.UpdateAgentFeatures(ctx, projectID, wafID, &no, nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := ebpf.UpdateAgentFeatures(ctx, otherProject, oldID, &no, nil, nil); err != nil {
+	if err := ebpf.UpdateAgentFeatures(ctx, otherProject, oldID, &no, nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	if sr, err := ebpf.AgentScriptRules(ctx, wafID); err != nil || sr == nil || *sr {

@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -89,6 +91,10 @@ func TestDBTLSDeliveryAgent(t *testing.T) {
 			func() { f.exec(`UPDATE agents SET name = $2 WHERE id = $1`, agent, name) }},
 		{"an agent row that is deleted", func() { f.exec(`UPDATE agents SET deleted_at = NOW() WHERE id = $1`, agent) },
 			func() { f.exec(`UPDATE agents SET deleted_at = NULL WHERE id = $1`, agent) }},
+		{"a host that is revoked", func() { f.exec(`UPDATE hosts SET revoked_at = NOW() WHERE id = $1`, host) },
+			func() { f.exec(`UPDATE hosts SET revoked_at = NULL WHERE id = $1`, host) }},
+		{"a host whose status is revoked", func() { f.exec(`UPDATE hosts SET status = 'revoked' WHERE id = $1`, host) },
+			func() { f.exec(`UPDATE hosts SET status = 'offline' WHERE id = $1`, host) }},
 		{"a credential for another agent kind", func() { f.exec(`UPDATE mtls_credentials SET agent_kind = 'host' WHERE id = $1::uuid`, cred) },
 			func() { f.exec(`UPDATE mtls_credentials SET agent_kind = 'waf' WHERE id = $1::uuid`, cred) }},
 		{"a credential for another agent name", func() { f.exec(`UPDATE mtls_credentials SET agent_name = 'elsewhere' WHERE id = $1::uuid`, cred) },
@@ -107,50 +113,102 @@ func TestDBTLSDeliveryAgent(t *testing.T) {
 	noRow("a credential that was deleted", f.project, cred, agent)
 }
 
-// TLSStatusLeaf reads the leaf the stored status names, "" when there is none, and only for the
-// application of the project.
-func TestDBTLSStatusLeaf(t *testing.T) {
+// StatusPrior answers whether an agent may report on an app and what is stored, in one query: the app
+// must be enabled on the agent, in the project, in gateway mode with this source, and name this
+// request id or certificate. Anything else reads as "no", and nothing of the status is read.
+func TestDBTLSStatusPrior(t *testing.T) {
 	f := newTLSDB(t)
 	foreign := f.second()
 	ctx := context.Background()
-	agent := f.agent(ptr(true))
+	agent, other := f.agent(ptr(true)), f.agent(ptr(true))
 	f.bind(agent)
-	app := f.app("shop", "", 0)
-	f.assign(agent, app)
+	app, acme, proxy := f.app("shop", "", 0), f.app("acme", "", 0), f.app("plain", "", 0)
+	for _, a := range []string{app, acme, proxy} {
+		f.assign(agent, a)
+	}
 	f.mustUpdate(app, f.settings("proxy", "", "shop.example.com"))
 	cert := newCert("shop.example.com")
 	f.mustUpload(app, cert)
 	f.gateway(app, "uploaded", "shop.example.com")
+	f.gateway(acme, "acme", "acme.example.com")
+	var request string
+	if err := f.repo.DB.QueryRow(ctx, `SELECT acme_request_id FROM apps WHERE id = $1`, acme).Scan(&request); err != nil || request == "" {
+		t.Fatalf("request id %q: %v", request, err)
+	}
 
-	leaf := func(project, appID string) string {
+	prior := func(project, agentID, appID, source, req, certID string) (StatusPrior, bool) {
 		t.Helper()
-		got, err := f.repo.TLS.TLSStatusLeaf(ctx, project, appID)
+		p, ok, err := f.repo.TLS.StatusPrior(ctx, project, agentID, appID, source, req, certID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return got
+		return p, ok
 	}
-	if got := leaf(f.project, app); got != "" {
-		t.Fatalf("leaf %q before any status", got)
+	if p, ok := prior(f.project, agent, app, "uploaded", "", cert.ID); !ok || p.Stored {
+		t.Fatalf("an authorized report before any status: %+v %v", p, ok)
 	}
-	if ok, err := f.repo.TLS.UpsertTLSStatus(ctx, TLSStatusReport{
-		ProjectID: f.project, AgentID: agent, AppID: app, Source: "uploaded", State: "active", CertificateID: cert.ID, LeafSHA256: cert.LeafSHA256,
-		Chain: &domain.CertificateInfo{ChainPEM: "chain", LeafSHA256: cert.LeafSHA256, Names: []string{"shop.example.com"}},
-	}); err != nil || !ok {
+	if p, ok := prior(f.project, agent, acme, "acme", request, ""); !ok || p.Stored {
+		t.Fatalf("an authorized acme report: %+v %v", p, ok)
+	}
+	for name, got := range map[string]func() (StatusPrior, bool){
+		"another agent":                  func() (StatusPrior, bool) { return prior(f.project, other, app, "uploaded", "", cert.ID) },
+		"another project":                func() (StatusPrior, bool) { return prior(foreign.project, agent, app, "uploaded", "", cert.ID) },
+		"a source that is not the app's": func() (StatusPrior, bool) { return prior(f.project, agent, app, "acme", request, "") },
+		"an uploaded report for acme":    func() (StatusPrior, bool) { return prior(f.project, agent, acme, "uploaded", "", cert.ID) },
+		"an old request id":              func() (StatusPrior, bool) { return prior(f.project, agent, acme, "acme", "an-older-request", "") },
+		"a certificate that is not current": func() (StatusPrior, bool) {
+			return prior(f.project, agent, app, "uploaded", "", uuid.NewString())
+		},
+		"no certificate":       func() (StatusPrior, bool) { return prior(f.project, agent, app, "uploaded", "", "") },
+		"an app in proxy mode": func() (StatusPrior, bool) { return prior(f.project, agent, proxy, "acme", "x", "") },
+		"ids that are no UUID": func() (StatusPrior, bool) { return prior("x", "y", "z", "acme", "x", "") },
+		"a certificate id that is no UUID": func() (StatusPrior, bool) {
+			return prior(f.project, agent, app, "uploaded", "", "not-a-uuid")
+		},
+	} {
+		if p, ok := got(); ok {
+			t.Errorf("%s: answered yes: %+v", name, p)
+		}
+	}
+	f.exec(`UPDATE waf_agent_apps SET enabled = FALSE WHERE app_id = $1`, app)
+	if _, ok := prior(f.project, agent, app, "uploaded", "", cert.ID); ok {
+		t.Error("an assignment that is not enabled answered yes")
+	}
+	f.exec(`UPDATE waf_agent_apps SET enabled = TRUE WHERE app_id = $1`, app)
+
+	// The stored status comes back with every field Unchanged compares.
+	next := time.Now().Add(time.Hour).Truncate(time.Second)
+	report := TLSStatusReport{
+		ProjectID: f.project, AgentID: agent, AppID: acme, Source: "acme", State: "failed", RequestID: request, Error: "order failed", NextAttemptAt: &next,
+		LeafSHA256: strings.Repeat("c", 64), Chain: &domain.CertificateInfo{ChainPEM: "chain", LeafSHA256: strings.Repeat("c", 64), Names: []string{"acme.example.com"}},
+	}
+	if ok, err := f.repo.TLS.UpsertTLSStatus(ctx, report); err != nil || !ok {
 		t.Fatalf("status: %v %v", ok, err)
 	}
-	if got := leaf(f.project, app); got != cert.LeafSHA256 {
-		t.Fatalf("leaf %q, want %q", got, cert.LeafSHA256)
+	p, ok := prior(f.project, agent, acme, "acme", request, "")
+	if !ok || !p.Stored || p.Leaf != report.LeafSHA256 || p.State != "failed" || p.Error != "order failed" || p.RequestID != request ||
+		p.AgentID != agent || p.NextAttemptAt == nil || p.NextAttemptAt.Unix() != next.Unix() || time.Since(p.ReceivedAt) > time.Minute {
+		t.Fatalf("prior: %+v %v", p, ok)
 	}
-	if got := leaf(foreign.project, app); got != "" {
-		t.Fatalf("another project reads leaf %q", got)
+	now := time.Now()
+	if !p.Unchanged(report, now, time.Minute) {
+		t.Error("the report that was stored counts as changed")
 	}
-	if got := leaf(f.project, "not-a-uuid"); got != "" {
-		t.Fatalf("an id that is no UUID reads leaf %q", got)
+	if p.Unchanged(report, now.Add(2*time.Minute), time.Minute) {
+		t.Error("a stored status that is older than the refresh counts as unchanged")
+	}
+	changed := report
+	changed.State = "pending"
+	if p.Unchanged(changed, now, time.Minute) {
+		t.Error("another state counts as unchanged")
+	}
+	if got, _ := prior(foreign.project, agent, acme, "acme", request, ""); got.Stored {
+		t.Error("another project reads the stored status")
 	}
 }
 
 // UpdateAgentFeatures writes the TLS flag next to the two others, and a flag that is nil is unknown.
+// The agent of this test has no host, so any stream writes the flag.
 func TestDBUpdateAgentFeaturesStoresTLSCertificates(t *testing.T) {
 	f := newTLSDB(t)
 	ctx := context.Background()
@@ -179,7 +237,7 @@ func TestDBUpdateAgentFeaturesStoresTLSCertificates(t *testing.T) {
 		{&yes, &yes, &no, [3]string{"true", "true", "false"}},
 		{nil, &no, nil, [3]string{"null", "false", "null"}},
 	} {
-		if err := f.repo.EBPF.UpdateAgentFeatures(ctx, f.project, agent, tc.scripts, tc.maintenance, tc.tls); err != nil {
+		if err := f.repo.EBPF.UpdateAgentFeatures(ctx, f.project, agent, tc.scripts, tc.maintenance, tc.tls, false); err != nil {
 			t.Fatal(err)
 		}
 		if got := read(); got != tc.want {
@@ -187,10 +245,76 @@ func TestDBUpdateAgentFeaturesStoresTLSCertificates(t *testing.T) {
 		}
 	}
 	// Another project's call does not touch the agent.
-	if err := f.repo.EBPF.UpdateAgentFeatures(ctx, f.second().project, agent, &yes, &yes, &yes); err != nil {
+	if err := f.repo.EBPF.UpdateAgentFeatures(ctx, f.second().project, agent, &yes, &yes, &yes, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(); got != [3]string{"null", "false", "null"} {
 		t.Fatalf("another project changed the features: %v", got)
+	}
+}
+
+// An agent row that has a host takes the TLS flag from a stream bound to a host only: a project-wide
+// credential under the same name leaves it as it is, whether it says true or false. The other two
+// flags are written either way, and a row without a host takes the flag from any stream.
+func TestDBUpdateAgentFeaturesTLSFlagOfAHostAgent(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	yes, no := true, false
+	flag := func(agent string) string {
+		t.Helper()
+		var c *bool
+		if err := f.repo.DB.QueryRow(ctx, `SELECT tls_certificates FROM agents WHERE id = $1`, agent).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case c == nil:
+			return "null"
+		case *c:
+			return "true"
+		}
+		return "false"
+	}
+	hosted, free := f.agent(nil), f.agent(nil)
+	f.bind(hosted) // gives it a host
+	var hostID string
+	if err := f.repo.DB.QueryRow(ctx, `SELECT host_id::text FROM agents WHERE id = $1`, hosted).Scan(&hostID); err != nil || hostID == "" {
+		t.Fatalf("host of the agent: %q %v", hostID, err)
+	}
+
+	write := func(agent string, scripts, tls *bool, bound bool) {
+		t.Helper()
+		if err := f.repo.EBPF.UpdateAgentFeatures(ctx, f.project, agent, scripts, nil, tls, bound); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(hosted, &yes, &yes, false)
+	if got := flag(hosted); got != "null" {
+		t.Fatalf("a project-wide credential set the flag of a host agent: %s", got)
+	}
+	write(hosted, &yes, &yes, true)
+	if got := flag(hosted); got != "true" {
+		t.Fatalf("a host-bound stream did not set the flag: %s", got)
+	}
+	write(hosted, &no, &no, false)
+	if got := flag(hosted); got != "true" {
+		t.Fatalf("a project-wide credential switched the flag off: %s", got)
+	}
+	var scripts *bool
+	if err := f.repo.DB.QueryRow(ctx, `SELECT script_rules FROM agents WHERE id = $1`, hosted).Scan(&scripts); err != nil || scripts == nil || *scripts {
+		t.Fatalf("the other flags are written whoever says them: %v %v", scripts, err)
+	}
+	write(hosted, nil, &no, true)
+	if got := flag(hosted); got != "false" {
+		t.Fatalf("a host-bound stream did not switch the flag off: %s", got)
+	}
+
+	// A row without a host keeps taking it from any stream.
+	write(free, nil, &yes, false)
+	if got := flag(free); got != "true" {
+		t.Fatalf("an agent without a host: %s", got)
+	}
+	write(free, nil, &no, false)
+	if got := flag(free); got != "false" {
+		t.Fatalf("an agent without a host: %s", got)
 	}
 }

@@ -154,18 +154,23 @@ type fakeCertStore struct {
 	// delivery is what CertificateForDelivery returns for certTestApp and certTestCert.
 	delivery    repository.CertificateDelivery
 	deliveryErr error
-	storedLeaf  string
-	upsertOK    bool
-	upsertErr   error
+	// prior is what StatusPrior returns when priorOK, which says that the agent may report on the app.
+	prior     repository.StatusPrior
+	priorOK   bool
+	priorErr  error
+	upsertOK  bool
+	upsertErr error
+	// onDelivery runs when CertificateForDelivery is about to answer with a row.
+	onDelivery func()
 
-	agentCalls, deliveryCalls int
-	reports                   []repository.TLSStatusReport
+	agentCalls, deliveryCalls, priorCalls int
+	reports                               []repository.TLSStatusReport
 }
 
 func newFakeCertStore(d repository.CertificateDelivery) *fakeCertStore {
 	return &fakeCertStore{
 		agent:    repository.DeliveryAgent{Name: e2eAgent, HostID: certTestHost},
-		delivery: d, upsertOK: true,
+		delivery: d, upsertOK: true, priorOK: true,
 	}
 }
 
@@ -192,13 +197,23 @@ func (f *fakeCertStore) CertificateForDelivery(_ context.Context, projectID, age
 	if projectID != e2eProject || agentID != e2eAgentID || appID != f.delivery.AppID || certID != f.delivery.CertificateID {
 		return repository.CertificateDelivery{}, pgx.ErrNoRows
 	}
+	if f.onDelivery != nil {
+		f.onDelivery()
+	}
 	return f.delivery, nil
 }
 
-func (f *fakeCertStore) TLSStatusLeaf(context.Context, string, string) (string, error) {
+func (f *fakeCertStore) StatusPrior(_ context.Context, projectID, agentID, _, _, _, _ string) (repository.StatusPrior, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.storedLeaf, nil
+	f.priorCalls++
+	if f.priorErr != nil {
+		return repository.StatusPrior{}, false, f.priorErr
+	}
+	if projectID != e2eProject || agentID != e2eAgentID || !f.priorOK {
+		return repository.StatusPrior{}, false, nil
+	}
+	return f.prior, true, nil
 }
 
 func (f *fakeCertStore) UpsertTLSStatus(_ context.Context, s repository.TLSStatusReport) (bool, error) {
@@ -212,6 +227,12 @@ func (f *fakeCertStore) counts() (agent, delivery int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.agentCalls, f.deliveryCalls
+}
+
+func (f *fakeCertStore) priorReads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.priorCalls
 }
 
 func (f *fakeCertStore) seenReports() []repository.TLSStatusReport {
@@ -362,4 +383,10 @@ func (s *Server) onlyPending(t *testing.T) string {
 		return id
 	}
 	return ""
+}
+
+// waitDeliveries waits until every delivery that a status started has ended.
+func (s *Server) waitDeliveries(t *testing.T) {
+	t.Helper()
+	waitUntil(t, "deliveries to end", func() bool { return s.certEnds.Load() == s.certRuns.Load() })
 }

@@ -112,13 +112,18 @@ type Server struct {
 	// certInstalls holds the CertificateInstall messages that wait for their ack, by command id.
 	certMu       sync.Mutex
 	certInstalls map[string]*certInstall
-	// certs, audit and clock replace the TLS repository, the audit repository and the wall clock, and
-	// certTimeout the time an install waits for its ack (tests only); nil or 0 means Repo.TLS,
-	// Repo.Audit, time.Now and 30 seconds.
+	// certRuns and certEnds count the deliveries started and finished (certificate_status.go), so a
+	// test can wait for the ones a status started.
+	certRuns, certEnds atomic.Int64
+	// certs, audit and clock replace the TLS repository, the audit repository and the wall clock,
+	// certTimeout the time an install waits for its ack, and afterWipe is called with the key buffer
+	// once it was zeroed after a send (tests only); nil or 0 means Repo.TLS, Repo.Audit, time.Now,
+	// 30 seconds and nothing.
 	certs       certificateStore
 	audit       auditSink
 	clock       func() time.Time
 	certTimeout time.Duration
+	afterWipe   func(key []byte)
 
 	// BlockWindow tracks active block events so operators can see and clear them.
 	BlockWindow *BlockWindowStore
@@ -254,9 +259,15 @@ type streamHandle struct {
 	bound   bool
 	// peerIP is the address of the agent as the transport saw it, for audit rows.
 	peerIP string
+	// open reports whether the stream is still taking part: not ended, revoked, or cut after a push
+	// that missed its deadline. Nil for handles built in tests, which count as open.
+	open func() bool
 	// certClaims tracks the certificates already sent on this stream (claimCertificateDelivery).
 	certMu     sync.Mutex
 	certClaims map[string]certClaim
+	// statusBudgets limits the statuses and chain parses per app (certificate_status.go).
+	statusMu      sync.Mutex
+	statusBudgets map[string]*appBudget
 }
 
 func NewServer(repo *repository.Repository, loader BundleLoader, broker *DecisionBroker) *Server {
@@ -616,7 +627,7 @@ func decisionRowFromEvent(projectID, agentID, countryCode string, dec *agentv1.W
 // health counters. Narrow so ingestion can be tested without a database.
 type wafHealthWriter interface {
 	UpdateAgentWAFHealth(ctx context.Context, projectID, agentID string, h repository.AgentWAFHealth) error
-	UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool) error
+	UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool, hostBound bool) error
 }
 
 // wafHealthFromHeartbeat extracts the inspection-health fields (5-8, 11-20)
@@ -724,19 +735,27 @@ func (s *Server) storeWAFHealth(projectID, agentName string, hb *agentv1.Heartbe
 }
 
 // storeAgentFeatures records whether the agent can run script rules, whether it supports
-// maintenance mode and whether it serves TLS certificates, as reported in its Hello.
+// maintenance mode and whether it serves TLS certificates, as reported in its Hello. hostBound
+// says that the stream's credential is bound to a host: only such a stream writes the TLS flag of
+// an agent row that has a host (UpdateAgentFeatures).
 // Synchronous; Stream calls it before it registers the stream, so a CertificateStatus that the
-// agent sends after its first bundle finds the flag written.
-func (s *Server) storeAgentFeatures(projectID, agentID string, features []string) {
+// agent sends after its first bundle finds the flag written. A failure is logged, since without the
+// flag no key is sent and nothing else says why.
+func (s *Server) storeAgentFeatures(projectID, agentID string, features []string, hostBound bool) {
 	defer recoverPanic("store-agent-features")
+	if agentID == "" {
+		log.Printf("[agentserver] agent features not stored, the agent has no row yet project=%s", projectID)
+		return
+	}
 	w := s.healthWriter()
-	if w == nil || agentID == "" {
+	if w == nil {
+		log.Printf("[agentserver] agent features not stored, no store project=%s agent=%s", projectID, agentID)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := w.UpdateAgentFeatures(ctx, projectID, agentID, engine.AgentScriptRules(features), engine.AgentMaintenanceMode(features),
-		engine.AgentTLSCertificates(features)); err != nil {
+		engine.AgentTLSCertificates(features), hostBound); err != nil {
 		log.Printf("[agentserver] store agent features failed project=%s agent=%s: %v", projectID, agentID, err)
 	}
 }
@@ -1325,10 +1344,10 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 		s.bindLive(live, hostID, resolvedAgentID)
 	}
 	rx.agentID = resolvedAgentID
-	if ebpfAgentID == "" {
-		s.storeAgentFeatures(projectID, resolvedAgentID, hello.GetFeatures())
-	}
 	binding, bound := bindingFrom(ctx)
+	if ebpfAgentID == "" {
+		s.storeAgentFeatures(projectID, resolvedAgentID, hello.GetFeatures(), bound)
+	}
 	handle := &streamHandle{
 		agentID:      resolvedAgentID,
 		projectID:    projectID,
@@ -1346,6 +1365,7 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 		binding:      binding,
 		bound:        bound,
 		peerIP:       peerIP(ctx),
+		open:         func() bool { return ctx.Err() == nil && !live.ending() },
 	}
 	// Register before loading the first bundle so a push that lands in between
 	// reaches this connection rather than a predecessor with the same
@@ -1709,6 +1729,8 @@ func (s *Server) registerStream(h *streamHandle) {
 //
 // Lock order agentCompMu -> mu, as in GetAgentComponentStatusPerAgent.
 func (s *Server) unregisterStream(h *streamHandle) {
+	// An ack can no longer come from this stream, so its installs need not wait out their timeout.
+	s.dropCertInstallsOf(h)
 	s.agentCompMu.Lock()
 	defer s.agentCompMu.Unlock()
 	s.mu.Lock()
