@@ -800,8 +800,15 @@ func TestChainThatGrowsPastTheLimitWhenWrittenAgainIsRefused(t *testing.T) {
 			hi = mid - 1
 		}
 	}
+	// A signature is a byte or two longer or shorter from one certificate to the next, so the chain of
+	// the search may not fit when it is built again: shorten the last name until it does.
 	certs := repeated(n, lo)
 	in := compactChain(certs...)
+	for len(in) > CertChainMaxBytes {
+		lo--
+		certs = repeated(n, lo)
+		in = compactChain(certs...)
+	}
 	if len(in) > CertChainMaxBytes || len(encodeChain([]*x509.Certificate{certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert})) <= CertChainMaxBytes {
 		t.Fatalf("the test chain does not grow past the limit: %d bytes in", len(in))
 	}
