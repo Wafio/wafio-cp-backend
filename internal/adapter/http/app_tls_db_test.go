@@ -491,7 +491,7 @@ func TestDBAppTLSACME(t *testing.T) {
 
 	// The status the agent sent for the old request is gone; one for the new request is shown.
 	status := repository.TLSStatusReport{ProjectID: tf.project, AgentID: tf.agentID, AppID: tf.appID, Source: "acme", State: "active", RequestID: r.body["acme"].(map[string]any)["request_id"].(string),
-		LeafSHA256: strings.Repeat("ab", 32), Chain: &domain.CertificateInfo{Names: []string{"shop.example.com"}, Issuer: "Test CA", NotBefore: time.Now().Add(-24 * time.Hour), NotAfter: time.Now().Add(10 * 24 * time.Hour)}}
+		LeafSHA256: strings.Repeat("ab", 32), Chain: &domain.CertificateInfo{Names: []string{"shop.example.com"}, Issuer: "Test CA", NotBefore: time.Now().Add(-80 * 24 * time.Hour), NotAfter: time.Now().Add(10 * 24 * time.Hour)}}
 	if ok, err := tf.repo.TLS.UpsertTLSStatus(ctx, status); err != nil || !ok {
 		t.Fatalf("status: %v %v", ok, err)
 	}
@@ -501,7 +501,7 @@ func TestDBAppTLSACME(t *testing.T) {
 		t.Errorf("status = %v", st)
 	}
 	if codes := warningCodes(got); len(codes) != 1 || codes[0] != "expires_soon" {
-		t.Errorf("an ACME certificate with 10 days left: warnings %v", codes)
+		t.Errorf("an ACME certificate of 90 days with 10 days left: warnings %v", codes)
 	}
 	wantStatus(t, "back to a draft", tf.put(t, "owner", map[string]any{"mode": "proxy", "source": "acme", "hosts": []string{"shop.example.com"}}), fiber.StatusOK, "")
 	if got = tf.get(t, "owner"); got.body["status"] != nil {

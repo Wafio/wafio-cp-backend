@@ -22,16 +22,6 @@ const (
 	// A control plane that has just started waits before its first pass, so that a restart loop does
 	// not mail again and again while it comes up.
 	defaultExpiryFirstDelay = time.Minute
-	// A project can name 100 hosts; the mail lists the first few.
-	expiryMailHosts = 10
-)
-
-// Days left at which a warning goes out, largest first. The owner renews an uploaded certificate, so
-// it gets three warnings. The agent renews an ACME certificate once a third of its lifetime is left,
-// so a warning there means the renewal is late and only the last two levels apply.
-var (
-	uploadedExpiryDays = []int{30, 14, 3}
-	acmeExpiryDays     = []int{14, 3}
 )
 
 // ExpiryMember is a member of a project as the warnings see it.
@@ -134,7 +124,7 @@ func (s *CertificateExpiry) Check(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		level, due := expiryLevel(c.Source, c.NotAfter.Sub(now))
+		level, due := domain.ExpiryLevel(c.Source, c.NotBefore, c.NotAfter, now)
 		if !due || (c.NotifiedDays != nil && *c.NotifiedDays <= level) {
 			continue
 		}
@@ -194,50 +184,36 @@ func (s *CertificateExpiry) recipients(ctx context.Context, projectID string) ([
 	return to, nil
 }
 
-// expiryLevel is the tightest warning level the time left has reached: the smallest number of days
-// that is still at least what is left. A certificate that is past its date is at the last level, and
-// when the passes were far apart a certificate gets the mail of its current level only.
-func expiryLevel(source string, left time.Duration) (days int, due bool) {
-	var levels []int
-	switch source {
-	case domain.TLSSourceUploaded:
-		levels = uploadedExpiryDays
-	case domain.TLSSourceACME:
-		levels = acmeExpiryDays
-	}
-	for _, d := range levels {
-		if left <= time.Duration(d)*24*time.Hour {
-			days, due = d, true
-		}
-	}
-	return days, due
-}
-
 // expiryMail writes the mail for a certificate. The project and application names come from users, so
 // control characters and line breaks are replaced before a name reaches the subject or a line of the
 // body; the mailer refuses a header that still holds one.
 func expiryMail(c domain.ExpiryCandidate, now time.Time, baseURL string) (subject, body string) {
-	left := c.NotAfter.Sub(now)
+	expired := !c.NotAfter.After(now)
 	app := oneLine(c.AppName)
-	var when string
-	switch {
-	case left <= 0:
+	when := "expired"
+	if expired {
 		subject = "Wafio: the certificate of " + app + " has expired"
-		when = "expired"
-	default:
-		when = "in " + leftText(left)
+	} else {
+		when = "in " + daysText(domain.DaysLeft(c.NotAfter, now))
 		subject = "Wafio: the certificate of " + app + " expires " + when
 	}
 
 	var b strings.Builder
-	if left <= 0 {
+	if expired {
 		b.WriteString("The certificate that WAFio serves for an application of your project has expired.\n\n")
 	} else {
 		b.WriteString("The certificate that WAFio serves for an application of your project expires soon.\n\n")
 	}
 	fmt.Fprintf(&b, "Project: %s\n", oneLine(c.ProjectName))
 	fmt.Fprintf(&b, "Application: %s\n", oneLine(c.AppName))
-	b.WriteString("Hosts: " + hostList(c.Hosts) + "\n")
+	// One host to a line: a mail line may not pass 998 bytes, and a project can name 100 hosts.
+	b.WriteString("Hosts:\n")
+	for _, h := range c.Hosts {
+		b.WriteString("  " + singleLine(h) + "\n")
+	}
+	if len(c.Hosts) == 0 {
+		b.WriteString("  none\n")
+	}
 	fmt.Fprintf(&b, "Expires: %s (%s)\n\n", c.NotAfter.UTC().Format("2006-01-02 15:04 UTC"), when)
 	if c.Source == domain.TLSSourceACME {
 		b.WriteString("The agent renews an ACME certificate well before it expires, so a warning now means that the renewal is late. " +
@@ -252,8 +228,9 @@ func expiryMail(c domain.ExpiryCandidate, now time.Time, baseURL string) (subjec
 	return subject, b.String()
 }
 
-func leftText(left time.Duration) string {
-	switch days := int(left / (24 * time.Hour)); days {
+// daysText writes the whole days left as the dashboard counts them (domain.DaysLeft).
+func daysText(days int) string {
+	switch days {
 	case 0:
 		return "less than a day"
 	case 1:
@@ -263,26 +240,16 @@ func leftText(left time.Duration) string {
 	}
 }
 
-func hostList(hosts []string) string {
-	if len(hosts) == 0 {
-		return "none"
-	}
-	shown := hosts
-	if len(shown) > expiryMailHosts {
-		shown = shown[:expiryMailHosts]
-	}
-	out := singleLine(strings.Join(shown, ", "))
-	if more := len(hosts) - len(shown); more > 0 {
-		out += fmt.Sprintf(" and %d more", more)
-	}
-	return out
-}
-
-// singleLine replaces control characters and line separators, so that text stays on its line.
+// singleLine keeps text on its line: control characters and line separators become a space, and the
+// invisible format characters (zero width, bidirectional overrides) are dropped, so a name cannot
+// hide what it is or reorder the text around it.
 func singleLine(s string) string {
 	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+		switch {
+		case unicode.IsControl(r) || r == '\u2028' || r == '\u2029':
 			return ' '
+		case unicode.Is(unicode.Cf, r):
+			return -1
 		}
 		return r
 	}, s))

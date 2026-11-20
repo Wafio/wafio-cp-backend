@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 	"github.com/wafio/wafio-cp-backend/shared/email"
@@ -153,6 +154,7 @@ func (r *expiryRig) expiresIn(d time.Duration) { r.setAt(r.now.Add(d)) }
 // setAt gives every candidate the expiry date t.
 func (r *expiryRig) setAt(t time.Time) {
 	for i := range r.store.candidates {
+		r.store.candidates[i].NotBefore = t.Add(-90 * expiryDay)
 		r.store.candidates[i].NotAfter = t
 	}
 }
@@ -163,7 +165,7 @@ func newExpiryRig(source string) *expiryRig {
 	c := domain.ExpiryCandidate{
 		ProjectID: "11111111-1111-4111-8111-111111111111", ProjectName: "Shop", AppID: "22222222-2222-4222-8222-222222222222",
 		AppName: "storefront", Hosts: []string{"shop.example.com", "www.shop.example.com"}, Source: source,
-		LeafSHA256: strings.Repeat("ab", 32), NotAfter: rigStart.Add(90 * expiryDay),
+		LeafSHA256: strings.Repeat("ab", 32), NotBefore: rigStart, NotAfter: rigStart.Add(90 * expiryDay),
 	}
 	if source == domain.TLSSourceUploaded {
 		c.CertificateID = "33333333-3333-4333-8333-333333333333"
@@ -188,39 +190,6 @@ func recipientsOf(mails []expirySent) string {
 		to = append(to, m.to)
 	}
 	return strings.Join(to, ",")
-}
-
-func TestExpiryLevel(t *testing.T) {
-	for _, c := range []struct {
-		source string
-		left   time.Duration
-		days   int
-		due    bool
-	}{
-		{domain.TLSSourceUploaded, 31 * expiryDay, 0, false},
-		{domain.TLSSourceUploaded, 30*expiryDay + time.Second, 0, false},
-		{domain.TLSSourceUploaded, 30 * expiryDay, 30, true},
-		{domain.TLSSourceUploaded, 29 * expiryDay, 30, true},
-		{domain.TLSSourceUploaded, 14*expiryDay + time.Hour, 30, true},
-		{domain.TLSSourceUploaded, 14 * expiryDay, 14, true},
-		{domain.TLSSourceUploaded, 3*expiryDay + time.Hour, 14, true},
-		{domain.TLSSourceUploaded, 3 * expiryDay, 3, true},
-		{domain.TLSSourceUploaded, time.Hour, 3, true},
-		{domain.TLSSourceUploaded, -time.Hour, 3, true},
-		{domain.TLSSourceACME, 40 * expiryDay, 0, false},
-		{domain.TLSSourceACME, 15 * expiryDay, 0, false},
-		{domain.TLSSourceACME, 14 * expiryDay, 14, true},
-		{domain.TLSSourceACME, 4 * expiryDay, 14, true},
-		{domain.TLSSourceACME, 3 * expiryDay, 3, true},
-		{domain.TLSSourceACME, -expiryDay, 3, true},
-		{"", expiryDay, 0, false},
-		{"other", expiryDay, 0, false},
-	} {
-		days, due := expiryLevel(c.source, c.left)
-		if days != c.days || due != c.due {
-			t.Errorf("%q with %s left: level %d due %v, want %d %v", c.source, c.left, days, due, c.days, c.due)
-		}
-	}
 }
 
 func TestUploadedCertificateIsMailedOncePerLevel(t *testing.T) {
@@ -537,7 +506,7 @@ func TestMailNamesWhatToDo(t *testing.T) {
 	}
 	m := got[0]
 	for _, want := range []string{
-		"Project: Shop", "Application: storefront", "Hosts: shop.example.com, www.shop.example.com",
+		"Project: Shop", "Application: storefront", "Hosts:\n  shop.example.com\n  www.shop.example.com\n",
 		"Expires: 2026-11-11 06:05 UTC (in 10 days)", "Upload a new certificate",
 		"https://dash.example.com/projects/11111111-1111-4111-8111-111111111111/apps/22222222-2222-4222-8222-222222222222",
 	} {
@@ -585,17 +554,30 @@ func TestMailWithLessThanADayAndOneDay(t *testing.T) {
 	}
 }
 
-func TestLongHostListIsCut(t *testing.T) {
+// A project names up to 100 hosts of 253 bytes. They go one to a line, so no line of the mail comes
+// near the 998 bytes that a mail line may have.
+func TestEveryHostGetsALineOfItsOwn(t *testing.T) {
 	r := newExpiryRig(domain.TLSSourceUploaded)
 	r.expiresIn(5 * expiryDay)
 	var hosts []string
-	for i := 0; i < 25; i++ {
-		hosts = append(hosts, fmt.Sprintf("h%02d.example.com", i))
+	for i := 0; i < 100; i++ {
+		label := strings.Repeat("a", 60)
+		hosts = append(hosts, fmt.Sprintf("h%03d.%s.%s.%s.%s.example.com", i, label, label, label, label))
 	}
 	r.store.candidates[0].Hosts = hosts
 	got := r.check(t)
-	if len(got) != 2 || !strings.Contains(got[0].body, "h09.example.com and 15 more") || strings.Contains(got[0].body, "h10.example.com") {
-		t.Fatalf("host list: %+v", got)
+	if len(got) != 2 {
+		t.Fatalf("mailed %d", len(got))
+	}
+	for _, host := range hosts {
+		if !strings.Contains(got[0].body, "\n  "+host+"\n") {
+			t.Fatalf("host %s has no line of its own", host)
+		}
+	}
+	for _, line := range strings.Split(got[0].body, "\n") {
+		if len(line) > 998 {
+			t.Fatalf("a line of %d bytes", len(line))
+		}
 	}
 }
 
@@ -633,6 +615,62 @@ func TestNamesCannotInjectHeadersOrLines(t *testing.T) {
 	r2.store.candidates[0].AppName = strings.Repeat("n", 500)
 	if got := r2.check(t); len(got) != 2 || len(got[0].subject) > 200 {
 		t.Fatalf("long name: %d mails, subject of %d bytes", len(got), len(got[0].subject))
+	}
+}
+
+// Format characters do not show: a right-to-left override reorders the text after it and a zero
+// width space hides one name in another. They are dropped from every name.
+func TestInvisibleFormatCharactersAreDropped(t *testing.T) {
+	r := newExpiryRig(domain.TLSSourceUploaded)
+	r.expiresIn(5 * expiryDay)
+	r.store.candidates[0].AppName = "pay\u202eroll\u200b\u2066x\u2069\ufeff"
+	r.store.candidates[0].ProjectName = "Sh\u200dop\u00adq"
+	got := r.check(t)
+	if len(got) != 2 {
+		t.Fatalf("mailed %d", len(got))
+	}
+	for _, text := range []string{got[0].subject, got[0].body} {
+		for _, r := range text {
+			if unicode.Is(unicode.Cf, r) {
+				t.Errorf("format character %U in %q", r, text)
+			}
+		}
+	}
+	if !strings.Contains(got[0].body, "Application: payrollx\n") || !strings.Contains(got[0].body, "Project: Shopq\n") {
+		t.Errorf("names after the cleaning:\n%s", got[0].body)
+	}
+}
+
+// A certificate of a few days is renewed from the day it is issued, so no level is late for it: an
+// ACME certificate of six days is not warned about, and an uploaded one of the same life still is.
+func TestShortLivedACMECertificateIsNotWarnedAbout(t *testing.T) {
+	r := newExpiryRig(domain.TLSSourceACME)
+	notAfter := r.now.Add(30 * expiryDay)
+	for _, left := range []time.Duration{4 * expiryDay, 2 * expiryDay, expiryDay, time.Hour, -time.Hour} {
+		r.now = notAfter.Add(-left)
+		r.store.candidates[0].NotAfter = notAfter
+		r.store.candidates[0].NotBefore = notAfter.Add(-6 * expiryDay)
+		if got := r.check(t); len(got) != 0 {
+			t.Fatalf("a six day certificate with %s left was mailed", left)
+		}
+	}
+	// The same life as an upload is the owner's to renew.
+	up := newExpiryRig(domain.TLSSourceUploaded)
+	up.now = notAfter.Add(-expiryDay)
+	up.store.candidates[0].NotAfter = notAfter
+	up.store.candidates[0].NotBefore = notAfter.Add(-6 * expiryDay)
+	if got := up.check(t); len(got) != 2 {
+		t.Fatalf("an uploaded certificate of six days was mailed to %d", len(got))
+	}
+	// A 90 day certificate keeps both levels, and an unknown start skips none.
+	for _, notBefore := range []time.Time{{}, notAfter.Add(-90 * expiryDay), notAfter.Add(-45 * expiryDay)} {
+		r2 := newExpiryRig(domain.TLSSourceACME)
+		r2.now = notAfter.Add(-10 * expiryDay)
+		r2.store.candidates[0].NotAfter = notAfter
+		r2.store.candidates[0].NotBefore = notBefore
+		if got := r2.check(t); len(got) != 2 {
+			t.Fatalf("an ACME certificate from %v with 10 days left was mailed to %d", notBefore, len(got))
+		}
 	}
 }
 

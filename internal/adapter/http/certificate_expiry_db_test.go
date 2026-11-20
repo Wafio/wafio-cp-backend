@@ -109,7 +109,7 @@ func TestDBCertificateExpiryMailsOwnersAndMembersOnce(t *testing.T) {
 	link := "https://dash.example.test/projects/" + project + "/apps/" + appID
 	for _, addr := range []string{ownerEmail, memberEmail} {
 		data := sink.await(t, addr, "expires in 10 days")
-		for _, want := range []string{"Application: " + appName, "Hosts: shop.example.test", "Upload a new certificate", link} {
+		for _, want := range []string{"Application: " + appName, "Hosts:\n  shop.example.test\n", "Upload a new certificate", link} {
 			if !strings.Contains(data, want) {
 				t.Errorf("mail to %s lacks %q:\n%s", addr, want, data)
 			}
