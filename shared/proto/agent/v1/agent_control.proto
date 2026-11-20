@@ -3,8 +3,10 @@
 // Bidirectional gRPC stream shared by two agent types:
 //
 //   WAF agent (cmd/wafio-waf-agent):
-//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation ack)
-//     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping
+//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation and
+//               CertificateInstall ack), CertificateStatus
+//     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping,
+//                 CertificateInstall
 //
 //   eBPF/host agent (cmd/wafio-host-agent):
 //     → sends : Hello, Heartbeat, CommandAck{id="ebpf:telemetry"} (telemetry)
@@ -39,8 +41,9 @@ message AgentMessage {
     Hello            hello     = 1; // both agents — first message on connect
     Heartbeat        heartbeat = 2; // both agents — liveness + host info
     WAFDecisionEvent decision  = 3; // WAF agent only
-    CommandAck       ack       = 4; // WAF agent: KeyRotation ack
+    CommandAck       ack       = 4; // WAF agent: KeyRotation and CertificateInstall ack
                                     // eBPF agent: telemetry (id="ebpf:telemetry")
+    CertificateStatus certificate_status = 5; // WAF agent only, with feature "tls_certificates"
   }
 }
 
@@ -74,7 +77,9 @@ message Hello {
   // cannot (it ships without the script sidecar). A v1 agent sent other names
   // (semantic_only, semantic_keys_jwt_graphql, field_rules_v2,
   // custom_rule_field_paths); the server ignores them, and every agent gets
-  // the same bundle. Unknown names are ignored.
+  // the same bundle. "tls_certificates": the WAF agent serves an app over TLS
+  // from the bundle's settings, accepts CertificateInstall and sends
+  // CertificateStatus. Unknown names are ignored.
   repeated string features = 8;
 }
 
@@ -221,6 +226,43 @@ message CommandAck {
   bytes  payload    = 4;
 }
 
+// CertificateStatus is sent by a WAF agent with the feature "tls_certificates"
+// for each app whose bundle entry turns TLS on: once after each applied bundle,
+// and again whenever the state or the certificate in use changes. Only a
+// control plane that sends TLS settings in the bundle receives it; an older
+// one ignores the unknown message. It never carries private key material.
+// The server treats every field as untrusted input; docs/agent-protocol.md
+// lists its checks (the app's assignment to this agent, the certificate looked
+// up by project, app and id, request_id, sizes, CERTIFICATE blocks only).
+message CertificateStatus {
+  string app_id            = 1;
+  // "acme" (the agent orders and renews the certificate) or "uploaded"
+  // (the certificate came in a CertificateInstall).
+  string source            = 2;
+  // "pending"  an ACME order is in progress
+  // "active"   a certificate is in use (after an order, a renewal or an install)
+  // "failed"   the last order or install failed; chain_pem is set when an
+  //            older certificate is still in use
+  // "missing"  TLS is on but there is no certificate to serve yet
+  string state             = 3;
+  // For "uploaded": the certificate_id the bundle names. Empty for "acme".
+  string certificate_id    = 4;
+  // The chain in use, leaf first (public material). Empty when none is in use.
+  // Only CERTIFICATE blocks, at most 10 certificates and 64 KiB.
+  bytes  chain_pem         = 5;
+  // Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
+  string leaf_sha256       = 6;
+  // "failed": why, for the dashboard. At most 1 KiB, never key material.
+  string error             = 7;
+  // "pending" or "failed": when the agent tries again; 0 when nothing is planned.
+  int64  next_attempt_unix = 8;
+  // The ACME request id of the bundle entry this state answers (a new id in
+  // the bundle asks the agent to order now). Empty for "uploaded".
+  string request_id        = 9;
+  // When the agent saw this state. The server records its own receive time.
+  int64  unix_time         = 10;
+}
+
 // ─── server → agent ─────────────────────────────────────────────────────────
 
 // ServerMessage is the union of all messages the server can push.
@@ -232,6 +274,7 @@ message ServerMessage {
     KeyRotation         key_rotation         = 3; // WAF agent only (eBPF agents ignore this)
     Ping                ping                 = 4; // both agents — liveness probe
     FetchSecurityData   fetch_security_data  = 5; // both agents — refresh local security data
+    CertificateInstall  certificate_install  = 7; // WAF agent with feature "tls_certificates" only
   }
 
   // field 6 (self_update) removed — control-plane push updates never had a
@@ -271,6 +314,42 @@ message KeyRotation {
   string new_host_key        = 2; // optional; "" means leave unchanged
   // field 3 (new_waf_keys) removed — WAF keys were dropped in migration 000017.
   reserved 3; reserved "new_waf_keys";
+}
+
+// CertificateInstall carries an uploaded certificate chain and its private key
+// to the WAF agent that serves the app. The server sends it only on a stream
+// that reports the Hello feature "tls_certificates" and whose mTLS credential
+// is bound by host-key enrollment to this agent's host, kind and name; a
+// project-wide credential never receives a key. At send time it checks that
+// the app is assigned to this agent in this project. It sends it after the
+// BundleUpdate that names the certificate: after Welcome on connect, after an
+// upload, a replace or a move of the app, and again when a CertificateStatus
+// reports the app "missing". Every delivery is audited.
+//
+// An upload or a replace always gets a new certificate_id, so an id never
+// names other bytes. The agent refuses an install that its latest applied
+// bundle does not name (app_id, certificate_id and leaf_sha256), checks that
+// the key matches the leaf and that leaf_sha256 matches the chain, writes the
+// pair into its key directory and acks with CommandAck{command_id, ok, error}.
+// error is one of the codes in docs/agent-protocol.md, never free text. An
+// agent that already holds this certificate_id with this leaf_sha256 acks ok
+// without writing. It deletes the files of a certificate its bundle no longer
+// names. A key already sent to an agent that is offline, removed or no longer
+// serves the app is not recalled; replace the certificate instead. Key material
+// is never logged, never put in an ack and never sent in a BundleUpdate.
+message CertificateInstall {
+  string command_id     = 1;
+  // Canonical lower-case UUIDs.
+  string app_id         = 2;
+  string certificate_id = 3;
+  // Only CERTIFICATE blocks, leaf first, at most 10 certificates and 64 KiB.
+  // Any other block is refused.
+  bytes  chain_pem      = 4;
+  // One PKCS#8, PKCS#1 or SEC1 private key, PEM, without a passphrase.
+  // At most 16 KiB.
+  bytes  key_pem        = 5 [debug_redact = true];
+  // Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
+  string leaf_sha256    = 6;
 }
 
 // Ping is sent by the server to both agents as a liveness probe.

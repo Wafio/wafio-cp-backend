@@ -3,8 +3,10 @@
 // Bidirectional gRPC stream shared by two agent types:
 //
 //   WAF agent (cmd/wafio-waf-agent):
-//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation ack)
-//     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping
+//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation and
+//               CertificateInstall ack), CertificateStatus
+//     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping,
+//                 CertificateInstall
 //
 //   eBPF/host agent (cmd/wafio-host-agent):
 //     → sends : Hello, Heartbeat, CommandAck{id="ebpf:telemetry"} (telemetry)

@@ -75,7 +75,7 @@ func TestPublicIdentityReadsAreNotShedExempt(t *testing.T) {
 			t.Errorf("%s: a read is shed-exempt although ingest drops it", path)
 		}
 	}
-	for _, path := range []string{"/etc/shadow", "/etc/sudoers", "/etc/pam.d/common-auth", "/etc/security/limits.conf", "/root/.ssh/id_ed25519"} {
+	for _, path := range []string{"/etc/shadow", "/etc/sudoers", "/etc/pam.d/common-auth", "/etc/security/limits.conf", "/root/.ssh/id_ed25519", "/var/lib/wafio-waf-agent/tls/0b6f3c1e/key.pem", "/var/lib/wafio-waf-agent/tls/acme-account.pem"} {
 		if !hostpolicy.KeepsBuiltinRead(path) {
 			t.Errorf("%s: a read must stay shed-exempt", path)
 		}

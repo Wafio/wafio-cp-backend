@@ -71,3 +71,19 @@ func TestLetsEncryptReadmeIsSysinfo(t *testing.T) {
 		t.Errorf("privkey write: stored=%v severity=%d, want CRITICAL", stored, ev.Severity)
 	}
 }
+
+// The WAF agent keeps its certificate keys and its ACME account key under
+// /var/lib/wafio-waf-agent/tls/: a read there by another process is a
+// credential read, and a path that leaves the directory once cleaned is not.
+func TestWAFAgentKeyDirectoryIsCredential(t *testing.T) {
+	for _, file := range []string{"/var/lib/wafio-waf-agent/tls/0b6f3c1e/key.pem", "/var/lib/wafio-waf-agent/tls/acme-account.pem"} {
+		ev, stored := openStored(TraceEventPayload{Comm: "cat", Filename: file, UID: 1000})
+		if !stored || ev.Severity != 4 {
+			t.Errorf("read of %s: stored=%v severity=%d, want CRITICAL", file, stored, ev.Severity)
+		}
+	}
+	ev, _ := openStored(TraceEventPayload{Comm: "cat", Filename: "/var/lib/wafio-waf-agent/tls/../last-bundle.json", UID: 1000})
+	if ev.Filename != "/var/lib/wafio-waf-agent/last-bundle.json" || ev.Severity >= 4 {
+		t.Errorf("path out of the key directory: filename=%q severity=%d, want cleaned and below CRITICAL", ev.Filename, ev.Severity)
+	}
+}

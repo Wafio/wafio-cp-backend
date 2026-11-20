@@ -205,6 +205,9 @@ var traceForwardGolden = map[int]string{
 	// login.defs read as a public identity read and README under the
 	// Let's Encrypt live directory as system information.
 	4: "6c5eb4baaeedfc097a2e5a2c976c8b8b004901ebb53184c1e074cf0e1dfb92f3",
+	// 5 rates reads under the WAF agent key directory /var/lib/wafio-waf-agent/tls/
+	// as credential reads.
+	5: "0f8a33cb8b05c42e0cbf7d2bb5761dcd1849e60fa8245c153fb11a182cfd2ff2",
 }
 
 // TestTraceForwardRevisionGolden fails when ingest's decisions on the

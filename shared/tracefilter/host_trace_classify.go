@@ -164,6 +164,8 @@ var (
 		"/root/.ssh/id_",
 		"/etc/ssl/private/",
 		"/etc/letsencrypt/live/",
+		// The WAF agent's own certificate keys and ACME account key.
+		"/var/lib/wafio-waf-agent/tls/",
 	}
 	credSuffixes = []string{
 		"/.ssh/id_rsa", "/.ssh/id_ecdsa", "/.ssh/id_ed25519", "/.ssh/id_dsa",
