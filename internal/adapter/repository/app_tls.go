@@ -128,7 +128,6 @@ func effectiveTLSListen(v string) string {
 type tlsApp struct {
 	id, projectID, name string
 	AppTLS
-	limits domain.ListenerLimits
 	// plain is the listener the application opens for itself, nil when it has none.
 	plain *domain.PlainListener
 	// agentID is the agent that serves the application, "" when none.
@@ -162,23 +161,17 @@ func readTLSApp(ctx context.Context, q queryer, projectID, appID string, lock bo
 		}
 	}
 	query := `SELECT a.id::text, a.project_id::text, a.name, a.tls_mode, a.tls_hosts, a.tls_listen, a.tls_redirect_listen,
-		a.tls_source, COALESCE(a.tls_certificate_id::text, ''), a.acme_request_id, a.acme_requested_at, a.proxy_config,
+		a.tls_source, COALESCE(a.tls_certificate_id::text, ''), a.acme_request_id, a.acme_requested_at,
 		wafio_listen_host_key(a.listen_host), a.listen_port,
 		COALESCE((SELECT waa.agent_id::text FROM waf_agent_apps waa WHERE waa.app_id = a.id AND waa.enabled = TRUE LIMIT 1), '')
 		FROM apps a WHERE a.id = $1 AND a.project_id = $2`
 	var a tlsApp
-	var proxy []byte
 	var hostKey string
 	var port *int32
 	if err := q.QueryRow(ctx, query, appID, projectID).Scan(&a.id, &a.projectID, &a.name, &a.Mode, &a.Hosts, &a.Listen, &a.RedirectListen,
-		&a.Source, &a.CertificateID, &a.ACMERequestID, &a.ACMERequestedAt, &proxy, &hostKey, &port, &a.agentID); err != nil {
+		&a.Source, &a.CertificateID, &a.ACMERequestID, &a.ACMERequestedAt, &hostKey, &port, &a.agentID); err != nil {
 		return tlsApp{}, err
 	}
-	pc, err := domain.ParseProxyConfig(proxy)
-	if err != nil {
-		return tlsApp{}, err
-	}
-	a.limits = domain.ListenerLimitsOf(pc)
 	a.plain = plainListenerOf(a.id, a.name, hostKey, port)
 	a.Listen = effectiveTLSListen(a.Listen)
 	if a.Hosts == nil {
@@ -193,14 +186,15 @@ func (a tlsApp) site() domain.TLSSite {
 	if a.Mode != domain.TLSModeGateway {
 		return domain.TLSSite{AppID: a.id, Name: a.name}
 	}
-	return domain.TLSSite{AppID: a.id, Name: a.name, Listen: a.Listen, RedirectListen: a.RedirectListen, Hosts: a.Hosts, Limits: a.limits}
+	return domain.TLSSite{AppID: a.id, Name: a.name, Listen: a.Listen, RedirectListen: a.RedirectListen, Hosts: a.Hosts}
 }
 
 // checkTLSFit checks that a, with the settings it has now, fits next to the other applications of
-// the agent, whether it is in gateway mode or only has a plain listener of its own to place. The caller holds the bundle of the agent (lockAgentBundle), which is what makes the
-// answer hold until the change is committed. It returns a *domain.TLSConflictError.
+// the agent, whether it is in gateway mode or only has a plain listener of its own to place. The
+// caller holds the bundle of the agent (lockAgentBundle), which is what makes the answer hold until
+// the change is committed. It returns a *domain.TLSConflictError.
 func checkTLSFit(ctx context.Context, q queryer, a tlsApp, agentID string) error {
-	rows, err := q.Query(ctx, `SELECT a.id::text, a.name, a.tls_mode, a.tls_listen, a.tls_redirect_listen, a.tls_hosts, a.proxy_config,
+	rows, err := q.Query(ctx, `SELECT a.id::text, a.name, a.tls_mode, a.tls_listen, a.tls_redirect_listen, a.tls_hosts,
 		wafio_listen_host_key(a.listen_host), a.listen_port
 		FROM waf_agent_apps waa JOIN apps a ON a.id = waa.app_id
 		WHERE waa.agent_id = $1 AND waa.enabled = TRUE AND a.project_id = $2 AND a.id <> $3
@@ -214,10 +208,9 @@ func checkTLSFit(ctx context.Context, q queryer, a tlsApp, agentID string) error
 	for rows.Next() {
 		var o tlsApp
 		var listen string
-		var proxy []byte
 		var hostKey string
 		var port *int32
-		if err := rows.Scan(&o.id, &o.name, &o.Mode, &listen, &o.RedirectListen, &o.Hosts, &proxy, &hostKey, &port); err != nil {
+		if err := rows.Scan(&o.id, &o.name, &o.Mode, &listen, &o.RedirectListen, &o.Hosts, &hostKey, &port); err != nil {
 			return err
 		}
 		if p := plainListenerOf(o.id, o.name, hostKey, port); p != nil {
@@ -226,11 +219,7 @@ func checkTLSFit(ctx context.Context, q queryer, a tlsApp, agentID string) error
 		if o.Mode != domain.TLSModeGateway {
 			continue
 		}
-		pc, err := domain.ParseProxyConfig(proxy)
-		if err != nil {
-			return err
-		}
-		o.Listen, o.limits = effectiveTLSListen(listen), domain.ListenerLimitsOf(pc)
+		o.Listen = effectiveTLSListen(listen)
 		others = append(others, o.site())
 	}
 	if err := rows.Err(); err != nil {
@@ -350,22 +339,35 @@ type TLSUpdate struct {
 // application, the bundle of that agent. Another change of the TLS of an application on that agent
 // waits behind it, so it is measured against what this one stored.
 //
-// Everything runs on the transaction. The checks of the callers never read through the pool, so no
-// enterNestedTx is needed here.
-func (r *TLSRepo) beginTLSChange(ctx context.Context, projectID, appID string) (pgx.Tx, tlsApp, error) {
-	tx, err := r.pool.Begin(ctx)
+// A change that waits for those locks holds a pool connection while it waits, so it takes a place
+// among the open transactions of its kind first (enterNestedTx): a burst of changes to one agent
+// then cannot hold every connection and leave the one that owns the lock, or a save that reads
+// through the pool, without one. The caller ends the transaction with done, which rolls back what was
+// not committed and gives the place back.
+//
+// Everything runs on the transaction. The checks of the callers never read through the pool.
+func (r *TLSRepo) beginTLSChange(ctx context.Context, projectID, appID string) (tx pgx.Tx, a tlsApp, done func(), err error) {
+	leave, err := enterNestedTx(ctx)
 	if err != nil {
-		return nil, tlsApp{}, err
+		return nil, tlsApp{}, nil, err
 	}
-	a, err := readTLSApp(ctx, tx, projectID, appID, true)
+	if tx, err = r.pool.Begin(ctx); err != nil {
+		leave()
+		return nil, tlsApp{}, nil, err
+	}
+	done = func() {
+		_ = tx.Rollback(ctx)
+		leave()
+	}
+	a, err = readTLSApp(ctx, tx, projectID, appID, true)
 	if err == nil && a.agentID != "" {
 		err = lockAgentBundle(ctx, tx, a.agentID)
 	}
 	if err != nil {
-		_ = tx.Rollback(ctx)
-		return nil, tlsApp{}, err
+		done()
+		return nil, tlsApp{}, nil, err
 	}
-	return tx, a, nil
+	return tx, a, done, nil
 }
 
 // UpdateTLS stores new TLS settings of an application, which s must have passed through
@@ -384,11 +386,11 @@ func (r *TLSRepo) UpdateTLS(ctx context.Context, projectID, appID string, s doma
 	if !canonicalIDs(&projectID, &appID) {
 		return TLSUpdate{}, pgx.ErrNoRows
 	}
-	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
+	tx, a, done, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return TLSUpdate{}, err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer done()
 	out := TLSUpdate{Previous: a.AppTLS, AgentID: a.agentID}
 
 	saved := a.AppTLS
@@ -573,11 +575,11 @@ func (r *TLSRepo) InsertCertificate(ctx context.Context, projectID, appID string
 	if !otp.IsBound(sealed) {
 		return CertificateStored{}, errors.New("the key was not sealed")
 	}
-	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
+	tx, a, done, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return CertificateStored{}, err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer done()
 	out := CertificateStored{ReplacedID: a.CertificateID, AgentID: a.agentID}
 
 	for _, h := range a.Hosts {
@@ -655,11 +657,11 @@ func (r *TLSRepo) DeleteCertificate(ctx context.Context, projectID, appID string
 	if !canonicalIDs(&projectID, &appID) {
 		return "", pgx.ErrNoRows
 	}
-	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
+	tx, a, done, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer done()
 	if a.Mode == domain.TLSModeGateway && a.Source == domain.TLSSourceUploaded {
 		return "", ErrCertificateInUse
 	}
@@ -681,11 +683,11 @@ func (r *TLSRepo) RequestACME(ctx context.Context, projectID, appID string, now 
 	if !canonicalIDs(&projectID, &appID) {
 		return TLSUpdate{}, pgx.ErrNoRows
 	}
-	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
+	tx, a, done, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return TLSUpdate{}, err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer done()
 	if len(a.Hosts) == 0 {
 		return TLSUpdate{}, &domain.TLSFieldError{Field: "hosts", Msg: "at least one host is required"}
 	}

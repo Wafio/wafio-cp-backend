@@ -49,6 +49,9 @@ const (
 const (
 	CertFieldChain = "chain_pem"
 	CertFieldKey   = "key_pem"
+	// CertFieldBody names the whole request, for a refusal that is about its size or its form and
+	// not about one of the two texts.
+	CertFieldBody = "body"
 
 	CertReasonBadPEM            = "bad_pem"
 	CertReasonPrivateKeyInChain = "private_key_in_chain"
@@ -63,6 +66,9 @@ const (
 	CertReasonPKCS12            = "pkcs12"
 	CertReasonUnsupportedKey    = "unsupported_key"
 	CertReasonKeyMismatch       = "key_mismatch"
+	// CertReasonBadJSON: the request names a field twice, so there is no telling which of the two
+	// texts a reader would take.
+	CertReasonBadJSON = "bad_json"
 )
 
 // CertificateError is a refused upload. Field is the JSON key of the part that was refused and

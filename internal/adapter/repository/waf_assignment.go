@@ -21,13 +21,13 @@ import (
 // host-bound credential for an uploaded source, hosts and listeners next to its applications), and
 // its status report is dropped, since it described the agent it leaves.
 func (r *WAFRepo) ReplaceAssignment(ctx context.Context, projectID, appID, agentID, mode string, admit func(stored domain.Maintenance) error) error {
-	if admit != nil {
-		leave, err := enterNestedTx(ctx)
-		if err != nil {
-			return err
-		}
-		defer leave()
+	// The row lock and the bundle lock of the new agent are waited for with a connection in hand, so
+	// every move takes a place, whether or not it measures anything.
+	leave, err := enterNestedTx(ctx)
+	if err != nil {
+		return err
 	}
+	defer leave()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -85,6 +85,11 @@ func (r *WAFRepo) ReplaceAssignment(ctx context.Context, projectID, appID, agent
 }
 
 func (r *WAFRepo) ResetAppConfig(ctx context.Context, projectID, appID string) error {
+	leave, err := enterNestedTx(ctx) // it waits for the row of the application, with a connection in hand
+	if err != nil {
+		return err
+	}
+	defer leave()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err

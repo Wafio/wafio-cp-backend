@@ -2,6 +2,7 @@ package httpadapter
 
 import (
 	"context"
+	"crypto/x509"
 
 	"github.com/wafio/wafio-cp-backend/internal/adapter/http/auth"
 	"github.com/wafio/wafio-cp-backend/internal/adapter/http/handlers"
@@ -14,11 +15,20 @@ import (
 type AppOption func(*appOptions)
 
 type appOptions struct {
+	tlsResolver      handlers.HostResolver
+	tlsRoots         *x509.CertPool
 	userStateLoader  auth.UserStateLoader
 	metrics          *metrics.Registry
 	geoRanges        handlers.GeoRangeSource
 	passwordRecovery *application.PasswordRecovery
 	storage          *application.Storage
+}
+
+// WithAppTLS replaces what the TLS endpoints use outside the database: the resolver behind the
+// dns_mismatch warning and the roots that decide whether an uploaded chain is trusted. Nil keeps the
+// system resolver and the system roots. For tests, which must not touch the network.
+func WithAppTLS(resolver handlers.HostResolver, roots *x509.CertPool) AppOption {
+	return func(o *appOptions) { o.tlsResolver, o.tlsRoots = resolver, roots }
 }
 
 // WithStorage replaces the data retention / database size service
