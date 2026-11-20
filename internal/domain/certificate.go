@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/google/uuid"
 )
 
 // Limits of an uploaded certificate. The sizes are the ones the agent enforces on the install. The
@@ -90,11 +92,22 @@ type CertificateUploadInput struct {
 	Roots *x509.CertPool
 }
 
-// CertificateKeyAAD is the context a private key is sealed with. Sealing and opening must build it
-// the same way, so both go through here: a key copied to the row of another certificate or project
-// does not open.
+// CertificateKeyAAD is the context a private key is sealed with, built from the canonical form of
+// the two ids. Sealing and opening must build it the same way, so both go through here: a key copied
+// to the row of another certificate or project does not open.
 func CertificateKeyAAD(projectID, certificateID string) string {
-	return "wafio-app-certificate:" + projectID + ":" + certificateID
+	return "wafio-app-certificate:" + canonicalID(projectID) + ":" + canonicalID(certificateID)
+}
+
+// canonicalID writes a UUID in its lower-case hyphenated form, whatever spelling it came in (upper
+// case, braces, no hyphens). Postgres reads all of them as the same id, so a context built from the
+// spelling of the caller would not match the one the key was sealed with. A text that is no UUID
+// names no row, and stays as it is.
+func canonicalID(id string) string {
+	if u, err := uuid.Parse(id); err == nil {
+		return u.String()
+	}
+	return id
 }
 
 // CertificateInfo describes a chain: what the dashboard shows and what is stored next to it.
@@ -238,12 +251,31 @@ func parseUploadChain(chainPEM []byte) ([]*x509.Certificate, error) {
 		}
 		certs = append(certs, c)
 	}
+	certs = withoutRoot(certs)
 	// What is stored and sent to the agent is the chain written again, which can be longer than the
 	// text that came in (one long line of base64 becomes lines of 64).
 	if len(encodeChain(certs)) > CertChainMaxBytes {
 		return nil, certErr(CertFieldChain, CertReasonTooLarge, "the chain is larger than %d KiB once it is written again", CertChainMaxBytes>>10)
 	}
 	return certs, nil
+}
+
+// withoutRoot drops the last certificate of a chain of two or more when it is a root: issued by itself
+// and the one that signed the certificate before it. A client never uses a root that the server
+// sends, it has its own, and some bundles still end with a root that is signed with SHA-1, so such a
+// root is neither stored nor judged (its own signature and dates are nobody's concern). A self-issued
+// last certificate that did not sign the one before it is an ordinary certificate and stays, with
+// every check. A chain of one certificate has no root to drop, however it is signed.
+func withoutRoot(certs []*x509.Certificate) []*x509.Certificate {
+	n := len(certs)
+	if n < 2 {
+		return certs
+	}
+	last := certs[n-1]
+	if bytes.Equal(last.RawSubject, last.RawIssuer) && certs[n-2].CheckSignatureFrom(last) == nil {
+		return certs[:n-1]
+	}
+	return certs
 }
 
 func encodeChain(certs []*x509.Certificate) []byte {
@@ -263,16 +295,10 @@ func weakSignature(c *x509.Certificate) bool {
 	return false
 }
 
-// checkUploadChain checks what the chain itself must satisfy. The last certificate of a longer
-// chain is left out of the signature and date checks when it is a trust anchor: it verifies its own
-// signature (a certificate that only carries the same name as subject and issuer proves nothing),
-// and nobody checks the dates of an anchor. An anchor that is signed with SHA-1 does not verify
-// its own signature in Go, so it is refused with the weak ones.
+// checkUploadChain checks what the chain itself must satisfy. A root at its end is already gone
+// (withoutRoot), so every certificate left is judged.
 func checkUploadChain(certs []*x509.Certificate, now time.Time) error {
 	judged := certs
-	if n := len(certs); n > 1 && certs[n-1].CheckSignatureFrom(certs[n-1]) == nil {
-		judged = certs[:n-1]
-	}
 	for i, c := range judged {
 		if weakSignature(c) {
 			return certErr(CertFieldChain, CertReasonWeakSignature, "certificate %d of the chain is signed with SHA-1 or MD5", i+1)
@@ -452,7 +478,10 @@ func looksBinary(b []byte) bool {
 func uploadKeyType(key crypto.Signer) (string, error) {
 	switch k := key.(type) {
 	case *rsa.PrivateKey:
-		if bits := k.N.BitLen(); bits >= CertMinKeyRSABits && bits <= CertMaxKeyRSABits && k.E >= certMinRSAExponent && int64(k.E) < certMaxRSAExponent && k.E%2 == 1 {
+		bits := k.N.BitLen()
+		// ring reads keys of two primes only.
+		if len(k.Primes) == 2 && bits >= CertMinKeyRSABits && bits <= CertMaxKeyRSABits &&
+			k.E >= certMinRSAExponent && int64(k.E) < certMaxRSAExponent && k.E%2 == 1 {
 			return fmt.Sprintf("rsa-%d", bits), nil
 		}
 	case *ecdsa.PrivateKey:

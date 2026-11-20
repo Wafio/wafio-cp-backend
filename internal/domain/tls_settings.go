@@ -266,8 +266,9 @@ func wildcardTakes(wildcard, other netip.Addr) bool {
 	return false
 }
 
-// listenersClash is for a listener of one kind against one of the other kind (HTTPS against
-// redirect): they can never be the same listener, so the same address clashes too.
+// listenersClash is for a listener of one kind against one of another kind (HTTPS, redirect or
+// plain): they can never be the same listener, so the same address clashes too, and so does an
+// overlap. Linux refuses the second bind whatever kind of listener it is for.
 func listenersClash(a, b string) bool {
 	return a != "" && b != "" && (a == b || listenersOverlap(a, b))
 }
@@ -281,10 +282,10 @@ func listenersClash(a, b string) bool {
 // they are refused when the setting is saved: a listener address is used by one kind of listener
 // only (a plain listener, HTTPS, or a redirect), except that several applications may share one
 // HTTPS listener and one redirect listener by naming the same address; two addresses on one port
-// cannot both be bound when one of them is a wildcard; a host once per HTTPS listener; equal
-// timeouts and limits on a shared HTTPS listener; and a host that one redirect listener sends to
-// one HTTPS port only. A plain listener only clashes with an HTTPS or redirect listener of the
-// same address.
+// cannot both be bound when one of them is a wildcard (a plain listener counts as well); a host
+// once per HTTPS listener; equal timeouts and limits on a shared HTTPS listener; and a host that
+// one redirect listener sends to one HTTPS port only. Two plain listeners are only compared by the
+// database, which refuses the same address twice on an agent.
 func CheckTLSPlacement(self TLSSite, others []TLSSite, plain []PlainListener) error {
 	gateway := self.Listen != ""
 	if gateway {
@@ -294,12 +295,11 @@ func CheckTLSPlacement(self TLSSite, others []TLSSite, plain []PlainListener) er
 			if field.addr == "" {
 				continue
 			}
-			ap, err := netip.ParseAddrPort(field.addr)
-			if err != nil {
+			if _, err := netip.ParseAddrPort(field.addr); err != nil {
 				return tlsErr(field.name, "must be ip:port or [ipv6]:port")
 			}
 			for _, p := range plain {
-				if p.Addr == ap {
+				if listenersClash(field.addr, p.Addr.String()) {
 					return &TLSConflictError{Code: TLSConflictListen, Field: field.name, Address: field.addr, OtherAppID: p.AppID, OtherAppName: p.Name}
 				}
 			}
@@ -316,7 +316,7 @@ func CheckTLSPlacement(self TLSSite, others []TLSSite, plain []PlainListener) er
 				continue
 			}
 			for _, addr := range []string{o.Listen, o.RedirectListen} {
-				if ap, err := netip.ParseAddrPort(addr); err == nil && ap == p.Addr {
+				if listenersClash(addr, p.Addr.String()) {
 					return &TLSConflictError{Code: TLSConflictListen, Field: "listen_port", Address: addr, OtherAppID: o.AppID, OtherAppName: o.Name}
 				}
 			}

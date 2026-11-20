@@ -289,8 +289,14 @@ func TestParseCertificateUploadAcceptsChainShapes(t *testing.T) {
 		} else {
 			in.KeyPEM = key
 		}
-		if _, err := ParseCertificateUpload(in); err != nil {
+		up, err := ParseCertificateUpload(in)
+		if err != nil {
 			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		// A root is never stored: clients use their own.
+		if strings.Contains(up.ChainPEM, string(pemOf("CERTIFICATE", c.root.der))) {
+			t.Errorf("%s: the root is in the stored chain", name)
 		}
 	}
 }
@@ -420,29 +426,59 @@ func TestParseCertificateUploadRefusesTheChain(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("a SHA-1 trust anchor at the end is refused with the weak ones", func(t *testing.T) {
-		// Go does not verify a SHA-1 self-signature, so such an anchor is not exempt from the check.
-		_, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(rsaLeaf, rsaInter, withSignatureOID(t, rsaRoot, 0x05)), KeyPEM: rsaKey, Now: certNow})
-		wantCertErr(t, err, CertFieldChain, CertReasonWeakSignature)
+	t.Run("a root signed with SHA-1 at the end is dropped and not judged", func(t *testing.T) {
+		// A bundle that ends with a SHA-1 root, as some CA bundles still do. Go does not verify a
+		// SHA-1 signature, and the root's own signature is nobody's concern: clients use their own.
+		root := withSignatureOID(t, rsaRoot, 0x05)
+		up, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(rsaLeaf, rsaInter, root), KeyPEM: rsaKey, Now: certNow})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if up.ChainPEM != string(chainPEM(rsaLeaf, rsaInter)) {
+			t.Errorf("the root is still in the stored chain:\n%s", up.ChainPEM)
+		}
+		info, err := ParseCertificateChain(chainPEM(rsaLeaf, rsaInter, root), certNow, nil)
+		if err != nil || info.ChainPEM != string(chainPEM(rsaLeaf, rsaInter)) {
+			t.Errorf("a reported chain: %v", err)
+		}
 	})
-	t.Run("an anchor that only carries the same name twice is judged like any certificate", func(t *testing.T) {
+	t.Run("a root that signed the certificate before it is dropped whatever its own signature", func(t *testing.T) {
 		realKey, fakeKey := testECKey(t, elliptic.P256()), testECKey(t, elliptic.P256())
-		name := pkix.Name{CommonName: "Fake Root"}
+		name := pkix.Name{CommonName: "Odd Root"}
 		tmpl := &x509.Certificate{SerialNumber: big.NewInt(77), Subject: name, NotBefore: certNow.Add(-4000 * 24 * time.Hour), NotAfter: certNow.Add(-24 * time.Hour),
 			BasicConstraintsValid: true, IsCA: true, KeyUsage: x509.KeyUsageCertSign}
-		// Issuer and subject are the same name, but the signature is made by another key.
+		// Issuer and subject are the same name, the dates are past, and the signature is made by another key.
 		der, err := x509.CreateCertificate(rand.Reader, tmpl, &x509.Certificate{Subject: name}, realKey.Public(), fakeKey)
 		if err != nil {
 			t.Fatal(err)
 		}
 		parsed, _ := x509.ParseCertificate(der)
-		fake := &testCert{der: der, cert: parsed, key: realKey}
+		odd := &testCert{der: der, cert: parsed, key: realKey}
 		if !bytes.Equal(parsed.RawSubject, parsed.RawIssuer) || parsed.CheckSignatureFrom(parsed) == nil {
 			t.Fatal("the test certificate is not what the test needs")
 		}
-		leaf := certSpec{cn: "shop.example.com", dns: []string{"shop.example.com"}, parent: fake}.make(t)
-		_, err = ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(leaf, fake), KeyPEM: pkcs8PEM(t, leaf.key), Now: certNow})
-		wantCertErr(t, err, CertFieldChain, CertReasonExpired)
+		leaf := certSpec{cn: "shop.example.com", dns: []string{"shop.example.com"}, parent: odd}.make(t)
+		up, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(leaf, odd), KeyPEM: pkcs8PEM(t, leaf.key), Now: certNow})
+		if err != nil || up.ChainPEM != string(chainPEM(leaf)) {
+			t.Fatalf("root that signed the leaf: %v", err)
+		}
+	})
+	t.Run("a self-issued last certificate that did not sign the one before it is judged like any other", func(t *testing.T) {
+		// SHA-1, and it did not sign rsaLeaf (rsaInter did).
+		_, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(rsaLeaf, withSignatureOID(t, rsaRoot, 0x05)), KeyPEM: rsaKey, Now: certNow})
+		wantCertErr(t, err, CertFieldChain, CertReasonWeakSignature)
+		// Sound, and still not the issuer of the certificate before it.
+		_, err = ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(rsaLeaf, rsaRoot), KeyPEM: rsaKey, Now: certNow})
+		wantCertErr(t, err, CertFieldChain, CertReasonChainOrder)
+		// A self-issued certificate that signed nothing in the chain is no root, whatever its dates.
+		old := certSpec{cn: "Old Root", ca: true, notBefore: certNow.Add(-4000 * 24 * time.Hour), notAfter: certNow.Add(-24 * time.Hour)}.make(t)
+		_, err = ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(c.leaf, old), KeyPEM: key, Now: certNow})
+		wantCertErr(t, err, CertFieldChain, CertReasonChainOrder)
+	})
+	t.Run("a self-signed certificate alone is no root, signed with SHA-1 or not", func(t *testing.T) {
+		self := certSpec{cn: "self.example.com", dns: []string{"self.example.com"}, key: testRSAKey(t, 0)}.make(t)
+		_, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(withSignatureOID(t, self, 0x05)), KeyPEM: pkcs8PEM(t, self.key), Now: certNow})
+		wantCertErr(t, err, CertFieldChain, CertReasonWeakSignature)
 	})
 	t.Run("an expired trust anchor at the end is left alone", func(t *testing.T) {
 		oldRoot := certSpec{cn: "Old Root", ca: true, notBefore: certNow.Add(-4000 * 24 * time.Hour), notAfter: certNow.Add(-24 * time.Hour)}.make(t)
@@ -542,7 +578,7 @@ func TestParseCertificateUploadRefusesTheKey(t *testing.T) {
 
 func TestUploadKeyTypeBounds(t *testing.T) {
 	withKey := func(bits uint, e int) *rsa.PrivateKey {
-		return &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), bits-1), E: e}}
+		return &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), bits-1), E: e}, Primes: []*big.Int{big.NewInt(3), big.NewInt(5)}}
 	}
 	for bits, want := range map[uint]string{2048: "rsa-2048", 3072: "rsa-3072", 4096: "rsa-4096"} {
 		if got, err := uploadKeyType(withKey(bits, 65537)); err != nil || got != want {
@@ -568,7 +604,7 @@ func TestUploadKeyTypeBounds(t *testing.T) {
 // An RSA key of 4096 bits is the largest the agent loads; the message says so.
 func TestRSAKeyAbove4096IsRefusedInAnUpload(t *testing.T) {
 	c := newTestChain(t, "shop.example.com")
-	_, err := uploadKeyType(&rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), 4999), E: 65537}})
+	_, err := uploadKeyType(&rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), 4999), E: 65537}, Primes: []*big.Int{big.NewInt(3), big.NewInt(5)}})
 	ce := wantCertErr(t, err, CertFieldKey, CertReasonUnsupportedKey)
 	if !strings.Contains(ce.Msg, "4096") || strings.Contains(ce.Msg, "8192") {
 		t.Errorf("message %q", ce.Msg)
@@ -898,5 +934,58 @@ func TestFormatCharactersAreDroppedFromShownText(t *testing.T) {
 	}
 	if got := printable("a\u00adb\u2028c\ufeffd", 100); strings.ContainsAny(got, "\u00ad\ufeff") {
 		t.Errorf("printable kept a format character: %q", got)
+	}
+}
+
+// ring reads RSA keys of two primes only.
+func TestRSAKeyWithMoreThanTwoPrimesIsRefused(t *testing.T) {
+	three := &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), 2047), E: 65537}, Primes: []*big.Int{big.NewInt(3), big.NewInt(5), big.NewInt(7)}}
+	_, err := uploadKeyType(three)
+	wantCertErr(t, err, CertFieldKey, CertReasonUnsupportedKey)
+	for _, primes := range [][]*big.Int{nil, {big.NewInt(3)}, {big.NewInt(3), big.NewInt(5), big.NewInt(7), big.NewInt(11)}} {
+		three.Primes = primes
+		_, err := uploadKeyType(three)
+		wantCertErr(t, err, CertFieldKey, CertReasonUnsupportedKey)
+	}
+
+	// A real three-prime key, as openssl genrsa -primes 3 writes it, when this Go still reads one.
+	key, err := rsa.GenerateMultiPrimeKey(rand.Reader, 3, 2048)
+	if err != nil {
+		t.Skipf("this Go makes no three-prime key: %v", err)
+	}
+	c := newTestChain(t, "shop.example.com")
+	leaf := certSpec{cn: "shop.example.com", dns: []string{"shop.example.com"}, key: key, parent: c.inter}.make(t)
+	_, err = ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(leaf, c.inter), KeyPEM: pemOf("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key)), Now: certNow})
+	var ce *CertificateError
+	if !errors.As(err, &ce) || ce.Field != CertFieldKey || (ce.Reason != CertReasonUnsupportedKey && ce.Reason != CertReasonBadPEM) {
+		t.Fatalf("a three-prime key: %v", err)
+	}
+	t.Logf("a three-prime key from PKCS#1 is refused as %s", ce.Reason)
+	// The same key written as PKCS#8.
+	if der, err := x509.MarshalPKCS8PrivateKey(key); err == nil {
+		_, err = ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(leaf, c.inter), KeyPEM: pemOf("PRIVATE KEY", der), Now: certNow})
+		if !errors.As(err, &ce) || ce.Field != CertFieldKey {
+			t.Fatalf("a three-prime key as PKCS#8: %v", err)
+		}
+	}
+}
+
+func TestCertificateKeyAADUsesTheCanonicalIDs(t *testing.T) {
+	const project, cert = "0a1b2c3d-4e5f-6789-abcd-ef0123456789", "f0e1d2c3-b4a5-6978-8091-a2b3c4d5e6f7"
+	want := "wafio-app-certificate:" + project + ":" + cert
+	for name, tt := range map[string][2]string{
+		"canonical":       {project, cert},
+		"upper case":      {strings.ToUpper(project), strings.ToUpper(cert)},
+		"braces":          {"{" + project + "}", "{" + cert + "}"},
+		"no hyphens":      {strings.ReplaceAll(project, "-", ""), strings.ReplaceAll(cert, "-", "")},
+		"mixed spellings": {"{" + strings.ToUpper(project) + "}", cert},
+	} {
+		if got := CertificateKeyAAD(tt[0], tt[1]); got != want {
+			t.Errorf("%s: %q", name, got)
+		}
+	}
+	// A text that is no UUID names no row and is left as it is.
+	if got := CertificateKeyAAD("x", "y"); got != "wafio-app-certificate:x:y" {
+		t.Errorf("not UUIDs: %q", got)
 	}
 }
