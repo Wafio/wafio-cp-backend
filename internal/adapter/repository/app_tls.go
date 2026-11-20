@@ -884,28 +884,18 @@ func (r *TLSRepo) GetTLSStatus(ctx context.Context, projectID, appID string) (*T
 	return &s, nil
 }
 
-// ExpiryCandidate is the certificate of an application in gateway mode that the expiry warnings
-// look at: the uploaded certificate for an uploaded source, the chain the agent reported for acme.
-type ExpiryCandidate struct {
-	ProjectID, AppID, AppName string
-	Hosts                     []string
-	Source                    string
-	// CertificateID is set for an uploaded source only.
-	CertificateID string
-	LeafSHA256    string
-	NotAfter      time.Time
-	// NotifiedDays is the last threshold that was mailed for this certificate, nil when none.
-	NotifiedDays *int
-}
+// ExpiryCandidate is what the expiry warnings look at, see domain.ExpiryCandidate.
+type ExpiryCandidate = domain.ExpiryCandidate
 
 // ListExpiryCandidates returns the certificate in use of every application in gateway mode that has
 // one, for the background loop that warns before expiry. It reads across projects on purpose; every
 // row carries its project.
 func (r *TLSRepo) ListExpiryCandidates(ctx context.Context) ([]ExpiryCandidate, error) {
-	rows, err := r.pool.Query(ctx, `SELECT a.project_id::text, a.id::text, a.name, a.tls_hosts, a.tls_source,
+	rows, err := r.pool.Query(ctx, `SELECT a.project_id::text, p.name, a.id::text, a.name, a.tls_hosts, a.tls_source,
 		COALESCE(c.id::text, ''), COALESCE(c.leaf_sha256, s.leaf_sha256, ''), COALESCE(c.not_after, s.not_after),
 		COALESCE(c.expiry_notified_days, s.expiry_notified_days)
 		FROM apps a
+		JOIN projects p ON p.id = a.project_id
 		LEFT JOIN app_certificates c ON a.tls_source = 'uploaded' AND c.id = a.tls_certificate_id AND c.app_id = a.id
 			AND c.project_id = a.project_id AND c.replaced_at IS NULL
 		LEFT JOIN app_tls_status s ON a.tls_source = 'acme' AND s.app_id = a.id AND s.project_id = a.project_id
@@ -918,12 +908,21 @@ func (r *TLSRepo) ListExpiryCandidates(ctx context.Context) ([]ExpiryCandidate, 
 	var out []ExpiryCandidate
 	for rows.Next() {
 		var c ExpiryCandidate
-		if err := rows.Scan(&c.ProjectID, &c.AppID, &c.AppName, &c.Hosts, &c.Source, &c.CertificateID, &c.LeafSHA256, &c.NotAfter, &c.NotifiedDays); err != nil {
+		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.AppID, &c.AppName, &c.Hosts, &c.Source, &c.CertificateID, &c.LeafSHA256, &c.NotAfter, &c.NotifiedDays); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// certExpiryLockKey is the advisory lock of the expiry warning pass, apart from the retention lock.
+const certExpiryLockKey int64 = 0x7761_6669_6f63_7865 // "wafiocxe"
+
+// TryExpiryLock takes the cluster-wide lock of the expiry warning pass, so that only one control
+// plane replica mails at a time. ok false means another replica holds it.
+func (r *TLSRepo) TryExpiryLock(ctx context.Context) (func(), bool, error) {
+	return tryAdvisoryLock(ctx, r.pool, certExpiryLockKey)
 }
 
 // MarkExpiryNotified records that the warning for the threshold (in days) was sent for the

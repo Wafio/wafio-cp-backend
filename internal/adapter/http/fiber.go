@@ -652,6 +652,9 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 		registerStorageMetrics(resolveOptions(opts).metrics, storage)
 	}
 
+	// Warns the members of a project before the certificate an application serves expires.
+	newCertificateExpiry(ctx, repo, mailSettings)
+
 	// ── Security data management (admin only) ──
 	if secDataH != nil {
 		adminAPI.Get("/security-data/status", rateReadByUser, secDataH.Status)
