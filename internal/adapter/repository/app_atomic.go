@@ -47,12 +47,25 @@ func (p AppPatch) ApplyTo(row *WAFBundleAppRow) {
 	}
 }
 
+// changesPlacement says whether the patch can change what the agent has to bind: the plain listener
+// or the listener settings in proxy_config, which applications that share a TLS listener must agree on.
+func (p AppPatch) changesPlacement() bool {
+	return p.ListenHost != nil || p.ListenPort != nil || len(p.ProxyConfig) > 0
+}
+
 // UpdateAtomic applies the patch. With admit, the application row is locked first and admit is
 // called with its stored maintenance object and the agent that serves it (empty when none) and its
 // mode, with the bundle of that agent locked (lockAgentBundle), before anything is written; an
-// error from it is returned as it is and nothing changes. A nil admit checks nothing.
+// error from it is returned as it is and nothing changes. A nil admit checks no maintenance rule.
+//
+// A patch that changes the plain listener or proxy_config is also checked, with or without admit,
+// against the other applications of the agent that serves the application (checkTLSFit): the
+// bundle the agent gets afterwards must not name an address twice or give applications that share a
+// TLS listener different limits, because the agent refuses such a bundle as a whole. The row and
+// the bundle are locked for that, and the error is a *domain.TLSConflictError; nothing changes.
 func (r *AppRepo) UpdateAtomic(ctx context.Context, projectID, appID string, patch AppPatch,
 	admit func(stored domain.Maintenance, agentID, mode string) error) error {
+	placement := patch.changesPlacement()
 	if admit != nil {
 		leave, err := enterNestedTx(ctx)
 		if err != nil {
@@ -65,7 +78,8 @@ func (r *AppRepo) UpdateAtomic(ctx context.Context, projectID, appID string, pat
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	if admit != nil {
+	servedBy := ""
+	if admit != nil || placement {
 		var raw []byte
 		if err := tx.QueryRow(ctx, `SELECT maintenance FROM apps WHERE id = $1 AND project_id = $2 FOR UPDATE`, appID, projectID).Scan(&raw); err != nil {
 			return err
@@ -83,9 +97,12 @@ func (r *AppRepo) UpdateAtomic(ctx context.Context, projectID, appID string, pat
 				return err
 			}
 		}
-		if err := admit(stored, agentID, mode); err != nil {
-			return err
+		if admit != nil {
+			if err := admit(stored, agentID, mode); err != nil {
+				return err
+			}
 		}
+		servedBy = agentID
 	}
 	var proxy *string
 	if len(patch.ProxyConfig) > 0 {
@@ -104,6 +121,15 @@ func (r *AppRepo) UpdateAtomic(ctx context.Context, projectID, appID string, pat
 	}
 	if result.RowsAffected() != 1 {
 		return pgx.ErrNoRows
+	}
+	if placement && servedBy != "" {
+		app, err := readTLSApp(ctx, tx, projectID, appID, false)
+		if err != nil {
+			return err
+		}
+		if err := checkTLSFit(ctx, tx, app, servedBy); err != nil {
+			return err
+		}
 	}
 	if patch.Mode != "" {
 		result, err = tx.Exec(ctx, `UPDATE waf_agent_apps SET mode=$3, updated_at=NOW() WHERE app_id=$1 AND agent_id=$2 AND enabled=TRUE`, appID, patch.AgentID, patch.Mode)
