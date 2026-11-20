@@ -101,6 +101,9 @@ func (s *TLSSettings) Normalize() error {
 		if s.RedirectListen == s.Listen {
 			return tlsErr("redirect_listen", "must differ from listen")
 		}
+		if listenersOverlap(s.Listen, s.RedirectListen) {
+			return tlsErr("redirect_listen", "must not use the port of listen on an address that overlaps it")
+		}
 	}
 	return nil
 }
@@ -147,7 +150,12 @@ func checkTLSHost(h string) string {
 	if !strings.Contains(h, ".") {
 		return "must contain at least one dot"
 	}
-	for _, label := range strings.Split(h, ".") {
+	labels := strings.Split(h, ".")
+	// A browser reads a name like 10.1.1 as an address.
+	if last := labels[len(labels)-1]; strings.Trim(last, "0123456789") == "" && last != "" {
+		return "must not end with a label of digits only"
+	}
+	for _, label := range labels {
 		switch {
 		case label == "":
 			return "has an empty label"
@@ -208,7 +216,8 @@ type PlainListener struct {
 // agent only serves the applications of its own project.
 type TLSConflictError struct {
 	Code string
-	// Field is the JSON key of the setting that must change: hosts, listen or redirect_listen.
+	// Field is the JSON key of the setting that must change: hosts, listen or redirect_listen, or
+	// listen_port when it is the plain listener of the application that clashes.
 	Field string
 	// Address is the listener that is shared or taken; Host is the host that clashes. Either may be "".
 	Address, Host string
@@ -227,43 +236,112 @@ func (e *TLSConflictError) Error() string {
 	}
 }
 
-// CheckTLSPlacement checks that self, an application in gateway mode, can run on an agent that also
-// serves others (the other applications in gateway mode on that agent) and plain (the plain
-// listeners of every application on it, self included). It returns a *TLSConflictError.
+// listenersOverlap says whether two different listener addresses cannot both be bound: the same
+// port, and one of them is a wildcard that takes the other. 0.0.0.0 takes every IPv4 address and
+// [::] takes every address, since a socket on it is dual-stack by default on Linux. The same
+// address twice is not an overlap: it is one listener that both applications share, where that is
+// allowed.
+func listenersOverlap(a, b string) bool {
+	if a == b || a == "" || b == "" {
+		return false
+	}
+	x, err := netip.ParseAddrPort(a)
+	if err != nil {
+		return false
+	}
+	y, err := netip.ParseAddrPort(b)
+	if err != nil || x.Port() != y.Port() {
+		return false
+	}
+	return wildcardTakes(x.Addr(), y.Addr()) || wildcardTakes(y.Addr(), x.Addr())
+}
+
+func wildcardTakes(wildcard, other netip.Addr) bool {
+	switch wildcard {
+	case netip.IPv6Unspecified():
+		return true
+	case netip.IPv4Unspecified():
+		return other.Is4()
+	}
+	return false
+}
+
+// listenersClash is for a listener of one kind against one of the other kind (HTTPS against
+// redirect): they can never be the same listener, so the same address clashes too.
+func listenersClash(a, b string) bool {
+	return a != "" && b != "" && (a == b || listenersOverlap(a, b))
+}
+
+// CheckTLSPlacement checks that self can run on an agent that also serves others (the other
+// applications in gateway mode on that agent) and plain (the plain listeners of every application
+// on it, self included). self is in gateway mode when its Listen is set; otherwise it only has its
+// own plain listener, in plain, to place. It returns a *TLSConflictError.
 //
 // The agent applies a bundle as a whole and refuses all of it when one of these does not hold, so
-// they are refused when the setting is saved: no listener address twice, apart from a TLS listener
-// that several applications share and a redirect listener that several applications share; a host
-// once per TLS listener; equal timeouts and limits on a shared TLS listener; and a host that one
-// redirect listener sends to one HTTPS port only.
+// they are refused when the setting is saved: a listener address is used by one kind of listener
+// only (a plain listener, HTTPS, or a redirect), except that several applications may share one
+// HTTPS listener and one redirect listener by naming the same address; two addresses on one port
+// cannot both be bound when one of them is a wildcard; a host once per HTTPS listener; equal
+// timeouts and limits on a shared HTTPS listener; and a host that one redirect listener sends to
+// one HTTPS port only. A plain listener only clashes with an HTTPS or redirect listener of the
+// same address.
 func CheckTLSPlacement(self TLSSite, others []TLSSite, plain []PlainListener) error {
-	for _, field := range []struct {
-		name, addr string
-	}{{"listen", self.Listen}, {"redirect_listen", self.RedirectListen}} {
-		if field.addr == "" {
-			continue
-		}
-		ap, err := netip.ParseAddrPort(field.addr)
-		if err != nil {
-			return tlsErr(field.name, "must be ip:port or [ipv6]:port")
-		}
-		for _, p := range plain {
-			if p.Addr == ap {
-				return &TLSConflictError{Code: TLSConflictListen, Field: field.name, Address: field.addr, OtherAppID: p.AppID, OtherAppName: p.Name}
+	gateway := self.Listen != ""
+	if gateway {
+		for _, field := range []struct {
+			name, addr string
+		}{{"listen", self.Listen}, {"redirect_listen", self.RedirectListen}} {
+			if field.addr == "" {
+				continue
+			}
+			ap, err := netip.ParseAddrPort(field.addr)
+			if err != nil {
+				return tlsErr(field.name, "must be ip:port or [ipv6]:port")
+			}
+			for _, p := range plain {
+				if p.Addr == ap {
+					return &TLSConflictError{Code: TLSConflictListen, Field: field.name, Address: field.addr, OtherAppID: p.AppID, OtherAppName: p.Name}
+				}
 			}
 		}
+	}
+
+	// The plain listener of self against the HTTPS and redirect listeners of the others.
+	for _, p := range plain {
+		if p.AppID != self.AppID {
+			continue
+		}
+		for _, o := range others {
+			if o.AppID == self.AppID {
+				continue
+			}
+			for _, addr := range []string{o.Listen, o.RedirectListen} {
+				if ap, err := netip.ParseAddrPort(addr); err == nil && ap == p.Addr {
+					return &TLSConflictError{Code: TLSConflictListen, Field: "listen_port", Address: addr, OtherAppID: o.AppID, OtherAppName: o.Name}
+				}
+			}
+		}
+	}
+	if !gateway {
+		return nil
 	}
 
 	for _, o := range others {
 		if o.AppID == self.AppID {
 			continue
 		}
-		// A listener is either an HTTPS listener or a redirect listener, never both.
-		if self.RedirectListen != "" && self.RedirectListen == o.Listen {
-			return &TLSConflictError{Code: TLSConflictListen, Field: "redirect_listen", Address: o.Listen, OtherAppID: o.AppID, OtherAppName: o.Name}
+		clash := func(field, addr string) error {
+			return &TLSConflictError{Code: TLSConflictListen, Field: field, Address: addr, OtherAppID: o.AppID, OtherAppName: o.Name}
 		}
-		if o.RedirectListen != "" && o.RedirectListen == self.Listen {
-			return &TLSConflictError{Code: TLSConflictListen, Field: "listen", Address: self.Listen, OtherAppID: o.AppID, OtherAppName: o.Name}
+		switch {
+		case listenersClash(self.RedirectListen, o.Listen):
+			return clash("redirect_listen", o.Listen)
+		case listenersClash(o.RedirectListen, self.Listen):
+			return clash("listen", self.Listen)
+		case listenersOverlap(self.Listen, o.Listen):
+			return clash("listen", o.Listen)
+		case listenersOverlap(self.RedirectListen, o.RedirectListen):
+			return clash("redirect_listen", o.RedirectListen)
 		}
 	}
 

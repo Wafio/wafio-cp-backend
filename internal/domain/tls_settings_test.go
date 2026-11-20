@@ -170,7 +170,7 @@ func TestCheckTLSPlacement(t *testing.T) {
 		{name: "same host on another listener",
 			others: []TLSSite{site("b", "0.0.0.0:8443", "", big, "shop.example.com")}},
 		{name: "the other listener may differ in limits",
-			others: []TLSSite{site("b", "10.0.0.1:443", "", big, "blog.example.com")}},
+			others: []TLSSite{site("b", "10.0.0.1:8443", "", big, "blog.example.com")}},
 		{name: "a host on a shared listener",
 			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "x.example.com", "www.example.com")},
 			code:   TLSConflictHost, field: "hosts", host: "www.example.com", other: "b"},
@@ -200,13 +200,56 @@ func TestCheckTLSPlacement(t *testing.T) {
 		{name: "two ports on one redirect listener for different hosts",
 			others: []TLSSite{site("b", "0.0.0.0:8443", "0.0.0.0:80", big, "blog.example.com")}},
 		{name: "the same port on two addresses sends a host to one port",
-			others: []TLSSite{site("b", "10.0.0.1:443", "0.0.0.0:80", std, "www.example.com")}},
+			self:   site("self", "10.0.0.5:443", "0.0.0.0:80", std, "shop.example.com", "www.example.com"),
+			others: []TLSSite{site("b", "10.0.0.6:443", "0.0.0.0:80", std, "www.example.com")}},
+		// Two different addresses on one port cannot both be bound when one of them is a wildcard.
+		{name: "a wildcard HTTPS listener and a specific one on its port",
+			others: []TLSSite{site("b", "10.0.0.1:443", "", std, "blog.example.com")},
+			code:   TLSConflictListen, field: "listen", other: "b"},
+		{name: "a specific HTTPS listener and a wildcard on its port",
+			self:   site("self", "10.0.0.1:443", "", std, "shop.example.com"),
+			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "blog.example.com")},
+			code:   TLSConflictListen, field: "listen", other: "b"},
+		{name: "an IPv6 wildcard takes an IPv4 address",
+			self:   site("self", "[::]:443", "", std, "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.1:443", "", std, "blog.example.com")},
+			code:   TLSConflictListen, field: "listen", other: "b"},
+		{name: "the two wildcards",
+			self:   site("self", "[::]:443", "", std, "shop.example.com"),
+			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "blog.example.com")},
+			code:   TLSConflictListen, field: "listen", other: "b"},
+		{name: "an IPv4 wildcard does not take an IPv6 address",
+			others: []TLSSite{site("b", "[2001:db8::1]:443", "", std, "blog.example.com")}},
+		{name: "two specific addresses on one port",
+			self:   site("self", "10.0.0.1:443", "", std, "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.2:443", "", big, "blog.example.com")}},
+		{name: "a wildcard on another port",
+			others: []TLSSite{site("b", "10.0.0.1:8443", "", std, "blog.example.com")}},
+		{name: "the same wildcard address is one shared listener",
+			others: []TLSSite{site("b", "0.0.0.0:443", "", std, "blog.example.com")}},
+		{name: "wildcard and specific redirect listeners on one port",
+			others: []TLSSite{site("b", "0.0.0.0:8443", "10.0.0.1:80", std, "blog.example.com")},
+			code:   TLSConflictListen, field: "redirect_listen", other: "b"},
+		{name: "a redirect listener that overlaps the HTTPS listener of another",
+			self:   site("self", "10.0.0.5:443", "0.0.0.0:8080", std, "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.9:8080", "", std, "blog.example.com")},
+			code:   TLSConflictListen, field: "redirect_listen", other: "b"},
+		{name: "an HTTPS listener that overlaps the redirect listener of another",
+			self:   site("self", "10.0.0.5:8080", "", std, "shop.example.com"),
+			others: []TLSSite{site("b", "10.0.0.9:443", "0.0.0.0:8080", std, "blog.example.com")},
+			code:   TLSConflictListen, field: "listen", other: "b"},
+		{name: "a wildcard HTTPS listener does not touch a plain listener on another address",
+			plain: []PlainListener{plain("p", "10.0.0.1:443")}},
 		{name: "the application itself among the others is skipped",
 			others: []TLSSite{site("self", "0.0.0.0:443", "0.0.0.0:80", big, "shop.example.com")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := CheckTLSPlacement(self, tt.others, tt.plain)
+			s := self
+			if tt.self.AppID != "" {
+				s = tt.self
+			}
+			err := CheckTLSPlacement(s, tt.others, tt.plain)
 			if tt.code == "" {
 				if err != nil {
 					t.Fatalf("refused: %v", err)
@@ -253,5 +296,115 @@ func TestListenerLimitsOfUsesTheEffectiveValues(t *testing.T) {
 	other, _ := ParseProxyConfig([]byte(`{"read_buf":32768}`))
 	if ListenerLimitsOf(other) == ListenerLimitsOf(empty) {
 		t.Error("read_buf is not compared")
+	}
+}
+
+// An application that is not in gateway mode only has its plain listener to place, which must not be
+// an address that an HTTPS or redirect listener of the agent uses.
+func TestCheckTLSPlacementOfAPlainListener(t *testing.T) {
+	std := ListenerLimits{ReadMs: 1}
+	mover := TLSSite{AppID: "mover", Name: "app-mover"}
+	gateway := site("g", "0.0.0.0:443", "0.0.0.0:80", std, "shop.example.com")
+	tests := []struct {
+		name   string
+		self   TLSSite
+		plain  []PlainListener
+		others []TLSSite
+		field  string
+	}{
+		{"the HTTPS listener of another", mover, []PlainListener{plain("mover", "0.0.0.0:443")}, []TLSSite{gateway}, "listen_port"},
+		{"the redirect listener of another", mover, []PlainListener{plain("mover", "0.0.0.0:80")}, []TLSSite{gateway}, "listen_port"},
+		{"another address", mover, []PlainListener{plain("mover", "127.0.0.1:443")}, []TLSSite{gateway}, ""},
+		{"another port", mover, []PlainListener{plain("mover", "0.0.0.0:8080")}, []TLSSite{gateway}, ""},
+		{"no plain listener", mover, nil, []TLSSite{gateway}, ""},
+		{"a plain listener of another application", mover, []PlainListener{plain("other", "0.0.0.0:443")}, []TLSSite{gateway}, ""},
+		{"an application in gateway mode with its own plain listener", site("self", "0.0.0.0:9443", "", std, "a.example.com"),
+			[]PlainListener{plain("self", "0.0.0.0:443")}, []TLSSite{gateway}, "listen_port"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckTLSPlacement(tt.self, tt.others, tt.plain)
+			if tt.field == "" {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			var ce *TLSConflictError
+			if !errors.As(err, &ce) || ce.Code != TLSConflictListen || ce.Field != tt.field || ce.OtherAppID != "g" {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	// The hosts and limits of an application that has no HTTPS listener are nobody's business.
+	other := site("o", "0.0.0.0:443", "", ListenerLimits{ReadMs: 9}, "shop.example.com")
+	if err := CheckTLSPlacement(TLSSite{AppID: "x", Name: "app-x", Hosts: []string{"shop.example.com"}}, []TLSSite{other}, nil); err != nil {
+		t.Errorf("a proxy application was judged by hosts: %v", err)
+	}
+}
+
+func TestTLSHostWithADigitsOnlyLastLabelIsRefused(t *testing.T) {
+	for _, h := range []string{"10.1.1", "shop.123", "a.example.123", "a.b.0", "1.2.3.04"} {
+		s := TLSSettings{Mode: "proxy", Hosts: []string{h}}
+		var fe *TLSFieldError
+		if err := s.Normalize(); !errors.As(err, &fe) || fe.Field != "hosts" {
+			t.Errorf("%q: %v", h, err)
+		}
+	}
+	for _, h := range []string{"123.example.com", "a.b1", "shop.c0m", "x.1a", "1a.2b", "a-1.example.org"} {
+		s := TLSSettings{Mode: "proxy", Hosts: []string{h}}
+		if err := s.Normalize(); err != nil {
+			t.Errorf("%q: %v", h, err)
+		}
+	}
+}
+
+func TestNormalizeRefusesOverlappingHTTPSAndRedirectListeners(t *testing.T) {
+	for _, tt := range []struct{ listen, redirect string }{
+		{"0.0.0.0:443", "10.0.0.1:443"},
+		{"10.0.0.1:443", "0.0.0.0:443"},
+		{"[::]:443", "10.0.0.1:443"},
+		{"[::]:443", "0.0.0.0:443"},
+	} {
+		s := TLSSettings{Mode: "proxy", Listen: tt.listen, RedirectListen: tt.redirect}
+		var fe *TLSFieldError
+		if err := s.Normalize(); !errors.As(err, &fe) || fe.Field != "redirect_listen" {
+			t.Errorf("%s and %s: %v", tt.listen, tt.redirect, err)
+		}
+	}
+	for _, tt := range []struct{ listen, redirect string }{
+		{"0.0.0.0:443", "0.0.0.0:80"},
+		{"10.0.0.1:443", "10.0.0.2:443"},
+		{"0.0.0.0:443", "[2001:db8::1]:443"},
+	} {
+		s := TLSSettings{Mode: "proxy", Listen: tt.listen, RedirectListen: tt.redirect}
+		if err := s.Normalize(); err != nil {
+			t.Errorf("%s and %s: %v", tt.listen, tt.redirect, err)
+		}
+	}
+}
+
+func TestListenersOverlap(t *testing.T) {
+	for _, tt := range []struct {
+		a, b string
+		want bool
+	}{
+		{"0.0.0.0:443", "10.0.0.1:443", true},
+		{"10.0.0.1:443", "0.0.0.0:443", true},
+		{"[::]:443", "10.0.0.1:443", true},
+		{"[::]:443", "[2001:db8::1]:443", true},
+		{"[::]:443", "0.0.0.0:443", true},
+		{"0.0.0.0:443", "[::]:443", true},
+		{"0.0.0.0:443", "[2001:db8::1]:443", false},
+		{"0.0.0.0:443", "0.0.0.0:443", false},
+		{"0.0.0.0:443", "10.0.0.1:444", false},
+		{"10.0.0.1:443", "10.0.0.2:443", false},
+		{"", "0.0.0.0:443", false},
+		{"0.0.0.0:443", "", false},
+		{"not an address", "0.0.0.0:443", false},
+	} {
+		if got := listenersOverlap(tt.a, tt.b); got != tt.want {
+			t.Errorf("listenersOverlap(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
 	}
 }

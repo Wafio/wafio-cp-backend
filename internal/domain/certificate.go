@@ -18,8 +18,10 @@ import (
 	"unicode"
 )
 
-// Limits of an uploaded certificate. They are the limits the agent enforces on the install, so a
-// certificate that passes here is not refused there.
+// Limits of an uploaded certificate. The sizes are the ones the agent enforces on the install. The
+// key types are narrower than what Go reads: the agent loads keys with rustls and ring, which take
+// RSA of 2048 to 4096 bits with a public exponent of at least 65537, ECDSA P-256 and P-384, and
+// nothing else.
 const (
 	CertUploadMaxBytes = 96 << 10 // the whole request body, both PEM texts and the JSON around them
 	CertChainMaxBytes  = 64 << 10
@@ -28,6 +30,17 @@ const (
 	// A certificate that is valid from a moment a day ahead is accepted, so a clock that runs a
 	// little behind does not turn a fresh certificate away.
 	CertNotYetValidSlack = 24 * time.Hour
+
+	// CertMaxChainRSABits caps the RSA modulus of any certificate in a chain. Checking a signature
+	// costs time that grows steeply with the modulus, and a chain of 64 KiB can hold one of half a
+	// million bits.
+	CertMaxChainRSABits = 8192
+	// The RSA moduli the server key may have.
+	CertMinKeyRSABits = 2048
+	CertMaxKeyRSABits = 4096
+	// ring takes a public exponent that is odd, at least 65537 and below 2^33.
+	certMinRSAExponent = 65537
+	certMaxRSAExponent = 1 << 33
 )
 
 // Fields and reasons of a CertificateError. The HTTP API answers 400 INVALID_CERTIFICATE with them.
@@ -141,6 +154,7 @@ func ParseCertificateUpload(in CertificateUploadInput) (*CertificateUpload, erro
 	if err != nil {
 		return nil, certErr(CertFieldKey, CertReasonBadPEM, "the private key cannot be written again")
 	}
+	defer clear(keyDER)
 
 	return &CertificateUpload{
 		CertificateInfo: describeChain(certs, in.Now, in.Roots),
@@ -162,14 +176,10 @@ func ParseCertificateChain(chainPEM []byte, now time.Time, roots *x509.CertPool)
 }
 
 func describeChain(certs []*x509.Certificate, now time.Time, roots *x509.CertPool) CertificateInfo {
-	var chain bytes.Buffer
-	for _, c := range certs {
-		_ = pem.Encode(&chain, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
-	}
 	leaf := certs[0]
 	sum := sha256.Sum256(leaf.Raw)
 	return CertificateInfo{
-		ChainPEM:   chain.String(),
+		ChainPEM:   string(encodeChain(certs)),
 		LeafSHA256: hex.EncodeToString(sum[:]),
 		Names:      CertificateNames(leaf),
 		Issuer:     CertificateIssuer(leaf),
@@ -222,9 +232,26 @@ func parseUploadChain(chainPEM []byte) ([]*x509.Certificate, error) {
 		if err != nil {
 			return nil, certErr(CertFieldChain, CertReasonBadPEM, "certificate %d of the chain cannot be read", i+1)
 		}
+		// Before anything is verified: a signature check with a huge modulus is the expensive part.
+		if pub, ok := c.PublicKey.(*rsa.PublicKey); ok && pub.N.BitLen() > CertMaxChainRSABits {
+			return nil, certErr(CertFieldChain, CertReasonTooLarge, "certificate %d of the chain has an RSA key of more than %d bits", i+1, CertMaxChainRSABits)
+		}
 		certs = append(certs, c)
 	}
+	// What is stored and sent to the agent is the chain written again, which can be longer than the
+	// text that came in (one long line of base64 becomes lines of 64).
+	if len(encodeChain(certs)) > CertChainMaxBytes {
+		return nil, certErr(CertFieldChain, CertReasonTooLarge, "the chain is larger than %d KiB once it is written again", CertChainMaxBytes>>10)
+	}
 	return certs, nil
+}
+
+func encodeChain(certs []*x509.Certificate) []byte {
+	var chain bytes.Buffer
+	for _, c := range certs {
+		_ = pem.Encode(&chain, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+	}
+	return chain.Bytes()
 }
 
 // weakSignature says whether a certificate is signed with SHA-1 or MD5, which no browser accepts.
@@ -236,12 +263,14 @@ func weakSignature(c *x509.Certificate) bool {
 	return false
 }
 
-// checkUploadChain checks what the chain itself must satisfy. A self-signed last certificate of a
-// longer chain is a trust anchor: nobody verifies its own signature or dates, and old anchors are
-// signed with SHA-1, so it is left out of the signature and date checks.
+// checkUploadChain checks what the chain itself must satisfy. The last certificate of a longer
+// chain is left out of the signature and date checks when it is a trust anchor: it verifies its own
+// signature (a certificate that only carries the same name as subject and issuer proves nothing),
+// and nobody checks the dates of an anchor. An anchor that is signed with SHA-1 does not verify
+// its own signature in Go, so it is refused with the weak ones.
 func checkUploadChain(certs []*x509.Certificate, now time.Time) error {
 	judged := certs
-	if n := len(certs); n > 1 && bytes.Equal(certs[n-1].RawSubject, certs[n-1].RawIssuer) {
+	if n := len(certs); n > 1 && certs[n-1].CheckSignatureFrom(certs[n-1]) == nil {
 		judged = certs[:n-1]
 	}
 	for i, c := range judged {
@@ -326,10 +355,12 @@ func CertificateIssuer(leaf *x509.Certificate) string {
 	return printable(name, 255)
 }
 
-// printable drops control characters and cuts s to at most limit bytes on a character boundary.
+// printable drops control characters and format characters (the bidirectional overrides among
+// them, which reorder the text around them) and cuts s to at most limit bytes on a character
+// boundary.
 func printable(s string, limit int) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || r == unicode.ReplacementChar {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == unicode.ReplacementChar {
 			return -1
 		}
 		return r
@@ -348,22 +379,30 @@ const opensslDecrypt = "openssl pkey -in key.pem -out key-plain.pem"
 
 const pkcs12Hint = "the key looks like a DER or PKCS#12 file; convert it to PEM, for a .pfx file: openssl pkcs12 -in file.pfx -nocerts -nodes -out key.pem"
 
-// parseUploadKey reads one unencrypted private key.
+// parseUploadKey reads one unencrypted private key. An EC PARAMETERS block next to it, which
+// openssl ecparam -genkey writes, carries only the curve name and is ignored.
 func parseUploadKey(keyPEM []byte) (crypto.Signer, error) {
 	if len(keyPEM) > CertKeyMaxBytes {
 		return nil, certErr(CertFieldKey, CertReasonTooLarge, "the key is larger than %d KiB", CertKeyMaxBytes>>10)
 	}
 	blocks, complete := pemBlocks(keyPEM)
+	defer wipeBlocks(blocks)
 	if len(blocks) == 0 {
 		if looksBinary(keyPEM) {
 			return nil, certErr(CertFieldKey, CertReasonPKCS12, "%s", pkcs12Hint)
 		}
 		return nil, certErr(CertFieldKey, CertReasonBadPEM, "the key must be one PEM block: PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY")
 	}
-	if len(blocks) != 1 || !complete {
+	keys := blocks[:0:0]
+	for _, b := range blocks {
+		if b.Type != "EC PARAMETERS" {
+			keys = append(keys, b)
+		}
+	}
+	if len(keys) != 1 || !complete {
 		return nil, certErr(CertFieldKey, CertReasonBadPEM, "the key must be exactly one PEM block")
 	}
-	b := blocks[0]
+	b := keys[0]
 	if strings.Contains(strings.ToUpper(b.Headers["Proc-Type"]), "ENCRYPTED") || b.Type == "ENCRYPTED PRIVATE KEY" {
 		return nil, certErr(CertFieldKey, CertReasonKeyEncrypted, "the key is protected by a passphrase; remove it first: %s", opensslDecrypt)
 	}
@@ -384,10 +423,20 @@ func parseUploadKey(keyPEM []byte) (crypto.Signer, error) {
 	}
 	signer, ok := key.(crypto.Signer)
 	if !ok {
-		return nil, certErr(CertFieldKey, CertReasonUnsupportedKey, "this kind of key cannot sign; use RSA 2048 to 8192 bits, ECDSA P-256 or ECDSA P-384")
+		return nil, certErr(CertFieldKey, CertReasonUnsupportedKey, "this kind of key cannot sign; "+supportedKeys)
 	}
 	return signer, nil
 }
+
+// wipeBlocks zeroes what pem.Decode copied out of the text of a key, best effort: the parsed key
+// and the Go runtime keep copies that this cannot reach.
+func wipeBlocks(blocks []*pem.Block) {
+	for _, b := range blocks {
+		clear(b.Bytes)
+	}
+}
+
+const supportedKeys = "use RSA of 2048 to 4096 bits, ECDSA P-256 or ECDSA P-384"
 
 // looksBinary reports bytes that are not text: a DER or PKCS#12 file.
 func looksBinary(b []byte) bool {
@@ -403,7 +452,7 @@ func looksBinary(b []byte) bool {
 func uploadKeyType(key crypto.Signer) (string, error) {
 	switch k := key.(type) {
 	case *rsa.PrivateKey:
-		if bits := k.N.BitLen(); bits >= 2048 && bits <= 8192 {
+		if bits := k.N.BitLen(); bits >= CertMinKeyRSABits && bits <= CertMaxKeyRSABits && k.E >= certMinRSAExponent && int64(k.E) < certMaxRSAExponent && k.E%2 == 1 {
 			return fmt.Sprintf("rsa-%d", bits), nil
 		}
 	case *ecdsa.PrivateKey:
@@ -416,5 +465,5 @@ func uploadKeyType(key crypto.Signer) (string, error) {
 	case ed25519.PrivateKey:
 		// Browsers do not accept an Ed25519 certificate for a web site.
 	}
-	return "", certErr(CertFieldKey, CertReasonUnsupportedKey, "use RSA 2048 to 8192 bits, ECDSA P-256 or ECDSA P-384")
+	return "", certErr(CertFieldKey, CertReasonUnsupportedKey, supportedKeys)
 }

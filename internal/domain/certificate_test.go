@@ -12,9 +12,12 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -417,10 +420,29 @@ func TestParseCertificateUploadRefusesTheChain(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("a SHA-1 trust anchor at the end is left alone", func(t *testing.T) {
-		if _, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(rsaLeaf, rsaInter, withSignatureOID(t, rsaRoot, 0x05)), KeyPEM: rsaKey, Now: certNow}); err != nil {
+	t.Run("a SHA-1 trust anchor at the end is refused with the weak ones", func(t *testing.T) {
+		// Go does not verify a SHA-1 self-signature, so such an anchor is not exempt from the check.
+		_, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(rsaLeaf, rsaInter, withSignatureOID(t, rsaRoot, 0x05)), KeyPEM: rsaKey, Now: certNow})
+		wantCertErr(t, err, CertFieldChain, CertReasonWeakSignature)
+	})
+	t.Run("an anchor that only carries the same name twice is judged like any certificate", func(t *testing.T) {
+		realKey, fakeKey := testECKey(t, elliptic.P256()), testECKey(t, elliptic.P256())
+		name := pkix.Name{CommonName: "Fake Root"}
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(77), Subject: name, NotBefore: certNow.Add(-4000 * 24 * time.Hour), NotAfter: certNow.Add(-24 * time.Hour),
+			BasicConstraintsValid: true, IsCA: true, KeyUsage: x509.KeyUsageCertSign}
+		// Issuer and subject are the same name, but the signature is made by another key.
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, &x509.Certificate{Subject: name}, realKey.Public(), fakeKey)
+		if err != nil {
 			t.Fatal(err)
 		}
+		parsed, _ := x509.ParseCertificate(der)
+		fake := &testCert{der: der, cert: parsed, key: realKey}
+		if !bytes.Equal(parsed.RawSubject, parsed.RawIssuer) || parsed.CheckSignatureFrom(parsed) == nil {
+			t.Fatal("the test certificate is not what the test needs")
+		}
+		leaf := certSpec{cn: "shop.example.com", dns: []string{"shop.example.com"}, parent: fake}.make(t)
+		_, err = ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(leaf, fake), KeyPEM: pkcs8PEM(t, leaf.key), Now: certNow})
+		wantCertErr(t, err, CertFieldChain, CertReasonExpired)
 	})
 	t.Run("an expired trust anchor at the end is left alone", func(t *testing.T) {
 		oldRoot := certSpec{cn: "Old Root", ca: true, notBefore: certNow.Add(-4000 * 24 * time.Hour), notAfter: certNow.Add(-24 * time.Hour)}.make(t)
@@ -519,17 +541,46 @@ func TestParseCertificateUploadRefusesTheKey(t *testing.T) {
 }
 
 func TestUploadKeyTypeBounds(t *testing.T) {
-	withBits := func(bits uint) *rsa.PrivateKey {
-		return &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), bits-1)}}
+	withKey := func(bits uint, e int) *rsa.PrivateKey {
+		return &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), bits-1), E: e}}
 	}
-	for bits, want := range map[uint]string{2048: "rsa-2048", 3072: "rsa-3072", 4096: "rsa-4096", 8192: "rsa-8192"} {
-		if got, err := uploadKeyType(withBits(bits)); err != nil || got != want {
+	for bits, want := range map[uint]string{2048: "rsa-2048", 3072: "rsa-3072", 4096: "rsa-4096"} {
+		if got, err := uploadKeyType(withKey(bits, 65537)); err != nil || got != want {
 			t.Errorf("%d bits = %q, %v, want %q", bits, got, err, want)
 		}
 	}
-	for _, bits := range []uint{1024, 2040, 2047, 8193, 8200, 16384} {
-		_, err := uploadKeyType(withBits(bits))
+	// The agent loads keys with ring: RSA of 2048 to 4096 bits, an odd exponent from 65537 up to 2^33.
+	for _, e := range []int{65537, 65539, 1<<33 - 1} {
+		if _, err := uploadKeyType(withKey(2048, e)); err != nil {
+			t.Errorf("exponent %d: %v", e, err)
+		}
+	}
+	for _, bits := range []uint{1024, 2040, 2047, 4097, 4200, 8192, 8193, 16384} {
+		_, err := uploadKeyType(withKey(bits, 65537))
 		wantCertErr(t, err, CertFieldKey, CertReasonUnsupportedKey)
+	}
+	for _, e := range []int{0, 1, 3, 17, 257, 65535, 65536, 65538, 1 << 33, 1<<33 + 1} {
+		_, err := uploadKeyType(withKey(2048, e))
+		wantCertErr(t, err, CertFieldKey, CertReasonUnsupportedKey)
+	}
+}
+
+// An RSA key of 4096 bits is the largest the agent loads; the message says so.
+func TestRSAKeyAbove4096IsRefusedInAnUpload(t *testing.T) {
+	c := newTestChain(t, "shop.example.com")
+	_, err := uploadKeyType(&rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), 4999), E: 65537}})
+	ce := wantCertErr(t, err, CertFieldKey, CertReasonUnsupportedKey)
+	if !strings.Contains(ce.Msg, "4096") || strings.Contains(ce.Msg, "8192") {
+		t.Errorf("message %q", ce.Msg)
+	}
+	rsa3072, err := rsa.GenerateKey(rand.Reader, 3072)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := certSpec{cn: "shop.example.com", dns: []string{"shop.example.com"}, key: rsa3072, parent: c.inter}.make(t)
+	up, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chainPEM(leaf, c.inter), KeyPEM: pkcs8PEM(t, rsa3072), Now: certNow})
+	if err != nil || up.KeyType != "rsa-3072" {
+		t.Fatalf("RSA 3072: %v", err)
 	}
 }
 
@@ -645,5 +696,200 @@ func TestCertificateKeyAAD(t *testing.T) {
 	}
 	if CertificateKeyAAD("p-1", "c-1") == CertificateKeyAAD("p-1", "c-2") || CertificateKeyAAD("p-1", "c-1") == CertificateKeyAAD("p-2", "c-1") {
 		t.Error("two certificates share a context")
+	}
+}
+
+// bigRSACert is a certificate for an RSA public key of the given modulus size, signed by parent. Only
+// the public key is made: nothing here needs a key pair, and generating primes that large would take
+// minutes.
+func bigRSACert(t *testing.T, bits uint, parent *testCert, dns ...string) *testCert {
+	t.Helper()
+	n := new(big.Int).Lsh(big.NewInt(1), bits-1)
+	n.Add(n, big.NewInt(1))
+	serial++
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "big"}, DNSNames: dns,
+		NotBefore: certNow.Add(-time.Hour), NotAfter: certNow.Add(24 * time.Hour), BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent.cert, &rsa.PublicKey{N: n, E: 65537}, parent.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PublicKey.(*rsa.PublicKey).N.BitLen() != int(bits) {
+		t.Fatalf("modulus of %d bits", c.PublicKey.(*rsa.PublicKey).N.BitLen())
+	}
+	return &testCert{der: der, cert: c}
+}
+
+// Checking a signature with a huge modulus costs time that a chain of 64 KiB can make unbounded, so a
+// modulus over 8192 bits is refused before any signature is looked at, in both entry points.
+func TestChainWithAnOversizedRSAModulusIsRefusedBeforeAnyVerification(t *testing.T) {
+	c := newTestChain(t, "shop.example.com")
+	huge := bigRSACert(t, 16384, c.root, "shop.example.com")
+	key := pkcs8PEM(t, c.leaf.key)
+	edge := bigRSACert(t, CertMaxChainRSABits, c.root, "shop.example.com")
+	over := bigRSACert(t, CertMaxChainRSABits+1, c.root, "shop.example.com")
+
+	for name, chain := range map[string][]byte{
+		"as the leaf":                         chainPEM(huge),
+		"as the leaf with an issuer":          chainPEM(huge, c.inter),
+		"as an issuer that did not sign":      chainPEM(c.leaf, huge),
+		"as the last certificate":             chainPEM(c.leaf, c.inter, huge),
+		"one bit over the limit":              chainPEM(over, c.inter),
+		"even where the chain order is wrong": chainPEM(c.inter, c.leaf, huge),
+	} {
+		t.Run(name, func(t *testing.T) {
+			start := time.Now()
+			_, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chain, KeyPEM: key, Now: certNow, Roots: c.roots()})
+			wantCertErr(t, err, CertFieldChain, CertReasonTooLarge)
+			_, err = ParseCertificateChain(chain, certNow, c.roots())
+			wantCertErr(t, err, CertFieldChain, CertReasonTooLarge)
+			if took := time.Since(start); took > 2*time.Second {
+				t.Errorf("took %v", took)
+			}
+		})
+	}
+	// The limit itself is allowed in a chain: only the key of the server is held to 4096 bits.
+	if _, err := ParseCertificateChain(chainPEM(edge), certNow, c.roots()); err != nil {
+		t.Errorf("a modulus of %d bits: %v", CertMaxChainRSABits, err)
+	}
+}
+
+// compactChain writes certs the way a tool that does not wrap lines would: one line of base64 per block.
+func compactChain(certs ...*testCert) []byte {
+	var b bytes.Buffer
+	for _, c := range certs {
+		b.WriteString("-----BEGIN CERTIFICATE-----\n" + base64.StdEncoding.EncodeToString(c.der) + "\n-----END CERTIFICATE-----\n")
+	}
+	return b.Bytes()
+}
+
+// The text that arrives is within 64 KiB, but the chain that is stored and sent to the agent is
+// written again with lines of 64 characters and can be longer, which the agent refuses.
+func TestChainThatGrowsPastTheLimitWhenWrittenAgainIsRefused(t *testing.T) {
+	names := func(n, extra int) []string {
+		out := make([]string, 0, n+1)
+		for i := 0; i < n; i++ {
+			out = append(out, fmt.Sprintf("n%03d%s.example.com", i, strings.Repeat("a", 190)))
+		}
+		return append(out, "x"+strings.Repeat("b", extra)+".example.com")
+	}
+	repeated := func(n, extra int) []*testCert {
+		c := certSpec{cn: "big", dns: names(n, extra)}.make(t)
+		out := make([]*testCert, CertChainMaxCerts)
+		for i := range out {
+			out[i] = c
+		}
+		return out
+	}
+	// The most names whose compact text still fits, then the longest last name that fits.
+	n := 1
+	for len(compactChain(repeated(n+1, 0)...)) <= CertChainMaxBytes {
+		n++
+	}
+	lo, hi := 0, 200
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if len(compactChain(repeated(n, mid)...)) <= CertChainMaxBytes {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	certs := repeated(n, lo)
+	in := compactChain(certs...)
+	if len(in) > CertChainMaxBytes || len(encodeChain([]*x509.Certificate{certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert, certs[0].cert})) <= CertChainMaxBytes {
+		t.Fatalf("the test chain does not grow past the limit: %d bytes in", len(in))
+	}
+	for name, parse := range map[string]func() error{
+		"upload": func() error {
+			_, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: in, KeyPEM: pkcs8PEM(t, certs[0].key), Now: certNow})
+			return err
+		},
+		"agent report": func() error { _, err := ParseCertificateChain(in, certNow, nil); return err },
+	} {
+		ce := wantCertErr(t, parse(), CertFieldChain, CertReasonTooLarge)
+		if !strings.Contains(ce.Msg, "written again") {
+			t.Errorf("%s: message %q", name, ce.Msg)
+		}
+	}
+	// The same certificates in a form that is short enough once written again are accepted.
+	if _, err := ParseCertificateChain(chainPEM(certs[0]), certNow, nil); err != nil {
+		t.Errorf("one of them: %v", err)
+	}
+}
+
+func TestKeyWithAnECParametersBlock(t *testing.T) {
+	c := newTestChain(t, "shop.example.com")
+	chain := chainPEM(c.leaf, c.inter)
+	oid, err := asn1.Marshal(asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := pemOf("EC PARAMETERS", oid)
+	ecDER, _ := x509.MarshalECPrivateKey(c.leaf.key.(*ecdsa.PrivateKey))
+	sec1 := pemOf("EC PRIVATE KEY", ecDER)
+	p8 := pkcs8PEM(t, c.leaf.key)
+	cat := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+	accepted := map[string][]byte{
+		"what openssl ecparam -genkey writes": cat(params, sec1),
+		"parameters after the key":            cat(sec1, params),
+		"parameters and a PKCS#8 key":         cat(params, p8),
+		"two parameter blocks":                cat(params, params, sec1),
+	}
+	for name, key := range accepted {
+		up, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chain, KeyPEM: key, Now: certNow, Roots: c.roots()})
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		block, rest := pem.Decode(up.KeyPEM)
+		if block == nil || block.Type != "PRIVATE KEY" || len(bytes.TrimSpace(rest)) != 0 {
+			t.Errorf("%s: the stored key is not exactly one PKCS#8 block", name)
+		}
+	}
+	for name, key := range map[string][]byte{
+		"parameters alone":             params,
+		"parameters and two keys":      cat(params, sec1, sec1),
+		"parameters and a certificate": cat(params, chainPEM(c.leaf)),
+		"parameters and a cut key":     cat(params, sec1[:len(sec1)/2]),
+		"a key and a public key":       cat(sec1, pemOf("PUBLIC KEY", []byte{1})),
+	} {
+		_, err := ParseCertificateUpload(CertificateUploadInput{ChainPEM: chain, KeyPEM: key, Now: certNow})
+		wantCertErr(t, err, CertFieldKey, CertReasonBadPEM)
+		_ = name
+	}
+}
+
+func TestWipeBlocksZeroesWhatWasDecoded(t *testing.T) {
+	blocks, _ := pemBlocks(pemOf("PRIVATE KEY", bytes.Repeat([]byte{0xAB}, 64)))
+	if len(blocks) != 1 || blocks[0].Bytes[0] != 0xAB {
+		t.Fatalf("setup: %v", blocks)
+	}
+	kept := blocks[0].Bytes
+	wipeBlocks(blocks)
+	if !bytes.Equal(kept, make([]byte, 64)) {
+		t.Errorf("block bytes after the wipe: %x", kept)
+	}
+}
+
+func TestFormatCharactersAreDroppedFromShownText(t *testing.T) {
+	// U+202E reverses the order of what follows it; U+200B and U+2066 are other format characters.
+	leaf := &x509.Certificate{
+		Issuer:   pkix.Name{CommonName: "Trusted\u202eAC detsurt\u200b\u2066 Root"},
+		DNSNames: []string{"shop\u202e.example.com"},
+	}
+	if got := CertificateIssuer(leaf); got != "TrustedAC detsurt Root" {
+		t.Errorf("issuer %q", got)
+	}
+	if names := CertificateNames(leaf); len(names) != 1 || names[0] != "shop.example.com" {
+		t.Errorf("names %q", names)
+	}
+	if got := printable("a\u00adb\u2028c\ufeffd", 100); strings.ContainsAny(got, "\u00ad\ufeff") {
+		t.Errorf("printable kept a format character: %q", got)
 	}
 }
