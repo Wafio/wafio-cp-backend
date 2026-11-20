@@ -6,6 +6,15 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 )
 
+// The built-ins that lower what the WAF agent does in its own key directory (migration 000125).
+const (
+	tlsKeyDir            = "/var/lib/wafio-waf-agent/tls/"
+	tlsKeyWriteRuleName  = "Downgrade verified WAF agent TLS key writes"
+	tlsKeyRemoveRuleName = "Downgrade verified WAF agent TLS key removals"
+	tlsKeyModeRuleName   = "Downgrade verified WAF agent TLS key mode changes"
+	tlsKeyRenameRuleName = "Downgrade verified WAF agent TLS key renames"
+)
+
 // builtinRules returns the built-in detection rule library seeded for every
 // new host. These cover the most common false-positive patterns seen in
 // production container + Linux environments.
@@ -22,7 +31,7 @@ import (
 // unprivileged user and is verified too, and it can name any of its threads
 // as it likes. So a rule that trusts a root daemon's name and exe_verified
 // also requires uid 0. Existing hosts get the same library from migrations
-// 000093, 000106, 000111, 000113, 000114, 000118, 000121 and 000122.
+// 000093, 000106, 000111, 000113, 000114, 000118, 000121, 000122 and 000125.
 func builtinRules(projectID, hostID string) []domain.DetectionRule {
 	sev := func(n int) *int { return &n }
 	verified := domain.RuleCondition{Field: "exe_verified", Op: "eq", Value: true}
@@ -168,19 +177,110 @@ func builtinRules(projectID, hostID string) []domain.DetectionRule {
 			// has already cleaned the path).
 			ProjectID:         projectID,
 			Name:              "Downgrade verified WAF agent TLS key reads",
-			Description:       "The WAF agent reads its own TLS keys under /etc/ssl/private and /etc/letsencrypt/live at start, on reload and on a poll, as an unprivileged user. Only for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A write, any other file, an unverified reader and any other name keep their severity.",
+			Description:       "The WAF agent reads its own TLS keys under /etc/ssl/private, /etc/letsencrypt/live and /var/lib/wafio-waf-agent/tls at start, on reload and on a poll, as an unprivileged user. Only for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A write, any other file, an unverified reader and any other name keep their severity.",
 			Enabled:           true,
 			Action:            domain.RuleActionDowngrade,
 			SkipSeverityGuard: true,
 			SeverityOverride:  sev(1),
 			Conditions: []domain.RuleCondition{
 				{Field: "event_name", Op: "eq", Value: "openat"},
-				{Field: "filename", Op: "starts_with_any", Value: []string{"/etc/ssl/private/", "/etc/letsencrypt/live/"}},
+				{Field: "filename", Op: "starts_with_any", Value: []string{"/etc/ssl/private/", "/etc/letsencrypt/live/", tlsKeyDir}},
 				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
 				{Field: "uid", Op: "neq", Value: 0},
 				verified,
 			},
 			Priority: 62,
+			Tags:     []string{"wafio", "tls", "expected"},
+		},
+		// The agent installs a certificate by writing the new key next to the old one in its own state
+		// directory, renaming it into place, removing what it replaced and setting the mode of what it
+		// wrote. One rule for each event, because every condition of a rule is required and the flags
+		// of an open, an unlink, a rename and a chmod mean different things. The names and the
+		// identity are those of the reads above. A read-only open is the read rule's: the open rule
+		// asks for write flags, so with the read rule off a read stays as loud as it was.
+		{
+			ProjectID:         projectID,
+			Name:              tlsKeyWriteRuleName,
+			Description:       "The WAF agent creates and rewrites its own TLS keys under /var/lib/wafio-waf-agent/tls when it installs or renews a certificate, as an unprivileged user. Only for an open for writing, by a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A read-only open, any other file, any other process and an unverified writer keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "openat"},
+				{Field: "filename", Op: "starts_with", Value: tlsKeyDir},
+				{Field: "flags", Op: "bit_and", Value: 579},
+				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+			},
+			Priority: 74,
+			Tags:     []string{"wafio", "tls", "expected"},
+		},
+		{
+			ProjectID:         projectID,
+			Name:              tlsKeyRemoveRuleName,
+			Description:       "The WAF agent removes the TLS key files it replaced under /var/lib/wafio-waf-agent/tls when it installs or renews a certificate, as an unprivileged user. Only for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. Any other file, any other process and an unverified process keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "unlink"},
+				{Field: "filename", Op: "starts_with", Value: tlsKeyDir},
+				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+			},
+			Priority: 75,
+			Tags:     []string{"wafio", "tls", "expected"},
+		},
+		{
+			// The flags of a chmod are the mode. 3647 is the setuid, setgid and sticky bits and every
+			// permission bit of the group and of others: only a mode that keeps the file to its owner
+			// (0600 or 0400) is the agent's own work, and 0644 or 04600 is not.
+			ProjectID:         projectID,
+			Name:              tlsKeyModeRuleName,
+			Description:       "The WAF agent sets the mode of its own TLS key files under /var/lib/wafio-waf-agent/tls to owner only, as an unprivileged user. Only for a mode with no setuid, setgid or sticky bit and no permission for the group or others, by a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A wider mode, any other file, any other process and an unverified process keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "chmod"},
+				{Field: "filename", Op: "starts_with", Value: tlsKeyDir},
+				{Field: "flags", Op: "bit_none", Value: 3647},
+				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+			},
+			Priority: 76,
+			Tags:     []string{"wafio", "tls", "expected"},
+		},
+		{
+			// A rename names two paths: filename is where the file was and args is where it goes. Both
+			// have to be in the directory, so that a key moved out of it, or exchanged out of it
+			// (RENAME_EXCHANGE puts the other file in its place), stays as loud as it was.
+			ProjectID:         projectID,
+			Name:              tlsKeyRenameRuleName,
+			Description:       "The WAF agent renames a new TLS key file into place under /var/lib/wafio-waf-agent/tls when it installs or renews a certificate, as an unprivileged user. Only when the old and the new path are both under that directory, for a non-root process the agent verified as the WAF agent binary, under a thread name the WAF agent uses. A file moved or exchanged out of the directory, any other file, any other process and an unverified process keep their severity.",
+			Enabled:           true,
+			Action:            domain.RuleActionDowngrade,
+			SkipSeverityGuard: true,
+			SkipWriteGuard:    true,
+			SeverityOverride:  sev(1),
+			Conditions: []domain.RuleCondition{
+				{Field: "event_name", Op: "eq", Value: "rename"},
+				{Field: "filename", Op: "starts_with", Value: tlsKeyDir},
+				{Field: "args", Op: "starts_with", Value: tlsKeyDir},
+				{Field: "comm", Op: "in", Value: []string{"wafio-waf-agent", "tokio-rt-worker"}},
+				{Field: "uid", Op: "neq", Value: 0},
+				verified,
+			},
+			Priority: 77,
 			Tags:     []string{"wafio", "tls", "expected"},
 		},
 

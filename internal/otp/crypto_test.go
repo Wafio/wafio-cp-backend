@@ -251,3 +251,14 @@ func TestIsBound(t *testing.T) {
 		}
 	}
 }
+
+func TestIsEncrypted(t *testing.T) {
+	e, _ := NewEncryptor(testKeyHex())
+	sealed, _ := e.Encrypt("secret")
+	bound, _ := e.SealBound([]byte("key"), boundAAD)
+	for stored, want := range map[string]bool{sealed: true, bound: false, "": false, "JBSWY3DPEHPK3PXP": false, "enc:v2:x": false, "ENC:V1:x": false} {
+		if got := IsEncrypted(stored); got != want {
+			t.Errorf("IsEncrypted(%.20q) = %v, want %v", stored, got, want)
+		}
+	}
+}

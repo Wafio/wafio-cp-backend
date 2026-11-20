@@ -225,6 +225,11 @@ func TestStateWarnings(t *testing.T) {
 	acme := func(notAfter *time.Time, source string) tlsRead {
 		return tlsRead{tls: repository.AppTLS{Source: domain.TLSSourceACME}, status: &repository.TLSStatus{Source: source, NotAfter: notAfter}}
 	}
+	at := func(t time.Time) *time.Time { return &t }
+	acmeFrom := func(notAfter *time.Time, notBefore time.Time) tlsRead {
+		return tlsRead{tls: repository.AppTLS{Source: domain.TLSSourceACME},
+			status: &repository.TLSStatus{Source: domain.TLSSourceACME, NotBefore: &notBefore, NotAfter: notAfter}}
+	}
 	codes := func(r tlsRead) string {
 		var out []string
 		for _, w := range r.stateWarnings(now) {
@@ -250,6 +255,12 @@ func TestStateWarnings(t *testing.T) {
 		"acme without a certificate yet": {acme(nil, domain.TLSSourceACME), ""},
 		"no source":                      {tlsRead{tls: repository.AppTLS{}, cert: &repository.AppCertificate{NotAfter: inDays(1)}}, ""},
 		"acme source, old upload kept":   {tlsRead{tls: repository.AppTLS{Source: domain.TLSSourceACME}, cert: &repository.AppCertificate{NotAfter: inDays(1)}}, ""},
+		"acme of 90 days, 14.5 left":     {acmeFrom(&soon, inDays(14.5-90)), tlsWarnExpiresSoon},
+		"acme of 6 days, 3 days left":    {acmeFrom(at(inDays(3)), inDays(3-6)), ""},
+		"acme of 6 days, 1 day left":     {acmeFrom(at(inDays(1)), inDays(1-6)), tlsWarnExpiresSoon},
+		"acme of 6 days, expired":        {acmeFrom(at(inDays(-1)), inDays(-1-6)), tlsWarnExpiresSoon},
+		"acme of 12 hours, 6 hours left": {acmeFrom(at(inDays(0.25)), inDays(0.25-0.5)), tlsWarnExpiresSoon},
+		"uploaded of 6 days, 1 day left": {tlsRead{tls: repository.AppTLS{Source: domain.TLSSourceUploaded}, cert: &repository.AppCertificate{Trusted: true, NotBefore: inDays(1 - 6), NotAfter: inDays(1)}}, tlsWarnExpiresSoon},
 	} {
 		if got := codes(c.r); got != c.want {
 			t.Errorf("%s: warnings %q, want %q", name, got, c.want)
@@ -259,8 +270,29 @@ func TestStateWarnings(t *testing.T) {
 	if len(w) != 1 || w[0].DaysLeft == nil || *w[0].DaysLeft != 10 || w[0].NotAfter == nil || !w[0].NotAfter.Equal(inDays(10.5)) {
 		t.Errorf("expires_soon fields = %+v", w)
 	}
-	if d := daysLeft(inDays(-0.5), now); d != -1 {
+	if d := domain.DaysLeft(inDays(-0.5), now); d != -1 {
 		t.Errorf("half a day past expiry is %d days left, want -1", d)
+	}
+
+	// The dashboard and the expiry mails read one table: a certificate has expires_soon exactly when
+	// the mails have a level for it, and the days it shows are the days the mail counts.
+	for _, lifetime := range []float64{90, 45, 6} {
+		for left := -3.0; left <= 40; left += 0.5 {
+			notAfter := inDays(left)
+			for source, r := range map[string]tlsRead{
+				domain.TLSSourceUploaded: {tls: repository.AppTLS{Source: domain.TLSSourceUploaded}, cert: &repository.AppCertificate{Trusted: true, NotBefore: inDays(left - lifetime), NotAfter: notAfter}},
+				domain.TLSSourceACME:     acmeFrom(&notAfter, inDays(left-lifetime)),
+			} {
+				_, due := domain.ExpiryLevel(source, inDays(left-lifetime), notAfter, now)
+				w := r.stateWarnings(now)
+				if due != (len(w) == 1) {
+					t.Fatalf("%s of %v days with %v left: expires_soon %v, level due %v", source, lifetime, left, len(w) == 1, due)
+				}
+				if due && (w[0].DaysLeft == nil || *w[0].DaysLeft != domain.DaysLeft(notAfter, now)) {
+					t.Fatalf("%s with %v left shows %v days", source, left, w[0].DaysLeft)
+				}
+			}
+		}
 	}
 }
 

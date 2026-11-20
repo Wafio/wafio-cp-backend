@@ -1232,7 +1232,7 @@ func TestDBTLSExpiryCandidates(t *testing.T) {
 		t.Fatalf("candidates = %+v", got)
 	}
 	u, a := got[up], got[ac]
-	if u.Source != "uploaded" || u.CertificateID != cert.ID || u.LeafSHA256 != cert.LeafSHA256 || !u.NotAfter.Equal(cert.NotAfter) || u.NotifiedDays != nil || u.AppName == "" || strings.Join(u.Hosts, ",") != "up.example.com" {
+	if u.Source != "uploaded" || u.CertificateID != cert.ID || u.LeafSHA256 != cert.LeafSHA256 || !u.NotAfter.Equal(cert.NotAfter) || u.NotifiedDays != nil || u.AppName == "" || u.ProjectName != "fixture" || strings.Join(u.Hosts, ",") != "up.example.com" {
 		t.Errorf("uploaded = %+v", u)
 	}
 	if a.Source != "acme" || a.CertificateID != "" || a.LeafSHA256 != acmeLeaf || !a.NotAfter.Equal(notAfter) || a.NotifiedDays != nil {

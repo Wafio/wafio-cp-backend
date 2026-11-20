@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net"
 	"net/netip"
 	"slices"
@@ -52,12 +51,6 @@ const (
 	tlsDNSMaxHosts = 10
 	// tlsResolvedShown caps the addresses a dns_mismatch warning lists for one host.
 	tlsResolvedShown = 8
-
-	// The days left at or below which a certificate gets the expires_soon warning. An ACME
-	// certificate renews itself a third of the way through its life, so for it the warning means that
-	// the renewal is late.
-	tlsExpiresSoonUploadedDays = 30
-	tlsExpiresSoonACMEDays     = 14
 )
 
 // Codes and names of the TLS answers.
@@ -140,14 +133,10 @@ type tlsRead struct {
 	status *repository.TLSStatus
 }
 
-func daysLeft(notAfter, now time.Time) int {
-	return int(math.Floor(notAfter.Sub(now).Hours() / 24))
-}
-
 func certificateView(c repository.AppCertificate, now time.Time) *tlsCertificateView {
 	return &tlsCertificateView{
 		ID: c.ID, Source: c.Source, Names: c.Names, Issuer: c.Issuer,
-		NotBefore: c.NotBefore.UTC(), NotAfter: c.NotAfter.UTC(), DaysLeft: daysLeft(c.NotAfter, now),
+		NotBefore: c.NotBefore.UTC(), NotAfter: c.NotAfter.UTC(), DaysLeft: domain.DaysLeft(c.NotAfter, now),
 		LeafSHA256: c.LeafSHA256, KeyType: c.KeyType, Trusted: c.Trusted, CreatedAt: c.CreatedAt.UTC(),
 	}
 }
@@ -178,8 +167,11 @@ func statusView(s *repository.TLSStatus) *tlsStatusView {
 // stateWarnings are the warnings that follow from what is stored.
 func (r tlsRead) stateWarnings(now time.Time) []tlsWarning {
 	out := []tlsWarning{}
-	soon := func(notAfter time.Time, limit int) {
-		if d := daysLeft(notAfter, now); d <= limit {
+	// The warning levels are the ones the expiry mails use (domain.ExpiryLevel): a certificate has
+	// expires_soon from the first level on. For an ACME certificate it means that the renewal is late.
+	soon := func(notBefore, notAfter time.Time) {
+		if _, due := domain.ExpiryLevel(r.tls.Source, notBefore, notAfter, now); due {
+			d := domain.DaysLeft(notAfter, now)
 			na := notAfter.UTC()
 			out = append(out, tlsWarning{Code: tlsWarnExpiresSoon, DaysLeft: &d, NotAfter: &na})
 		}
@@ -190,11 +182,15 @@ func (r tlsRead) stateWarnings(now time.Time) []tlsWarning {
 			if !r.cert.Trusted {
 				out = append(out, tlsWarning{Code: tlsWarnNotTrusted})
 			}
-			soon(r.cert.NotAfter, tlsExpiresSoonUploadedDays)
+			soon(r.cert.NotBefore, r.cert.NotAfter)
 		}
 	case domain.TLSSourceACME:
 		if r.status != nil && r.status.Source == domain.TLSSourceACME && r.status.NotAfter != nil {
-			soon(*r.status.NotAfter, tlsExpiresSoonACMEDays)
+			var notBefore time.Time
+			if r.status.NotBefore != nil {
+				notBefore = *r.status.NotBefore
+			}
+			soon(notBefore, *r.status.NotAfter)
 		}
 	}
 	return out

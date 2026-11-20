@@ -17,6 +17,8 @@ Configuration is loaded in this order: `config/config.yaml`, then `WAFIO_*` envi
 
 Before the server starts, `Config.Validate` (`internal/config/validate.go`) checks the configuration and stops the boot with the list of all errors if any check fails. It checks, among other things: `jwt.secret` empty, still a shipped placeholder or example, or shorter than 32 characters; `jwt.expire_hours` not positive; `totp.enc_key` empty or not 32 bytes; `server.cors_allow_origins` holding `*` together with credentials; `server.http_addr` empty; an invalid trusted proxy; `log.level` other than debug, info, warn or error; `database.name` or `database.host` empty, `database.port` outside 1 to 65535; agent receive limits out of range.
 
+After it has connected to the database, the server takes a shared advisory lock on the encryption key on a connection of its own and holds it until it exits, and it compares the id of `totp.enc_key` with the id the database holds (it stores its own on the first start). It refuses to start while `wafio rekey --apply` runs or when the ids differ, and it stops when a lock that was lost is taken again and the id is no longer its own; see `wafio rekey`.
+
 Security: authn=not-applicable-local-process; privilege=no-root-needed; secrets=read-from-config-or-env-never-from-argv; audit=startup-log; note=jwt.secret-placeholder-refused-at-boot
 
 ## command: wafio migrate
@@ -44,6 +46,22 @@ Manages instance administrators. Use it once after `wafio migrate up` to create 
 Both subcommands read the database settings from the configuration.
 
 Security: authn=shell-access-to-the-host; authz=database-credentials-from-config; secrets=password-prompted-by-default
+
+## command: wafio rekey
+
+Re-encrypts every value that is sealed with `totp.enc_key`, from the old key to a new one: `users.totp_secret` and `users.totp_pending_secret`, the SMTP password and the MalwareBazaar key saved in `system_settings`, and the private keys of uploaded certificates (`app_certificate_keys`, sealed with the project and certificate they belong to). Run it after the operator changed `totp.enc_key`; the steps are in `docs/operations/rotate-encryption-key.md`.
+
+| Flag | Type | Rules |
+|---|---|---|
+| `--apply` | bool | Default false. Without it the command prints the counts per kind of value (to rewrite, already under the new key, plain text, unreadable) and changes nothing; it takes no lock. With it, the values are rewritten in one transaction with a lock on every row it reads, together with the id of the new key and a `system_audit` row `admin.encryption_key_rotated` (the key ids and the counts, never a value). It refuses, and writes nothing, when a control plane or another rekey runs, when a value opens with neither key, and when a row stays locked by another transaction for more than 10 seconds |
+
+The old key is read from the environment variable `WAFIO_OLD_TOTP_ENC_KEY`, which the command removes from its own environment as soon as it has read it, so that nothing it starts inherits it (the kernel copy in `/proc/<pid>/environ` and a core dump are not touched); give it on the command line of the one command, `WAFIO_OLD_TOTP_ENC_KEY="$old" wafio rekey --apply`, and not exported in the shell. It is the key that `totp.enc_key` had before, 64 hex characters or base64 of 32 bytes. The new key is `totp.enc_key` from `config/config.yaml` or `WAFIO_TOTP_ENC_KEY`, which the operator has already changed. The command refuses when either is empty or is no key, and when they are the same key in either spelling.
+
+Every `wafio serve` holds a shared advisory lock on the key for as long as it runs, and `--apply` asks for it exclusively as the first statement of its transaction. So `--apply` refuses while any control plane runs, and a control plane refuses to start while an apply runs. The database also keeps the id of the key in force (`system_settings` row `totp_enc_key`: the first 8 hex characters of the SHA-256 of the key, not the key). A control plane stores it on its first start and refuses to start with a key of another id, which keeps one that was started with the new key before the rewrite from sealing secrets beside the old ones; `--apply` writes the id of the new key in the same transaction.
+
+A value that already opens with the new key counts as done and is left alone, so the command can be run again. A value stored in plain text (a TOTP secret from before encryption was on) is left as it is. The command never prints a value or a key; a report names a row by user id, certificate id or setting name. Exit code 1 when a key is refused, when a lock is not free, when a value opens with neither key (the dry run included), or when the database fails.
+
+Security: authn=shell-access-to-the-host; authz=database-credentials-from-config; secrets=old-key-from-environment-dropped-from-the-process-after-reading-new-key-from-config-values-never-printed; destructive=apply-rewrites-ciphertext-in-one-transaction-dry-run-by-default; audit=system_audit-row-in-the-same-transaction
 
 ## command: wafio fetch-data
 

@@ -28924,7 +28924,7 @@ components:
       properties:
         field:
           type: string
-          description: 'Event field to test. Numeric fields: severity (0..4), port (0..65535), uid, gid, addr_family, flags, detail, ret_val (non-negative integers; ret_val is the syscall result, which exit events, enforcement and an open whose agent records the result set; an open without a recorded result carries 0, so ret_val gte 0 drops only an open reported as failed). Boolean fields: is_container, exe_verified (true when the kernel saw the process in the agent-verified protected set; use it instead of comm to drop events safely). All others are strings.'
+          description: 'Event field to test. Numeric fields: severity (0..4), port (0..65535), uid, gid, addr_family, flags, detail, ret_val (non-negative integers; ret_val is the syscall result, which exit events, enforcement and an open whose agent records the result set; an open without a recorded result carries 0, so ret_val gte 0 drops only an open reported as failed). Boolean fields: is_container, exe_verified (true when the kernel saw the process in the agent-verified protected set; use it instead of comm to drop events safely). All others are strings; args is the destination of a rename, cleaned like filename; a rule with a condition on it must also have event_name eq rename, or it is refused.'
           enum:
             - comm
             - parent_comm
@@ -28933,6 +28933,7 @@ components:
             - category
             - severity
             - filename
+            - args
             - addr
             - port
             - uid

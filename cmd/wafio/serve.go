@@ -126,6 +126,8 @@ func runServe(*cobra.Command, []string) error {
 	}
 
 	ctx := context.Background()
+	// keyLost reports that the encryption key of the database changed while this process ran.
+	var keyLost <-chan error
 	repo, err := repository.NewWithPool(ctx, cfg.Database.DSN(), repository.PoolOptions{
 		MaxConns: cfg.Database.MaxConns,
 		MinConns: cfg.Database.MinConns,
@@ -151,6 +153,17 @@ func runServe(*cobra.Command, []string) error {
 			return errors.New("totp.enc_key produced no encryptor; refusing to store TOTP secrets in plaintext")
 		}
 		repo.User.TOTPCrypto = totpEnc
+
+		// Hold the encryption key lock for as long as this process runs, and check that the
+		// database was sealed with this key: wafio rekey --apply refuses while any control
+		// plane holds the lock, and a key that is not the stored one would seal new secrets
+		// beside the old ones.
+		keyHold, kerr := repo.HoldEncryptionKey(ctx, totpEnc)
+		if kerr != nil {
+			return fmt.Errorf("totp.enc_key: %w", kerr)
+		}
+		defer keyHold.Close()
+		keyLost = keyHold.Lost()
 
 		// Correlation rules: install every project's stored rule set before
 		// ingest starts, so a restart does not bring disabled built-ins back
@@ -504,11 +517,14 @@ func runServe(*cobra.Command, []string) error {
 		go repository.RunKeySweeper(runCtx, repo.KeySweeperDeps())
 	}
 
+	var keyErr error
 	select {
 	case err := <-httpErrCh:
 		if err != nil && !isExpectedServerStopError(err) {
 			return fmt.Errorf("http listen: %w", err)
 		}
+	case keyErr = <-keyLost:
+		log.Printf("stopping: %v", keyErr)
 	case <-runCtx.Done():
 		log.Printf("shutdown signal received, stopping services")
 	}
@@ -524,7 +540,11 @@ func runServe(*cobra.Command, []string) error {
 		drains = append(drains, hostStore.Close)
 	}
 	// repo.Close (deferred above) runs after this returns.
-	return orderedShutdown(app.ShutdownWithContext, grpcDone, grpcShutdownWait, drains...)
+	shutdownErr := orderedShutdown(app.ShutdownWithContext, grpcDone, grpcShutdownWait, drains...)
+	if keyErr != nil {
+		return fmt.Errorf("totp.enc_key: %w", keyErr)
+	}
+	return shutdownErr
 }
 
 const (
