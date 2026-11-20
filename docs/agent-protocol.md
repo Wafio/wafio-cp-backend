@@ -202,11 +202,11 @@ WAF agent to the server, only from an agent with the `tls_certificates` feature,
 | `source` | string | `acme` (the agent orders and renews) or `uploaded` (from `CertificateInstall`); dropped when it does not match the app's settings |
 | `state` | string | `pending` (an ACME order is running), `active` (a certificate is in use), `failed` (the last order or install failed; `chain_pem` is set while an older certificate is still in use), `missing` (TLS is on, nothing to serve yet). Any other value is dropped |
 | `certificate_id` | string | For `uploaded`, the id the bundle names, looked up by project, app and id together; empty for `acme` |
-| `chain_pem` | bytes | The chain in use, leaf first; public material. Only `CERTIFICATE` blocks, at most 10 certificates and 64 KiB, or the status is dropped. The server parses it itself (issuer, names, expiry), only when `leaf_sha256` changed, and does not trust the agent's reading |
+| `chain_pem` | bytes | The chain in use, leaf first; public material. Only `CERTIFICATE` blocks, at most 10 certificates and 64 KiB, or the status is dropped. The server parses it itself (issuer, names, expiry) and does not trust the agent's reading. It parses only when `leaf_sha256` differs from the stored one; otherwise it ignores `chain_pem` and stores nothing from it |
 | `leaf_sha256` | string | Lower-case hex SHA-256 of the DER of the leaf; the server checks it against `chain_pem` |
 | `error` | string | For `failed`, at most 1 KiB. Control characters are stripped, and the dashboard and email escape it; never key material |
 | `next_attempt_unix` | int64 | For `pending` and `failed`, when the agent tries again; 0 when nothing is planned |
-| `request_id` | string | The ACME request id of the bundle entry this state answers; a new id in the bundle asks the agent to order now. A status for an older request id is dropped. Empty for `uploaded` |
+| `request_id` | string | The ACME request id of the bundle entry this state answers; a new id in the bundle asks the agent to order now. A status with any id other than the current one is dropped. Empty for `uploaded` |
 | `unix_time` | int64 | When the agent saw this state. The server stores its own receive time |
 
 Security: authn=mTLS-client-cert; authz=enabled-assignment-of-the-app-to-this-agent-in-this-project; input=untrusted-parsed-size-capped-and-escaped-by-the-server; key-material=never-carried
