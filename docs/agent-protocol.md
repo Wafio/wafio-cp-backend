@@ -172,20 +172,25 @@ Security: authn=mTLS-client-cert; authz=only-agents-of-the-project; confirmation
 
 ## event: CertificateInstall
 
-Server to the WAF agent that serves the app, and only to an agent whose `hello.features` holds `tls_certificates`. It carries an uploaded certificate chain and its private key. Defined since `shared/v0.2.0`; this control plane does not send it yet. The server sends it after each `Hello` for every uploaded certificate the bundle names, and after an upload or a replace. The bundle names a certificate by `certificate_id` and `leaf_sha256` and never carries key material, because the agent stores the bundle in plain text (`last-bundle.json`).
+Server to the WAF agent that serves the app. It carries an uploaded certificate chain and its private key. Defined since `shared/v0.2.0`; this control plane does not send it yet. The bundle names a certificate by `certificate_id` and `leaf_sha256` and never carries key material, because the agent stores the bundle in plain text (`last-bundle.json`).
 
 | Field | Type | Rules |
 |---|---|---|
-| `command_id` | string | Required. The agent replies with a `CommandAck` that carries the same id; `ok=false` with a reason in `error` when it refuses the pair |
-| `app_id` | string | Required. An app the agent serves |
-| `certificate_id` | string | Required. The id the bundle names |
-| `chain_pem` | bytes | Required. PEM, leaf first, at most 64 KiB |
-| `key_pem` | bytes | Required. One PKCS#8, PKCS#1 or SEC1 private key, PEM, no passphrase, at most 16 KiB. It must match the leaf |
-| `leaf_sha256` | string | Required. Lower-case hex SHA-256 of the DER of the leaf; must match `chain_pem` |
-| agent storage | n/a | The agent writes the pair into `/var/lib/wafio-waf-agent/tls/` (directory 0700, files 0600, user `wafio`), serves it only while the bundle names it, and deletes it once the bundle no longer does. The same `leaf_sha256` again is acknowledged without a write |
-| key material | n/a | Never logged on any side, never in a `CommandAck`, never in a `BundleUpdate` or in telemetry |
+| `command_id` | string | Required, random per delivery. The agent replies with a `CommandAck` that carries the same id; the server accepts the ack only from the stream it sent the install on |
+| `app_id` | string | Required, canonical lower-case UUID. An app in the agent's latest applied bundle |
+| `certificate_id` | string | Required, canonical lower-case UUID, the id the bundle names. An upload or a replace always gets a new id, so an id never names other bytes |
+| `chain_pem` | bytes | Required. Only `CERTIFICATE` blocks, leaf first, at most 10 certificates and 64 KiB; any other block (a key in a combined file) is refused |
+| `key_pem` | bytes | Required. One PKCS#8, PKCS#1 or SEC1 private key, PEM, no passphrase, at most 16 KiB. It must match the leaf. Marked `debug_redact` in the proto; Go's generated `String()` ignores that, so no side ever formats this message |
+| `leaf_sha256` | string | Required. Lower-case hex SHA-256 of the DER of the leaf; must match `chain_pem` and the bundle |
+| receiver | n/a | Only a stream whose `hello.features` holds `tls_certificates` and whose mTLS credential is host-bound (host-key enrollment) to this agent's host, kind `waf` and name. A project-wide credential never receives a key, since it can connect under any agent name. At send time the server reads the app's enabled `waf_agent_apps` row, joined on the project |
+| when | n/a | After the `BundleUpdate` that names the certificate: after `Welcome` on connect, after an upload, a replace or a move of the app, and again when a `CertificateStatus` reports the app `missing` with a `certificate_id` the server holds. Every delivery is audited (credential, host, agent, app, certificate, peer address) |
+| agent checks | n/a | The agent refuses an install that its latest applied bundle does not name (`app_id`, `certificate_id` and `leaf_sha256`), then checks the blocks, the sizes, the key against the leaf and `leaf_sha256` against the chain. It acks `ok=true` without a write when it already holds this `certificate_id` with this `leaf_sha256` |
+| ack codes | n/a | `CommandAck.error` is one of `bad_pem`, `too_large`, `key_mismatch`, `leaf_mismatch`, `unsupported_key`, `not_in_bundle`, `write_failed`; never free text or parser output |
+| agent storage | n/a | A fixed directory, `/var/lib/wafio-waf-agent/tls/` (directory 0700, files 0600, user `wafio`), that does not follow `--state-dir`; the host agent rates reads there as credential reads. Files are written to a temporary name inside that directory and renamed. A certificate is served only while the bundle names it, and its files are deleted once the bundle no longer does |
+| recall | n/a | A key already sent to an agent that is offline, removed or no longer serves the app is not recalled. The dashboard advises replacing the certificate after a move or a removal |
+| key material | n/a | Never logged on any side, never in a `CommandAck`, never in a `BundleUpdate`, in telemetry or in the bundle cache |
 
-Security: authn=mTLS-client-cert; authz=only-the-agent-that-serves-the-app; confirmation=CommandAck-required; logging=key-material-never-logged; storage=agent-key-directory-0600
+Security: authn=mTLS-client-cert-host-bound-only; authz=enabled-assignment-of-the-app-to-this-agent-in-this-project-at-send-time; confirmation=CommandAck-from-the-same-stream; logging=key-material-never-logged-message-never-formatted; storage=fixed-agent-key-directory-0600; audit=every-delivery
 
 ## event: CertificateStatus
 
@@ -193,18 +198,18 @@ WAF agent to the server, only from an agent with the `tls_certificates` feature,
 
 | Field | Type | Rules |
 |---|---|---|
-| `app_id` | string | Required. An app in the agent's bundle |
-| `source` | string | `acme` (the agent orders and renews) or `uploaded` (from `CertificateInstall`) |
-| `state` | string | `pending` (an ACME order is running), `active` (a certificate is in use), `failed` (the last order or install failed; `chain_pem` is set while an older certificate is still in use), `missing` (TLS is on, nothing to serve yet) |
-| `certificate_id` | string | For `uploaded`, the id the bundle names; empty for `acme` |
-| `chain_pem` | bytes | The chain in use, leaf first, at most 64 KiB; public material. The server parses it itself (issuer, names, expiry) and does not trust the agent's reading |
+| `app_id` | string | Required. The server drops the status unless the app has an enabled assignment to this stream's agent in this stream's project when it arrives |
+| `source` | string | `acme` (the agent orders and renews) or `uploaded` (from `CertificateInstall`); dropped when it does not match the app's settings |
+| `state` | string | `pending` (an ACME order is running), `active` (a certificate is in use), `failed` (the last order or install failed; `chain_pem` is set while an older certificate is still in use), `missing` (TLS is on, nothing to serve yet). Any other value is dropped |
+| `certificate_id` | string | For `uploaded`, the id the bundle names, looked up by project, app and id together; empty for `acme` |
+| `chain_pem` | bytes | The chain in use, leaf first; public material. Only `CERTIFICATE` blocks, at most 10 certificates and 64 KiB, or the status is dropped. The server parses it itself (issuer, names, expiry), only when `leaf_sha256` changed, and does not trust the agent's reading |
 | `leaf_sha256` | string | Lower-case hex SHA-256 of the DER of the leaf; the server checks it against `chain_pem` |
-| `error` | string | For `failed`, at most 1 KiB, shown in the dashboard; never key material |
+| `error` | string | For `failed`, at most 1 KiB. Control characters are stripped, and the dashboard and email escape it; never key material |
 | `next_attempt_unix` | int64 | For `pending` and `failed`, when the agent tries again; 0 when nothing is planned |
-| `request_id` | string | The ACME request id of the bundle entry this state answers; a new id in the bundle asks the agent to order now. Empty for `uploaded` |
-| `unix_time` | int64 | When the agent saw this state |
+| `request_id` | string | The ACME request id of the bundle entry this state answers; a new id in the bundle asks the agent to order now. A status for an older request id is dropped. Empty for `uploaded` |
+| `unix_time` | int64 | When the agent saw this state. The server stores its own receive time |
 
-Security: authn=mTLS-client-cert; authz=only-apps-of-the-agent-bundle; input=untrusted-parsed-and-size-capped-by-the-server; key-material=never-carried
+Security: authn=mTLS-client-cert; authz=enabled-assignment-of-the-app-to-this-agent-in-this-project; input=untrusted-parsed-size-capped-and-escaped-by-the-server; key-material=never-carried
 
 ## Evolution rules
 

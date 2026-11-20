@@ -875,8 +875,9 @@ func (x *CommandAck) GetPayload() []byte {
 // and again whenever the state or the certificate in use changes. Only a
 // control plane that sends TLS settings in the bundle receives it; an older
 // one ignores the unknown message. It never carries private key material.
-// The server treats every field as untrusted input: it parses chain_pem
-// itself and checks leaf_sha256 against it.
+// The server treats every field as untrusted input; docs/agent-protocol.md
+// lists its checks (the app's assignment to this agent, the certificate looked
+// up by project, app and id, request_id, sizes, CERTIFICATE blocks only).
 type CertificateStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
@@ -894,7 +895,7 @@ type CertificateStatus struct {
 	// For "uploaded": the certificate_id the bundle names. Empty for "acme".
 	CertificateId string `protobuf:"bytes,4,opt,name=certificate_id,json=certificateId,proto3" json:"certificate_id,omitempty"`
 	// The chain in use, leaf first (public material). Empty when none is in use.
-	// At most 64 KiB.
+	// Only CERTIFICATE blocks, at most 10 certificates and 64 KiB.
 	ChainPem []byte `protobuf:"bytes,5,opt,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"`
 	// Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
 	LeafSha256 string `protobuf:"bytes,6,opt,name=leaf_sha256,json=leafSha256,proto3" json:"leaf_sha256,omitempty"`
@@ -905,7 +906,7 @@ type CertificateStatus struct {
 	// The ACME request id of the bundle entry this state answers (a new id in
 	// the bundle asks the agent to order now). Empty for "uploaded".
 	RequestId string `protobuf:"bytes,9,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	// When the agent saw this state.
+	// When the agent saw this state. The server records its own receive time.
 	UnixTime      int64 `protobuf:"varint,10,opt,name=unix_time,json=unixTime,proto3" json:"unix_time,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1346,22 +1347,34 @@ func (x *KeyRotation) GetNewHostKey() string {
 }
 
 // CertificateInstall carries an uploaded certificate chain and its private key
-// to the WAF agent that serves the app. Sent only to an agent whose Hello
-// features hold "tls_certificates": after each Hello for every uploaded
-// certificate its bundle names, and after an upload or a replace. The agent
-// checks that the key matches the leaf and that leaf_sha256 matches the
-// chain, writes the pair into its key directory, and acks with
-// CommandAck{command_id, ok, error}; an agent that already holds the same
-// leaf_sha256 acks ok without writing. It serves a certificate only while the
-// bundle names it by certificate_id and leaf_sha256, and deletes the files of
-// one the bundle no longer names. Key material is never logged, never put in
-// an ack and never sent in a BundleUpdate.
+// to the WAF agent that serves the app. The server sends it only on a stream
+// that reports the Hello feature "tls_certificates" and whose mTLS credential
+// is bound by host-key enrollment to this agent's host, kind and name; a
+// project-wide credential never receives a key. At send time it checks that
+// the app is assigned to this agent in this project. It sends it after the
+// BundleUpdate that names the certificate: after Welcome on connect, after an
+// upload, a replace or a move of the app, and again when a CertificateStatus
+// reports the app "missing". Every delivery is audited.
+//
+// An upload or a replace always gets a new certificate_id, so an id never
+// names other bytes. The agent refuses an install that its latest applied
+// bundle does not name (app_id, certificate_id and leaf_sha256), checks that
+// the key matches the leaf and that leaf_sha256 matches the chain, writes the
+// pair into its key directory and acks with CommandAck{command_id, ok, error}.
+// error is one of the codes in docs/agent-protocol.md, never free text. An
+// agent that already holds this certificate_id with this leaf_sha256 acks ok
+// without writing. It deletes the files of a certificate its bundle no longer
+// names. A key already sent to an agent that is offline, removed or no longer
+// serves the app is not recalled; replace the certificate instead. Key material
+// is never logged, never put in an ack and never sent in a BundleUpdate.
 type CertificateInstall struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CommandId     string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	AppId         string                 `protobuf:"bytes,2,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
-	CertificateId string                 `protobuf:"bytes,3,opt,name=certificate_id,json=certificateId,proto3" json:"certificate_id,omitempty"`
-	// Leaf first, PEM. At most 64 KiB.
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	CommandId string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	// Canonical lower-case UUIDs.
+	AppId         string `protobuf:"bytes,2,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	CertificateId string `protobuf:"bytes,3,opt,name=certificate_id,json=certificateId,proto3" json:"certificate_id,omitempty"`
+	// Only CERTIFICATE blocks, leaf first, at most 10 certificates and 64 KiB.
+	// Any other block is refused.
 	ChainPem []byte `protobuf:"bytes,4,opt,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"`
 	// One PKCS#8, PKCS#1 or SEC1 private key, PEM, without a passphrase.
 	// At most 16 KiB.
@@ -1795,14 +1808,14 @@ const file_agent_v1_agent_control_proto_rawDesc = "" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12 \n" +
 	"\fnew_host_key\x18\x02 \x01(\tR\n" +
-	"newHostKeyJ\x04\b\x03\x10\x04R\fnew_waf_keys\"\xc8\x01\n" +
+	"newHostKeyJ\x04\b\x03\x10\x04R\fnew_waf_keys\"\xcd\x01\n" +
 	"\x12CertificateInstall\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x15\n" +
 	"\x06app_id\x18\x02 \x01(\tR\x05appId\x12%\n" +
 	"\x0ecertificate_id\x18\x03 \x01(\tR\rcertificateId\x12\x1b\n" +
-	"\tchain_pem\x18\x04 \x01(\fR\bchainPem\x12\x17\n" +
-	"\akey_pem\x18\x05 \x01(\fR\x06keyPem\x12\x1f\n" +
+	"\tchain_pem\x18\x04 \x01(\fR\bchainPem\x12\x1c\n" +
+	"\akey_pem\x18\x05 \x01(\fB\x03\x80\x01\x01R\x06keyPem\x12\x1f\n" +
 	"\vleaf_sha256\x18\x06 \x01(\tR\n" +
 	"leafSha256\"\x1c\n" +
 	"\x04Ping\x12\x14\n" +

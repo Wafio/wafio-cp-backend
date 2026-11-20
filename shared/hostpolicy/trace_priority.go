@@ -46,6 +46,9 @@ var TraceKeepBuiltin = map[string]uint8{
 	"ssh_host_ed25519_key": TraceKeepName, "ssh_host_dsa_key": TraceKeepName,
 	"secring.gpg": TraceKeepName, "privkey.pem": TraceKeepName, "credentials": TraceKeepName,
 	"private": TraceKeepDir, ".aws": TraceKeepDir, ".azure": TraceKeepDir, ".docker": TraceKeepDir,
+	// The WAF agent key directory /var/lib/wafio-waf-agent/tls/, by its parent:
+	// "tls" alone is in the path of every TLS client on RHEL (/etc/pki/tls).
+	"wafio-waf-agent": TraceKeepDir,
 	"mem": TraceKeepName,
 	// auth. Reads of the public identity files (passwd, group,
 	// nsswitch.conf, login.defs, authorized_keys) are what every id, ls -l, sudo and

@@ -99,6 +99,8 @@ wafio.agent.v1.WAFDecisionEvent 6 status optional int32
 wafio.agent.v1.WAFDecisionEvent 7 score optional int32
 wafio.agent.v1.WAFDecisionEvent 8 action optional string
 wafio.agent.v1.WAFDecisionEvent 9 categories repeated string
+wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry 1 key optional string
+wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry 2 value optional string
 wafio.agent.v1.Welcome 1 agent_id optional string
 wafio.agent.v1.Welcome 2 server_time_unix optional int64
 wafio.agent.v1.Welcome 3 heartbeat_seconds optional uint32

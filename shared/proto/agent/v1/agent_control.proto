@@ -231,8 +231,9 @@ message CommandAck {
 // and again whenever the state or the certificate in use changes. Only a
 // control plane that sends TLS settings in the bundle receives it; an older
 // one ignores the unknown message. It never carries private key material.
-// The server treats every field as untrusted input: it parses chain_pem
-// itself and checks leaf_sha256 against it.
+// The server treats every field as untrusted input; docs/agent-protocol.md
+// lists its checks (the app's assignment to this agent, the certificate looked
+// up by project, app and id, request_id, sizes, CERTIFICATE blocks only).
 message CertificateStatus {
   string app_id            = 1;
   // "acme" (the agent orders and renews the certificate) or "uploaded"
@@ -247,7 +248,7 @@ message CertificateStatus {
   // For "uploaded": the certificate_id the bundle names. Empty for "acme".
   string certificate_id    = 4;
   // The chain in use, leaf first (public material). Empty when none is in use.
-  // At most 64 KiB.
+  // Only CERTIFICATE blocks, at most 10 certificates and 64 KiB.
   bytes  chain_pem         = 5;
   // Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
   string leaf_sha256       = 6;
@@ -258,7 +259,7 @@ message CertificateStatus {
   // The ACME request id of the bundle entry this state answers (a new id in
   // the bundle asks the agent to order now). Empty for "uploaded".
   string request_id        = 9;
-  // When the agent saw this state.
+  // When the agent saw this state. The server records its own receive time.
   int64  unix_time         = 10;
 }
 
@@ -316,25 +317,37 @@ message KeyRotation {
 }
 
 // CertificateInstall carries an uploaded certificate chain and its private key
-// to the WAF agent that serves the app. Sent only to an agent whose Hello
-// features hold "tls_certificates": after each Hello for every uploaded
-// certificate its bundle names, and after an upload or a replace. The agent
-// checks that the key matches the leaf and that leaf_sha256 matches the
-// chain, writes the pair into its key directory, and acks with
-// CommandAck{command_id, ok, error}; an agent that already holds the same
-// leaf_sha256 acks ok without writing. It serves a certificate only while the
-// bundle names it by certificate_id and leaf_sha256, and deletes the files of
-// one the bundle no longer names. Key material is never logged, never put in
-// an ack and never sent in a BundleUpdate.
+// to the WAF agent that serves the app. The server sends it only on a stream
+// that reports the Hello feature "tls_certificates" and whose mTLS credential
+// is bound by host-key enrollment to this agent's host, kind and name; a
+// project-wide credential never receives a key. At send time it checks that
+// the app is assigned to this agent in this project. It sends it after the
+// BundleUpdate that names the certificate: after Welcome on connect, after an
+// upload, a replace or a move of the app, and again when a CertificateStatus
+// reports the app "missing". Every delivery is audited.
+//
+// An upload or a replace always gets a new certificate_id, so an id never
+// names other bytes. The agent refuses an install that its latest applied
+// bundle does not name (app_id, certificate_id and leaf_sha256), checks that
+// the key matches the leaf and that leaf_sha256 matches the chain, writes the
+// pair into its key directory and acks with CommandAck{command_id, ok, error}.
+// error is one of the codes in docs/agent-protocol.md, never free text. An
+// agent that already holds this certificate_id with this leaf_sha256 acks ok
+// without writing. It deletes the files of a certificate its bundle no longer
+// names. A key already sent to an agent that is offline, removed or no longer
+// serves the app is not recalled; replace the certificate instead. Key material
+// is never logged, never put in an ack and never sent in a BundleUpdate.
 message CertificateInstall {
   string command_id     = 1;
+  // Canonical lower-case UUIDs.
   string app_id         = 2;
   string certificate_id = 3;
-  // Leaf first, PEM. At most 64 KiB.
+  // Only CERTIFICATE blocks, leaf first, at most 10 certificates and 64 KiB.
+  // Any other block is refused.
   bytes  chain_pem      = 4;
   // One PKCS#8, PKCS#1 or SEC1 private key, PEM, without a passphrase.
   // At most 16 KiB.
-  bytes  key_pem        = 5;
+  bytes  key_pem        = 5 [debug_redact = true];
   // Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
   string leaf_sha256    = 6;
 }
