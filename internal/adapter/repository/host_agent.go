@@ -370,16 +370,16 @@ func (r *EBPFRepo) UpdateAgentWAFHealth(ctx context.Context, projectID, agentID 
 }
 
 // UpdateAgentFeatures stores what the WAF agent reported in Hello: whether it can run script rules
-// (engine.AgentScriptRules) and whether it supports maintenance mode (engine.AgentMaintenanceMode);
-// nil = unknown. Written on every connect, so an agent replaced by an older build goes back to
-// unknown or false.
-func (r *EBPFRepo) UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance *bool) error {
+// (engine.AgentScriptRules), whether it supports maintenance mode (engine.AgentMaintenanceMode) and
+// whether it serves TLS certificates (engine.AgentTLSCertificates); nil = unknown. Written on every
+// connect, so an agent replaced by an older build goes back to unknown or false.
+func (r *EBPFRepo) UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool) error {
 	if r == nil || r.pool == nil {
 		return nil
 	}
 	_, err := r.pool.Exec(ctx,
-		`UPDATE agents SET script_rules = $3, maintenance_mode = $4 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
-		agentID, projectID, scriptRules, maintenance)
+		`UPDATE agents SET script_rules = $3, maintenance_mode = $4, tls_certificates = $5 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
+		agentID, projectID, scriptRules, maintenance, tlsCertificates)
 	return err
 }
 

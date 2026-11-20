@@ -126,9 +126,9 @@ type fakeHealthWriter struct {
 	features []featuresCall
 }
 
-// featuresCall is one UpdateAgentFeatures call; scripts and maintenance are "true", "false" or
+// featuresCall is one UpdateAgentFeatures call; scripts, maintenance and tls are "true", "false" or
 // "unknown".
-type featuresCall struct{ projectID, agentID, scripts, maintenance string }
+type featuresCall struct{ projectID, agentID, scripts, maintenance, tls string }
 
 func tristate(v *bool) string {
 	if v == nil {
@@ -137,10 +137,10 @@ func tristate(v *bool) string {
 	return strconv.FormatBool(*v)
 }
 
-func (f *fakeHealthWriter) UpdateAgentFeatures(_ context.Context, projectID, agentID string, scriptRules, maintenance *bool) error {
+func (f *fakeHealthWriter) UpdateAgentFeatures(_ context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.features = append(f.features, featuresCall{projectID, agentID, tristate(scriptRules), tristate(maintenance)})
+	f.features = append(f.features, featuresCall{projectID, agentID, tristate(scriptRules), tristate(maintenance), tristate(tlsCertificates)})
 	return nil
 }
 
@@ -190,23 +190,24 @@ func TestStoreWAFHealthResolvesAgentAndStores(t *testing.T) {
 
 func TestStoreAgentFeaturesFromHello(t *testing.T) {
 	for _, tc := range []struct {
-		name                 string
-		features             []string
-		wantScripts, wantMnt string
+		name                      string
+		features                  []string
+		wantScripts, wantMnt, tls string
 	}{
-		{"an agent that runs scripts", []string{engine.FeatureScriptRules}, "true", "false"},
-		{"an agent without scripts", []string{engine.FeatureNoScriptRules}, "false", "false"},
-		{"an agent with maintenance mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true"},
-		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true", "false"},
-		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false"},
-		{"agent without features", nil, "unknown", "false"},
+		{"an agent that runs scripts", []string{engine.FeatureScriptRules}, "true", "false", "false"},
+		{"an agent without scripts", []string{engine.FeatureNoScriptRules}, "false", "false", "false"},
+		{"an agent with maintenance mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true", "false"},
+		{"an agent that serves TLS", []string{engine.FeatureScriptRules, engine.FeatureTLSCertificates}, "true", "false", "true"},
+		{"a v1 agent that runs scripts", []string{"semantic_keys_jwt_graphql", "field_rules_v2", "custom_rule_field_paths", "semantic_only"}, "true", "false", "false"},
+		{"a v1 agent without scripts", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false", "false"},
+		{"agent without features", nil, "unknown", "false", "false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fw := &fakeHealthWriter{}
 			s := &Server{wafHealth: fw}
 			s.storeAgentFeatures("proj-1", "agent-uuid", tc.features)
-			if got := fw.featuresCalls(); len(got) != 1 || got[0] != (featuresCall{"proj-1", "agent-uuid", tc.wantScripts, tc.wantMnt}) {
-				t.Fatalf("stored features %+v, want scripts %s and maintenance %s for agent-uuid", got, tc.wantScripts, tc.wantMnt)
+			if got := fw.featuresCalls(); len(got) != 1 || got[0] != (featuresCall{"proj-1", "agent-uuid", tc.wantScripts, tc.wantMnt, tc.tls}) {
+				t.Fatalf("stored features %+v, want scripts %s, maintenance %s and TLS %s for agent-uuid", got, tc.wantScripts, tc.wantMnt, tc.tls)
 			}
 		})
 	}

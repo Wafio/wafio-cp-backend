@@ -4,8 +4,9 @@ import "slices"
 
 // The WAF agent reports two capabilities in Hello.features: FeatureScriptRules when it can run script
 // rules, FeatureNoScriptRules when it cannot (an earlier agent build without scripts), and
-// FeatureMaintenanceMode when it can answer with the maintenance page. Other names (v1 agents) are
-// ignored; every agent gets the same bundle.
+// FeatureMaintenanceMode when it can answer with the maintenance page, and FeatureTLSCertificates
+// when it can serve TLS from the bundle. Other names (v1 agents) are ignored; every agent gets the
+// same bundle.
 
 // FeatureScriptRules is the Hello.features entry a WAF agent sends when it can
 // run script rules.
@@ -41,5 +42,19 @@ const FeatureMaintenanceMode = "maintenance_mode"
 // this function.
 func AgentMaintenanceMode(features []string) *bool {
 	can := slices.Contains(features, FeatureMaintenanceMode)
+	return &can
+}
+
+// FeatureTLSCertificates is the Hello.features entry a WAF agent sends when it terminates TLS for
+// the applications whose bundle entry says so: it accepts CertificateInstall and sends
+// CertificateStatus. An agent without it ignores the tls key of the bundle, so no key is sent to it.
+const FeatureTLSCertificates = "tls_certificates"
+
+// AgentTLSCertificates says whether the WAF agent that sent these Hello.features serves TLS
+// certificates. As for maintenance mode, an agent that said Hello with no such feature (an empty
+// list included) is older than the feature, so the answer is no; only an agent that never
+// connected stays unknown, and that is the stored NULL.
+func AgentTLSCertificates(features []string) *bool {
+	can := slices.Contains(features, FeatureTLSCertificates)
 	return &can
 }

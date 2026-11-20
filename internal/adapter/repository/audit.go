@@ -91,6 +91,10 @@ const (
 	AuditAgentRegistered = "agent.registered"
 	AuditAgentDeleted    = "agent.deleted"
 
+	// Certificate keys sent to a WAF agent over its stream, and the agent's refusals
+	AuditAgentCertificateDelivered = "agent.certificate_delivered"
+	AuditAgentCertificateRefused   = "agent.certificate_refused"
+
 	// Firewall (eBPF) operations
 	AuditFirewallConfigUpdated     = "firewall.config_updated"
 	AuditFirewallBlocklistAdded    = "firewall.blocklist_added"

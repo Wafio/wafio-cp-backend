@@ -289,7 +289,7 @@ func TestDBAppMaintenanceAssignmentRefusal(t *testing.T) {
 	}
 	report := func(agent string, v *bool) {
 		t.Helper()
-		if err := m.repo.EBPF.UpdateAgentFeatures(ctx, m.project, agent, nil, v); err != nil {
+		if err := m.repo.EBPF.UpdateAgentFeatures(ctx, m.project, agent, nil, v, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
