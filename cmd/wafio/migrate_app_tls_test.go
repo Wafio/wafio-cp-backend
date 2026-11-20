@@ -89,8 +89,8 @@ func TestMigrationAppTLS(t *testing.T) {
 			OR (table_name = 'agents' AND column_name = 'tls_certificates'))`)
 	}
 	added := func() int {
-		return count(`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('app_certificates','app_tls_status')`) +
-			count(`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname IN ('uq_apps_id_project','idx_app_certificates_app','idx_app_tls_status_agent')`)
+		return count(`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('app_certificates','app_certificate_keys','app_tls_status')`) +
+			count(`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname IN ('uq_apps_id_project','idx_app_certificates_app','idx_app_tls_status_agent','uq_app_certificates_current')`)
 	}
 	if columns() != 0 || added() != 0 {
 		t.Fatalf("000124 is there before it ran: %d columns, %d objects", columns(), added())
@@ -98,8 +98,8 @@ func TestMigrationAppTLS(t *testing.T) {
 
 	checkApplied := func(when string) {
 		t.Helper()
-		if columns() != 9 || added() != 5 {
-			t.Fatalf("%s: %d of 9 columns, %d of 5 objects", when, columns(), added())
+		if columns() != 9 || added() != 7 {
+			t.Fatalf("%s: %d of 9 columns, %d of 7 objects", when, columns(), added())
 		}
 		var mode, listen, redirect, source, requestID string
 		var hosts []string
@@ -121,10 +121,11 @@ func TestMigrationAppTLS(t *testing.T) {
 
 	// The new tables take rows of their application and refuse the rest.
 	var cert string
-	if err := conn.QueryRow(ctx, `INSERT INTO app_certificates (project_id, app_id, chain_pem, key_ciphertext, leaf_sha256, names, issuer, key_type, not_before, not_after, trusted)
-		VALUES ($1, $2, 'chain', 'encb:v1:k:x', repeat('a', 64), ARRAY['shop.example.com'], 'CA', 'rsa-2048', NOW(), NOW() + interval '90 days', TRUE) RETURNING id`, project, app).Scan(&cert); err != nil {
+	if err := conn.QueryRow(ctx, `INSERT INTO app_certificates (project_id, app_id, chain_pem, leaf_sha256, names, issuer, key_type, not_before, not_after, trusted)
+		VALUES ($1, $2, 'chain', repeat('a', 64), ARRAY['shop.example.com'], 'CA', 'rsa-2048', NOW(), NOW() + interval '90 days', TRUE) RETURNING id`, project, app).Scan(&cert); err != nil {
 		t.Fatalf("certificate: %v", err)
 	}
+	exec(`INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, 'encb:v1:k:x')`, cert, project)
 	exec(`INSERT INTO app_tls_status (app_id, project_id, agent_id, source, state, certificate_id) VALUES ($1, $2, $3, 'uploaded', 'active', $4)`, app, project, agent, cert)
 	exec(`UPDATE apps SET tls_mode = 'gateway', tls_source = 'uploaded', tls_hosts = ARRAY['shop.example.com'], tls_certificate_id = $2 WHERE id = $1`, app, cert)
 	refused := func(what, sql string, args ...any) {
@@ -138,6 +139,9 @@ func TestMigrationAppTLS(t *testing.T) {
 	refused("a certificate of another project", `INSERT INTO app_certificates (project_id, app_id, chain_pem, leaf_sha256, key_type, not_before, not_after, trusted)
 		VALUES (gen_random_uuid(), $1, 'c', repeat('b', 64), 'rsa-2048', NOW(), NOW(), TRUE)`, app)
 	refused("a status of another project", `UPDATE app_tls_status SET project_id = gen_random_uuid() WHERE app_id = $1`, app)
+	refused("a second current certificate", `INSERT INTO app_certificates (project_id, app_id, chain_pem, leaf_sha256, key_type, not_before, not_after, trusted)
+		VALUES ($1, $2, 'c', repeat('b', 64), 'rsa-2048', NOW(), NOW(), TRUE)`, project, app)
+	refused("a key of another project", `INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, gen_random_uuid(), 'x')`, cert)
 	refused("a state that is not one of four", `UPDATE app_tls_status SET state = 'broken' WHERE app_id = $1`, app)
 
 	// Down: everything it added is gone, the application stays.

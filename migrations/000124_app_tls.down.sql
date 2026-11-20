@@ -6,6 +6,7 @@ ALTER TABLE agents
     DROP COLUMN IF EXISTS tls_certificates;
 
 DROP TABLE IF EXISTS app_tls_status;
+DROP TABLE IF EXISTS app_certificate_keys;
 DROP TABLE IF EXISTS app_certificates;
 
 ALTER TABLE apps

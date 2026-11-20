@@ -16,14 +16,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/wafio/wafio-cp-backend/internal/domain"
+	"github.com/wafio/wafio-cp-backend/internal/otp"
 )
 
 // TLSRepo stores how an application is served over TLS: the settings on the application, the
 // uploaded certificates with their sealed keys, and what the agent reported.
 //
-// Every query matches the project. The sealed key of a certificate is read by CertificateForDelivery
-// and by no other query (TestOnlyTheDeliveryQuerySelectsTheKey keeps it so), and what it returns is
-// still sealed: opening it is up to the caller.
+// Every query matches the project. The sealed key of a certificate lives in its own table, which
+// CertificateForDelivery reads and no other query does (TestOnlyTheDeliveryQuerySelectsTheKey keeps it
+// so), and what it returns is still sealed: opening it is up to the caller.
 type TLSRepo struct {
 	pool *pgxpool.Pool
 }
@@ -131,17 +132,24 @@ func plainListenerOf(appID, name, hostKey string, port *int32) *domain.PlainList
 	return &domain.PlainListener{AppID: appID, Name: name, Addr: netip.AddrPortFrom(addr, uint16(*port))}
 }
 
-// readTLSApp reads the application of the project; lock holds its row until the transaction ends.
-// It returns pgx.ErrNoRows when the application is not in the project.
+// readTLSApp reads the application of the project. With lock the row is locked first, in a statement
+// of its own, and the application is read after it in another: a statement that waits for the lock
+// still sees the rows its snapshot had when it started, so reading the agent in the locking statement
+// could name an agent the application has left meanwhile. A move holds the same row, so once this
+// transaction has it the agent cannot change under it. It returns pgx.ErrNoRows when the application
+// is not in the project.
 func readTLSApp(ctx context.Context, q queryer, projectID, appID string, lock bool) (tlsApp, error) {
+	if lock {
+		var one int
+		if err := q.QueryRow(ctx, `SELECT 1 FROM apps WHERE id = $1 AND project_id = $2 FOR UPDATE`, appID, projectID).Scan(&one); err != nil {
+			return tlsApp{}, err
+		}
+	}
 	query := `SELECT a.id::text, a.project_id::text, a.name, a.tls_mode, a.tls_hosts, a.tls_listen, a.tls_redirect_listen,
 		a.tls_source, COALESCE(a.tls_certificate_id::text, ''), a.acme_request_id, a.acme_requested_at, a.proxy_config,
 		wafio_listen_host_key(a.listen_host), a.listen_port,
 		COALESCE((SELECT waa.agent_id::text FROM waf_agent_apps waa WHERE waa.app_id = a.id AND waa.enabled = TRUE LIMIT 1), '')
 		FROM apps a WHERE a.id = $1 AND a.project_id = $2`
-	if lock {
-		query += ` FOR UPDATE OF a`
-	}
 	var a tlsApp
 	var proxy []byte
 	var hostKey string
@@ -163,12 +171,17 @@ func readTLSApp(ctx context.Context, q queryer, projectID, appID string, lock bo
 	return a, nil
 }
 
+// site is the application as the placement check sees it. An application that is not in gateway mode
+// has no HTTPS listener to place: only its plain listener counts.
 func (a tlsApp) site() domain.TLSSite {
+	if a.Mode != domain.TLSModeGateway {
+		return domain.TLSSite{AppID: a.id, Name: a.name}
+	}
 	return domain.TLSSite{AppID: a.id, Name: a.name, Listen: a.Listen, RedirectListen: a.RedirectListen, Hosts: a.Hosts, Limits: a.limits}
 }
 
 // checkTLSFit checks that a, with the settings it has now, fits next to the other applications of
-// the agent. The caller holds the bundle of the agent (lockAgentBundle), which is what makes the
+// the agent, whether it is in gateway mode or only has a plain listener of its own to place. The caller holds the bundle of the agent (lockAgentBundle), which is what makes the
 // answer hold until the change is committed. It returns a *domain.TLSConflictError.
 func checkTLSFit(ctx context.Context, q queryer, a tlsApp, agentID string) error {
 	rows, err := q.Query(ctx, `SELECT a.id::text, a.name, a.tls_mode, a.tls_listen, a.tls_redirect_listen, a.tls_hosts, a.proxy_config,
@@ -184,17 +197,17 @@ func checkTLSFit(ctx context.Context, q queryer, a tlsApp, agentID string) error
 	var plain []domain.PlainListener
 	for rows.Next() {
 		var o tlsApp
-		var mode, listen string
+		var listen string
 		var proxy []byte
 		var hostKey string
 		var port *int32
-		if err := rows.Scan(&o.id, &o.name, &mode, &listen, &o.RedirectListen, &o.Hosts, &proxy, &hostKey, &port); err != nil {
+		if err := rows.Scan(&o.id, &o.name, &o.Mode, &listen, &o.RedirectListen, &o.Hosts, &proxy, &hostKey, &port); err != nil {
 			return err
 		}
 		if p := plainListenerOf(o.id, o.name, hostKey, port); p != nil {
 			plain = append(plain, *p)
 		}
-		if mode != domain.TLSModeGateway {
+		if o.Mode != domain.TLSModeGateway {
 			continue
 		}
 		pc, err := domain.ParseProxyConfig(proxy)
@@ -396,29 +409,34 @@ func (r *TLSRepo) UpdateTLS(ctx context.Context, projectID, appID string, s doma
 	return out, tx.Commit(ctx)
 }
 
-// admitTLSMove checks that an application in gateway mode can run on another agent. The caller holds
-// the row of the application. Nothing is checked for an application that is not in gateway mode or
-// stays where it is.
+// admitTLSMove checks a move of an application to another agent, whatever its mode. The caller holds
+// the row of the application. The bundle of the target is held for every move, because an
+// application of any mode brings a plain listener that a gateway application there may already use.
+// An application in gateway mode also needs what a switch to gateway needs: the agent feature and,
+// for an uploaded source, a host-bound credential. Nothing is checked for an application that stays
+// where it is.
 func admitTLSMove(ctx context.Context, tx pgx.Tx, projectID, appID, agentID string) error {
 	a, err := readTLSApp(ctx, tx, projectID, appID, false)
 	if err != nil {
 		return err
 	}
-	if a.Mode != domain.TLSModeGateway || a.agentID == agentID {
+	if a.agentID == agentID {
 		return nil
 	}
 	if err := lockAgentBundle(ctx, tx, agentID); err != nil {
 		return err
 	}
-	agent, err := readTLSAgent(ctx, tx, projectID, agentID)
-	if err != nil {
-		return err
-	}
-	if agent.Supported != nil && !*agent.Supported {
-		return ErrTLSUnsupported
-	}
-	if a.Source == domain.TLSSourceUploaded && !agent.HostBound {
-		return ErrAgentNotHostBound
+	if a.Mode == domain.TLSModeGateway {
+		agent, err := readTLSAgent(ctx, tx, projectID, agentID)
+		if err != nil {
+			return err
+		}
+		if agent.Supported != nil && !*agent.Supported {
+			return ErrTLSUnsupported
+		}
+		if a.Source == domain.TLSSourceUploaded && !agent.HostBound {
+			return ErrAgentNotHostBound
+		}
 	}
 	return checkTLSFit(ctx, tx, a, agentID)
 }
@@ -478,8 +496,9 @@ type NewCertificate struct {
 	ID string
 	domain.CertificateInfo
 	KeyType string
-	// KeyCiphertext is the sealed private key (otp.Encryptor.SealBound).
-	KeyCiphertext string
+	// Key is the private key in plain text (domain.CertificateUpload.KeyPEM). InsertCertificate seals
+	// it, and zeroes these bytes, whether or not the upload is stored.
+	Key []byte
 	// CreatedBy is the user, "" when unknown.
 	CreatedBy string
 }
@@ -494,14 +513,38 @@ type CertificateStored struct {
 }
 
 // InsertCertificate stores an uploaded certificate as the current one of the application. The row
-// is new, so an id never names other bytes; the certificate that was current loses its key and is
-// marked replaced. In the same transaction the application becomes an uploaded-source one and, when
-// it is in gateway mode, the bundle generation goes up. The hosts of the application are checked
-// against the names again under the row lock, since a hosts edit may have come in after the caller
-// read them: a *TLSCoverageError. An application in gateway mode that switches to an uploaded
-// source needs a host-bound agent (ErrAgentNotHostBound). It returns pgx.ErrNoRows when the
-// application is not in the project.
-func (r *TLSRepo) InsertCertificate(ctx context.Context, projectID, appID string, c NewCertificate) (CertificateStored, error) {
+// is new, so an id never names other bytes. The certificate that was current is marked replaced and
+// its key row is deleted. The key is sealed here, bound to the project and the certificate
+// (domain.CertificateKeyAAD) with enc, and nothing else is ever written to the key table: a nil
+// enc is refused with otp.ErrNoEncryptionKey, and so is a result that is not in the sealed form.
+// The plain key bytes of c are zeroed before the function returns. In the same transaction the
+// application becomes an uploaded-source one and, when it is in gateway mode, the bundle generation
+// goes up. The hosts of the application are checked against the names again under the row lock,
+// since a hosts edit may have come in after the caller read them: a *TLSCoverageError. An
+// application in gateway mode that switches to an uploaded source needs a host-bound agent
+// (ErrAgentNotHostBound). It returns pgx.ErrNoRows when the application is not in the project.
+//
+// The deleted key row stays readable in dead tuples until vacuum, and in the write-ahead log and in
+// backups, as ciphertext; see migration 000124.
+func (r *TLSRepo) InsertCertificate(ctx context.Context, projectID, appID string, c NewCertificate, enc *otp.Encryptor) (CertificateStored, error) {
+	defer clear(c.Key)
+	if enc == nil {
+		return CertificateStored{}, otp.ErrNoEncryptionKey
+	}
+	if len(c.Key) == 0 {
+		return CertificateStored{}, errors.New("the certificate has no key")
+	}
+	if _, err := uuid.Parse(c.ID); err != nil {
+		return CertificateStored{}, errors.New("the certificate id is not a UUID")
+	}
+	sealed, err := enc.SealBound(c.Key, domain.CertificateKeyAAD(projectID, c.ID))
+	clear(c.Key)
+	if err != nil {
+		return CertificateStored{}, err
+	}
+	if !otp.IsBound(sealed) {
+		return CertificateStored{}, errors.New("the key was not sealed")
+	}
 	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return CertificateStored{}, err
@@ -523,15 +566,22 @@ func (r *TLSRepo) InsertCertificate(ctx context.Context, projectID, appID string
 			return CertificateStored{}, ErrAgentNotHostBound
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app_certificates SET key_ciphertext = NULL, replaced_at = NOW()
-		WHERE app_id = $1 AND project_id = $2 AND replaced_at IS NULL`, appID, projectID); err != nil {
+	if err := retireCertificates(ctx, tx, projectID, appID, true); err != nil {
 		return CertificateStored{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app_certificates (id, project_id, app_id, source, chain_pem, key_ciphertext, leaf_sha256,
+	names := c.Names
+	if names == nil {
+		names = []string{}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO app_certificates (id, project_id, app_id, source, chain_pem, leaf_sha256,
 		names, issuer, key_type, not_before, not_after, trusted, created_by)
-		VALUES ($1, $2, $3, 'uploaded', $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, '')::uuid)`,
-		c.ID, projectID, appID, c.ChainPEM, c.KeyCiphertext, c.LeafSHA256, c.Names, c.Issuer, c.KeyType,
+		VALUES ($1, $2, $3, 'uploaded', $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::uuid)`,
+		c.ID, projectID, appID, c.ChainPEM, c.LeafSHA256, names, c.Issuer, c.KeyType,
 		c.NotBefore, c.NotAfter, c.Trusted, c.CreatedBy); err != nil {
+		return CertificateStored{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, $3)`,
+		c.ID, projectID, sealed); err != nil {
 		return CertificateStored{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE apps SET tls_source = 'uploaded', tls_certificate_id = $3, updated_at = NOW()
@@ -549,6 +599,24 @@ func (r *TLSRepo) InsertCertificate(ctx context.Context, projectID, appID string
 	return out, tx.Commit(ctx)
 }
 
+// retireCertificates deletes the key rows of the application's certificates and marks them
+// replaced, so no row is current. onlyCurrent limits it to the certificate that is current now (a
+// replace); otherwise it takes every certificate of the application (a delete). The retired rows stay
+// as a record of what was uploaded.
+func retireCertificates(ctx context.Context, tx pgx.Tx, projectID, appID string, onlyCurrent bool) error {
+	current := ""
+	if onlyCurrent {
+		current = " AND replaced_at IS NULL"
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM app_certificate_keys WHERE project_id = $2 AND certificate_id IN
+		(SELECT id FROM app_certificates WHERE app_id = $1 AND project_id = $2`+current+`)`, appID, projectID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE app_certificates SET replaced_at = COALESCE(replaced_at, NOW())
+		WHERE app_id = $1 AND project_id = $2`+current, appID, projectID)
+	return err
+}
+
 // DeleteCertificate removes the keys of every certificate of the application and the pointer to the
 // current one, and returns the id of the certificate that was current ("" when none). The rows stay
 // as a record of what was uploaded. It returns ErrCertificateInUse while the application serves
@@ -564,8 +632,7 @@ func (r *TLSRepo) DeleteCertificate(ctx context.Context, projectID, appID string
 	if a.Mode == domain.TLSModeGateway && a.Source == domain.TLSSourceUploaded {
 		return "", ErrCertificateInUse
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app_certificates SET key_ciphertext = NULL, replaced_at = COALESCE(replaced_at, NOW())
-		WHERE app_id = $1 AND project_id = $2`, appID, projectID); err != nil {
+	if err := retireCertificates(ctx, tx, projectID, appID, false); err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE apps SET tls_certificate_id = NULL, updated_at = NOW() WHERE id = $1 AND project_id = $2`, appID, projectID); err != nil {
@@ -622,20 +689,21 @@ type CertificateDelivery struct {
 // certificate, and the only one that reads the key. Everything must hold at once: the application
 // is in the project, is enabled on this agent, is in gateway mode with an uploaded source, names
 // exactly this certificate as its current one, and the certificate is not replaced and still has its
-// key. It returns pgx.ErrNoRows otherwise. The agent is checked against its own row too, so an agent
-// that was removed gets nothing.
+// key row. It returns pgx.ErrNoRows otherwise. The agent is checked against its own row too: an agent
+// that was removed, or that did not say it serves TLS certificates, gets nothing.
 func (r *TLSRepo) CertificateForDelivery(ctx context.Context, projectID, agentID, appID, certID string) (CertificateDelivery, error) {
 	d := CertificateDelivery{AppID: appID, CertificateID: certID}
-	err := r.pool.QueryRow(ctx, `SELECT c.leaf_sha256, c.chain_pem, c.key_ciphertext
+	err := r.pool.QueryRow(ctx, `SELECT c.leaf_sha256, c.chain_pem, k.key_ciphertext
 		FROM apps a
 		JOIN waf_agent_apps waa ON waa.app_id = a.id
 		JOIN agents ag ON ag.id = waa.agent_id
 		JOIN app_certificates c ON c.id = a.tls_certificate_id
+		JOIN app_certificate_keys k ON k.certificate_id = c.id AND k.project_id = c.project_id
 		WHERE a.id = $3 AND a.project_id = $1
 		  AND waa.agent_id = $2 AND waa.enabled = TRUE
-		  AND ag.project_id = a.project_id AND ag.kind = 'waf' AND ag.deleted_at IS NULL
+		  AND ag.project_id = a.project_id AND ag.kind = 'waf' AND ag.deleted_at IS NULL AND ag.tls_certificates IS TRUE
 		  AND a.tls_mode = 'gateway' AND a.tls_source = 'uploaded' AND a.tls_certificate_id = $4
-		  AND c.app_id = a.id AND c.project_id = a.project_id AND c.replaced_at IS NULL AND c.key_ciphertext IS NOT NULL`,
+		  AND c.app_id = a.id AND c.project_id = a.project_id AND c.replaced_at IS NULL`,
 		projectID, agentID, appID, certID).Scan(&d.LeafSHA256, &d.ChainPEM, &d.KeyCiphertext)
 	return d, err
 }
@@ -696,13 +764,25 @@ func cleanStatusError(s string) string {
 }
 
 // UpsertTLSStatus stores the state an agent reported, replacing the row of the application. It
-// reports false, and stores nothing, unless all of this holds now: the application is in the
-// project, is enabled on the agent, is in gateway mode with this source, an acme report carries the
-// current request id, and an uploaded report names a certificate of this application. Nothing about
+// reports false, and stores nothing, unless all of this holds now: the ids are UUIDs, the
+// application is in the project, is enabled on the agent, is in gateway mode with this source, an
+// acme report carries the current request id, and an uploaded report names the certificate the
+// application names as its current one. Nothing about
 // the settings of the application changes. The server's own time is the receive time. When the
 // report carries no chain and the leaf is the stored one, the stored chain and the expiry
 // threshold already mailed stay; with another leaf both are cleared.
 func (r *TLSRepo) UpsertTLSStatus(ctx context.Context, s TLSStatusReport) (bool, error) {
+	// A malformed id would otherwise be a database error for what is only a bad report.
+	for _, id := range []string{s.ProjectID, s.AgentID, s.AppID} {
+		if _, err := uuid.Parse(id); err != nil {
+			return false, nil
+		}
+	}
+	if s.CertificateID != "" {
+		if _, err := uuid.Parse(s.CertificateID); err != nil {
+			return false, nil
+		}
+	}
 	var names []string
 	var issuer, chain string
 	var notBefore, notAfter *time.Time
@@ -715,15 +795,15 @@ func (r *TLSRepo) UpsertTLSStatus(ctx context.Context, s TLSStatusReport) (bool,
 	}
 	tag, err := r.pool.Exec(ctx, `INSERT INTO app_tls_status (app_id, project_id, agent_id, source, state, certificate_id, leaf_sha256,
 			error, next_attempt_at, request_id, received_at, names, issuer, not_before, not_after, chain_pem)
-		SELECT a.id, a.project_id, waa.agent_id, $4::text, $5::text, c.id, $7::text, $8::text, $9::timestamptz, $10::text, NOW(),
+		SELECT a.id, a.project_id, waa.agent_id, $4::text, $5::text, CASE WHEN $4::text = 'uploaded' THEN c.id END, $7::text, $8::text, $9::timestamptz, $10::text, NOW(),
 			$11::text[], $12::text, $13::timestamptz, $14::timestamptz, $15::text
 		FROM apps a
 		JOIN waf_agent_apps waa ON waa.app_id = a.id AND waa.enabled = TRUE AND waa.agent_id = $3
 		JOIN agents ag ON ag.id = waa.agent_id AND ag.project_id = a.project_id AND ag.kind = 'waf' AND ag.deleted_at IS NULL
-		LEFT JOIN app_certificates c ON c.id = NULLIF($6::text, '')::uuid AND c.app_id = a.id AND c.project_id = a.project_id
+		LEFT JOIN app_certificates c ON c.id = a.tls_certificate_id AND c.app_id = a.id AND c.project_id = a.project_id
 		WHERE a.id = $1 AND a.project_id = $2 AND a.tls_mode = 'gateway' AND a.tls_source = $4::text
 		  AND ($4::text <> 'acme' OR a.acme_request_id = $10::text)
-		  AND ($4::text <> 'uploaded' OR c.id IS NOT NULL)
+		  AND ($4::text <> 'uploaded' OR c.id = NULLIF($6::text, '')::uuid)
 		ON CONFLICT (app_id) DO UPDATE SET
 			agent_id = EXCLUDED.agent_id, source = EXCLUDED.source, state = EXCLUDED.state,
 			certificate_id = EXCLUDED.certificate_id, leaf_sha256 = EXCLUDED.leaf_sha256, error = EXCLUDED.error,

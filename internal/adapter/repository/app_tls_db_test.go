@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/wafio/wafio-cp-backend/internal/domain"
+	"github.com/wafio/wafio-cp-backend/internal/otp"
 	"github.com/wafio/wafio-cp-backend/internal/testutil/dbfixture"
 )
 
@@ -160,6 +162,20 @@ func (f *tlsDB) gateway(appID, source string, hosts ...string) TLSUpdate {
 	return f.mustUpdate(appID, f.settings(domain.TLSModeGateway, source, hosts...))
 }
 
+// testEncryptor seals the keys of the uploads in these tests.
+var testEncryptor = func() *otp.Encryptor {
+	e, err := otp.NewEncryptor(strings.Repeat("0123456789abcdef", 4))
+	if err != nil {
+		panic(err)
+	}
+	return e
+}()
+
+// plainKeyOf is the private key that newCert gives a certificate, which an upload seals and zeroes.
+func plainKeyOf(certID string) string {
+	return "-----BEGIN PRIVATE KEY-----\nkey of " + certID + "\n-----END PRIVATE KEY-----\n"
+}
+
 func newCert(names ...string) NewCertificate {
 	id := uuid.NewString()
 	sum := sha256.Sum256([]byte(id))
@@ -170,13 +186,13 @@ func newCert(names ...string) NewCertificate {
 			ChainPEM: "chain " + id, LeafSHA256: hex.EncodeToString(sum[:]), Names: names, Issuer: "Test CA",
 			NotBefore: now.Add(-24 * time.Hour), NotAfter: now.Add(90 * 24 * time.Hour), Trusted: true,
 		},
-		KeyType:       "ecdsa-p256",
-		KeyCiphertext: "encb:v1:test:" + id,
+		KeyType: "ecdsa-p256",
+		Key:     []byte(plainKeyOf(id)),
 	}
 }
 
 func (f *tlsDB) upload(appID string, c NewCertificate) (CertificateStored, error) {
-	return f.repo.TLS.InsertCertificate(context.Background(), f.project, appID, c)
+	return f.repo.TLS.InsertCertificate(context.Background(), f.project, appID, c, testEncryptor)
 }
 
 func (f *tlsDB) mustUpload(appID string, c NewCertificate) CertificateStored {
@@ -188,14 +204,24 @@ func (f *tlsDB) mustUpload(appID string, c NewCertificate) CertificateStored {
 	return got
 }
 
-// key reads the sealed key straight from the table, which only a test does.
+// key reads the sealed key straight from the table, which only a test does. nil: no key row.
 func (f *tlsDB) key(certID string) *string {
 	f.t.Helper()
-	var k *string
-	if err := f.repo.DB.QueryRow(context.Background(), `SELECT key_ciphertext FROM app_certificates WHERE id = $1`, certID).Scan(&k); err != nil {
+	var k string
+	err := f.repo.DB.QueryRow(context.Background(), `SELECT key_ciphertext FROM app_certificate_keys WHERE certificate_id = $1`, certID).Scan(&k)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		f.t.Fatal(err)
 	}
-	return k
+	return &k
+}
+
+// opensTo says whether the sealed key is the private key of the certificate, bound to this project.
+func (f *tlsDB) opensTo(sealed, certID string) bool {
+	plain, err := testEncryptor.OpenBound(sealed, domain.CertificateKeyAAD(f.project, certID))
+	return err == nil && string(plain) == plainKeyOf(certID)
 }
 
 func (f *tlsDB) get(appID string) (AppTLS, *AppCertificate) {
@@ -590,8 +616,8 @@ func TestDBTLSUploadReplaceAndKeys(t *testing.T) {
 		strings.Join(c.Names, ",") != "shop.example.com" || !c.NotAfter.Equal(first.NotAfter.Truncate(time.Microsecond)) {
 		t.Fatalf("stored = %+v, %+v", s, c)
 	}
-	if k := f.key(first.ID); k == nil || *k != first.KeyCiphertext {
-		t.Fatal("the key was not stored as given")
+	if k := f.key(first.ID); k == nil || !f.opensTo(*k, first.ID) {
+		t.Fatal("the key was not stored sealed for this project and certificate")
 	}
 
 	// In gateway mode a replace is pushed, and the old key goes.
@@ -783,7 +809,7 @@ func TestDBTLSCertificateForDeliveryConditions(t *testing.T) {
 		return f.repo.TLS.CertificateForDelivery(ctx, project, agent, appID, certID)
 	}
 	d, err := ask(f.project, a1, app, cert.ID)
-	if err != nil || d.KeyCiphertext != cert.KeyCiphertext || d.ChainPEM != cert.ChainPEM || d.LeafSHA256 != cert.LeafSHA256 || d.AppID != app || d.CertificateID != cert.ID {
+	if err != nil || !f.opensTo(d.KeyCiphertext, cert.ID) || d.ChainPEM != cert.ChainPEM || d.LeafSHA256 != cert.LeafSHA256 || d.AppID != app || d.CertificateID != cert.ID {
 		t.Fatalf("the serving agent: %+v, %v", d, err)
 	}
 	for name, got := range map[string]func() (CertificateDelivery, error){
@@ -816,6 +842,7 @@ func TestDBTLSCertificateForDeliveryConditions(t *testing.T) {
 	f.exec(`UPDATE apps SET tls_certificate_id = $2 WHERE id = $1`, app, cert.ID)
 
 	// Each condition on its own, turned off and on again.
+	sealedKey := f.key(cert.ID)
 	certRow := func(set string) func() {
 		return func() { f.exec(`UPDATE app_certificates SET `+set+` WHERE id = $1`, cert.ID) }
 	}
@@ -831,9 +858,11 @@ func TestDBTLSCertificateForDeliveryConditions(t *testing.T) {
 		{"acme source", appRow(`tls_source = 'acme'`), appRow(`tls_source = 'uploaded'`)},
 		{"no pointer", appRow(`tls_certificate_id = NULL`), appRow(`tls_certificate_id = $2`, cert.ID)},
 		{"certificate retired", certRow(`replaced_at = NOW()`), certRow(`replaced_at = NULL`)},
-		{"key gone", certRow(`key_ciphertext = NULL`), func() {
-			f.exec(`UPDATE app_certificates SET key_ciphertext = $2 WHERE id = $1`, cert.ID, cert.KeyCiphertext)
+		{"key gone", func() { f.exec(`DELETE FROM app_certificate_keys WHERE certificate_id = $1`, cert.ID) }, func() {
+			f.exec(`INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, $3)`, cert.ID, f.project, *sealedKey)
 		}},
+		{"agent did not say it serves TLS", func() { f.exec(`UPDATE agents SET tls_certificates = NULL WHERE id = $1`, a1) }, func() { f.exec(`UPDATE agents SET tls_certificates = TRUE WHERE id = $1`, a1) }},
+		{"agent says it does not serve TLS", func() { f.exec(`UPDATE agents SET tls_certificates = FALSE WHERE id = $1`, a1) }, func() { f.exec(`UPDATE agents SET tls_certificates = TRUE WHERE id = $1`, a1) }},
 		{"agent deleted", func() { f.exec(`UPDATE agents SET deleted_at = NOW() WHERE id = $1`, a1) }, func() { f.exec(`UPDATE agents SET deleted_at = NULL WHERE id = $1`, a1) }},
 	} {
 		c.off()
@@ -852,7 +881,7 @@ func TestDBTLSCertificateForDeliveryConditions(t *testing.T) {
 	if _, err := ask(f.project, a1, app, cert.ID); !errors.Is(err, pgx.ErrNoRows) {
 		t.Errorf("the agent the application left: %v", err)
 	}
-	if d, err := ask(f.project, a2, app, cert.ID); err != nil || d.KeyCiphertext == "" {
+	if d, err := ask(f.project, a2, app, cert.ID); err != nil || !f.opensTo(d.KeyCiphertext, cert.ID) {
 		t.Errorf("the agent the application moved to: %+v, %v", d, err)
 	}
 	// A replaced certificate is gone for good.
@@ -861,7 +890,7 @@ func TestDBTLSCertificateForDeliveryConditions(t *testing.T) {
 	if _, err := ask(f.project, a2, app, cert.ID); !errors.Is(err, pgx.ErrNoRows) {
 		t.Errorf("the replaced certificate: %v", err)
 	}
-	if d, err := ask(f.project, a2, app, next.ID); err != nil || d.KeyCiphertext != next.KeyCiphertext {
+	if d, err := ask(f.project, a2, app, next.ID); err != nil || !f.opensTo(d.KeyCiphertext, next.ID) {
 		t.Errorf("the new certificate: %+v, %v", d, err)
 	}
 }
@@ -1276,5 +1305,433 @@ func TestDBTLSRowsFollowTheirApplicationAndProject(t *testing.T) {
 	f.repo.DB.QueryRow(ctx, `SELECT (SELECT count(*) FROM app_certificates WHERE app_id = $1) + (SELECT count(*) FROM app_tls_status WHERE app_id = $1)`, app).Scan(&rows)
 	if rows != 0 {
 		t.Errorf("%d rows outlived the application", rows)
+	}
+}
+
+func TestDBTLSUploadSealsAndZeroesTheKey(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	agent := f.agent(ptr(true))
+	f.bind(agent)
+	app := f.app("shop", "", 0)
+	f.assign(agent, app)
+	f.mustUpdate(app, f.settings("proxy", "", "shop.example.com"))
+
+	good := newCert("shop.example.com")
+	goodKey := good.Key
+	f.mustUpload(app, good)
+	for i, b := range goodKey {
+		if b != 0 {
+			t.Fatalf("byte %d of the plain key survived the upload", i)
+		}
+	}
+	stored := f.key(good.ID)
+	if stored == nil || !strings.HasPrefix(*stored, "encb:v1:") || strings.Contains(*stored, "PRIVATE") || strings.Contains(*stored, "key of") {
+		t.Fatalf("stored key = %v", stored)
+	}
+	if !f.opensTo(*stored, good.ID) {
+		t.Fatal("the stored key does not open with the project and certificate it belongs to")
+	}
+	other := f.second()
+	for name, aad := range map[string]string{
+		"another project":     domain.CertificateKeyAAD(other.project, good.ID),
+		"another certificate": domain.CertificateKeyAAD(f.project, uuid.NewString()),
+		"no context":          "",
+	} {
+		if plain, err := testEncryptor.OpenBound(*stored, aad); err == nil {
+			t.Errorf("%s opened the key: %q", name, plain)
+		}
+	}
+
+	// Every refusal leaves nothing behind and zeroes the plain key all the same.
+	exists := func(id string) bool {
+		var n int
+		f.repo.DB.QueryRow(ctx, `SELECT (SELECT count(*) FROM app_certificates WHERE id = $1) + (SELECT count(*) FROM app_certificate_keys WHERE certificate_id = $1)`, id).Scan(&n)
+		return n > 0
+	}
+	zeroed := func(what string, b []byte) {
+		t.Helper()
+		if len(b) > 0 && !bytes.Equal(b, make([]byte, len(b))) {
+			t.Errorf("%s: the plain key was not zeroed", what)
+		}
+	}
+	noKey := newCert("shop.example.com")
+	keep := noKey.Key
+	if _, err := f.repo.TLS.InsertCertificate(ctx, f.project, app, noKey, nil); !errors.Is(err, otp.ErrNoEncryptionKey) {
+		t.Fatalf("no encryptor: %v", err)
+	}
+	zeroed("no encryptor", keep)
+	if exists(noKey.ID) {
+		t.Error("an upload without an encryptor stored something")
+	}
+	if s, _ := f.get(app); s.CertificateID != good.ID || f.key(good.ID) == nil {
+		t.Error("a refused upload retired the current certificate")
+	}
+
+	wrongHost := newCert("other.example.org")
+	keep = wrongHost.Key
+	var cover *TLSCoverageError
+	if _, err := f.upload(app, wrongHost); !errors.As(err, &cover) {
+		t.Fatalf("certificate for other names: %v", err)
+	}
+	zeroed("a refused upload", keep)
+	if exists(wrongHost.ID) {
+		t.Error("a refused upload stored something")
+	}
+
+	empty := newCert("shop.example.com")
+	empty.Key = nil
+	if _, err := f.upload(app, empty); err == nil || exists(empty.ID) {
+		t.Errorf("an upload without a key: %v", err)
+	}
+	badID := newCert("shop.example.com")
+	badID.ID = "not-a-uuid"
+	keep = badID.Key
+	if _, err := f.upload(app, badID); err == nil {
+		t.Error("an id that is not a UUID was accepted")
+	}
+	zeroed("a bad id", keep)
+	if s, _ := f.get(app); s.CertificateID != good.ID || f.key(good.ID) == nil {
+		t.Error("a refused upload changed the current certificate")
+	}
+}
+
+// A save and a move of one application at the same time: whichever order they take, the save is
+// checked against the agent that ends up serving the application.
+func TestDBTLSSaveIsCheckedAgainstTheAgentThatServesTheApplication(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	x, y := f.agent(nil), f.agent(nil)
+	occupant := f.app("occupant", "", 0)
+	f.assign(y, occupant)
+	f.gateway(occupant, "acme", "shop.example.com")
+	app := f.app("shop", "", 0)
+	f.assign(x, app)
+	want := f.settings("gateway", "acme", "shop.example.com")
+	assigned := func() string {
+		var a string
+		f.repo.DB.QueryRow(ctx, `SELECT COALESCE((SELECT agent_id::text FROM waf_agent_apps WHERE app_id = $1 AND enabled), '')`, app).Scan(&a)
+		return a
+	}
+	asHostConflict := func(err error) bool {
+		var ce *domain.TLSConflictError
+		return errors.As(err, &ce) && ce.Code == domain.TLSConflictHost && ce.OtherAppID == occupant
+	}
+
+	// The move holds the application while the save starts, then finishes: the save must see the new agent.
+	entered, release := make(chan struct{}), make(chan struct{})
+	moved := make(chan error, 1)
+	go func() {
+		moved <- f.repo.WAF.ReplaceAssignment(ctx, f.project, app, y, "block", func(domain.Maintenance) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	saved := make(chan error, 1)
+	go func() { _, err := f.update(app, want); saved <- err }()
+	time.Sleep(500 * time.Millisecond)
+	select {
+	case err := <-saved:
+		t.Fatalf("the save went through while the move held the application: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-moved; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-saved; !asHostConflict(err) {
+		t.Fatalf("the save after the move was not checked against the new agent: %v", err)
+	}
+	if s, _ := f.get(app); s.Mode != "proxy" || assigned() != y {
+		t.Fatalf("after the move: mode %s on %s", s.Mode, assigned())
+	}
+
+	// Both at once, many times: never a gateway application that shares the host on the agent it moved to.
+	for round := 0; round < 20; round++ {
+		f.mustUpdate(app, f.settings("proxy", ""))
+		if err := f.repo.WAF.ReplaceAssignment(ctx, f.project, app, x, "block", nil); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var moveErr, saveErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			moveErr = f.repo.WAF.ReplaceAssignment(ctx, f.project, app, y, "block", nil)
+		}()
+		go func() { defer wg.Done(); <-start; _, saveErr = f.update(app, want) }()
+		close(start)
+		wg.Wait()
+		s, _ := f.get(app)
+		switch {
+		case moveErr == nil && asHostConflict(saveErr): // the move came first
+			if assigned() != y || s.Mode != "proxy" {
+				t.Fatalf("round %d: move first, but mode %s on %s", round, s.Mode, assigned())
+			}
+		case saveErr == nil && asHostConflict(moveErr): // the save came first
+			if assigned() != x || s.Mode != "gateway" {
+				t.Fatalf("round %d: save first, but mode %s on %s", round, s.Mode, assigned())
+			}
+		default:
+			t.Fatalf("round %d: move %v, save %v: the host was granted twice or both were refused", round, moveErr, saveErr)
+		}
+	}
+}
+
+func TestDBDeleteAgentTakesItsTLSStatusRows(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	gone, kept := f.agent(ptr(true)), f.agent(ptr(true))
+	a, b := f.app("a", "", 0), f.app("b", "", 0)
+	f.assign(gone, a)
+	f.assign(kept, b)
+	f.gateway(a, "acme", "a.example.com")
+	f.gateway(b, "acme", "b.example.com")
+	for app, agent := range map[string]string{a: gone, b: kept} {
+		cur, _ := f.get(app)
+		if ok, err := f.repo.TLS.UpsertTLSStatus(ctx, TLSStatusReport{ProjectID: f.project, AgentID: agent, AppID: app, Source: "acme", State: "pending", RequestID: cur.ACMERequestID}); err != nil || !ok {
+			t.Fatalf("report: %v, %v", ok, err)
+		}
+	}
+	if err := f.repo.EBPF.DeleteAgent(ctx, f.project, gone); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := f.repo.TLS.GetTLSStatus(ctx, f.project, a); st != nil {
+		t.Error("the report of a deleted agent stayed")
+	}
+	if st, _ := f.repo.TLS.GetTLSStatus(ctx, f.project, b); st == nil {
+		t.Error("the report of another agent went with it")
+	}
+}
+
+func TestDBTLSStatusRefusesBadIdsAndCertificatesThatAreNotCurrent(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	agent := f.agent(ptr(true))
+	f.bind(agent)
+	app := f.app("shop", "", 0)
+	f.assign(agent, app)
+	f.mustUpdate(app, f.settings("proxy", "", "shop.example.com"))
+	old, cur := newCert("shop.example.com"), newCert("shop.example.com")
+	f.mustUpload(app, old)
+	f.mustUpload(app, cur)
+	f.gateway(app, "uploaded", "shop.example.com")
+	good := TLSStatusReport{ProjectID: f.project, AgentID: agent, AppID: app, Source: "uploaded", State: "active", CertificateID: cur.ID, LeafSHA256: cur.LeafSHA256}
+
+	for name, r := range map[string]TLSStatusReport{
+		"an app id that is not a UUID":        {ProjectID: good.ProjectID, AgentID: agent, AppID: "x'; --", Source: "uploaded", State: "active", CertificateID: cur.ID},
+		"an empty app id":                     {ProjectID: good.ProjectID, AgentID: agent, Source: "uploaded", State: "active", CertificateID: cur.ID},
+		"a project id that is not a UUID":     {ProjectID: "nope", AgentID: agent, AppID: app, Source: "uploaded", State: "active", CertificateID: cur.ID},
+		"an agent id that is not a UUID":      {ProjectID: good.ProjectID, AgentID: "nope", AppID: app, Source: "uploaded", State: "active", CertificateID: cur.ID},
+		"a certificate id that is not a UUID": {ProjectID: good.ProjectID, AgentID: agent, AppID: app, Source: "uploaded", State: "active", CertificateID: "nope"},
+		"the certificate the app replaced":    {ProjectID: good.ProjectID, AgentID: agent, AppID: app, Source: "uploaded", State: "active", CertificateID: old.ID, LeafSHA256: old.LeafSHA256},
+	} {
+		ok, err := f.repo.TLS.UpsertTLSStatus(ctx, r)
+		if err != nil || ok {
+			t.Errorf("%s: stored %v, error %v", name, ok, err)
+		}
+	}
+	if st, _ := f.repo.TLS.GetTLSStatus(ctx, f.project, app); st != nil {
+		t.Fatalf("a bad report was stored: %+v", st)
+	}
+	if ok, err := f.repo.TLS.UpsertTLSStatus(ctx, good); err != nil || !ok {
+		t.Fatalf("the current certificate: %v, %v", ok, err)
+	}
+
+	// An ACME report names no certificate, and one that does is stored without it.
+	f.mustUpdate(app, f.settings("gateway", "acme", "shop.example.com"))
+	acme, _ := f.get(app)
+	r := TLSStatusReport{ProjectID: f.project, AgentID: agent, AppID: app, Source: "acme", State: "pending", RequestID: acme.ACMERequestID, CertificateID: cur.ID}
+	if ok, err := f.repo.TLS.UpsertTLSStatus(ctx, r); err != nil || !ok {
+		t.Fatalf("acme report: %v, %v", ok, err)
+	}
+	if st, _ := f.repo.TLS.GetTLSStatus(ctx, f.project, app); st == nil || st.CertificateID != "" {
+		t.Errorf("an acme report kept a certificate id: %+v", st)
+	}
+}
+
+// A move of an application of any mode brings its plain listener to the other agent.
+func TestDBTLSMovedApplicationKeepsItsPlainListenerOffTheirAddresses(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	src, dst := f.agent(nil), f.agent(nil)
+	g := f.app("gateway", "", 0)
+	f.assign(dst, g)
+	s := f.settings("gateway", "acme", "g.example.com")
+	s.RedirectListen = "0.0.0.0:80"
+	f.mustUpdate(g, s)
+	move := func(app string) error { return f.repo.WAF.ReplaceAssignment(ctx, f.project, app, dst, "block", nil) }
+	var ce *domain.TLSConflictError
+
+	onHTTPS := f.app("on-https", "0.0.0.0", 443)
+	f.assign(src, onHTTPS)
+	if err := move(onHTTPS); !errors.As(err, &ce) || ce.Code != domain.TLSConflictListen || ce.Field != "listen_port" || ce.OtherAppID != g {
+		t.Fatalf("a proxy application on the HTTPS address: %v", err)
+	}
+	onRedirect := f.app("on-redirect", "", 80)
+	f.assign(src, onRedirect)
+	if err := move(onRedirect); !errors.As(err, &ce) || ce.Field != "listen_port" {
+		t.Fatalf("a proxy application on the redirect address: %v", err)
+	}
+	var on string
+	f.repo.DB.QueryRow(ctx, `SELECT agent_id::text FROM waf_agent_apps WHERE app_id = $1 AND enabled`, onHTTPS).Scan(&on)
+	if on != src {
+		t.Fatalf("a refused move moved the application to %s", on)
+	}
+	fine := f.app("fine", "0.0.0.0", 8080)
+	f.assign(src, fine)
+	if err := move(fine); err != nil {
+		t.Fatalf("a plain listener on another port: %v", err)
+	}
+	noPlain := f.app("no-plain", "", 0)
+	f.assign(src, noPlain)
+	if err := move(noPlain); err != nil {
+		t.Fatalf("an application without a plain listener: %v", err)
+	}
+	// Another address on the same port is not the same listener.
+	other := f.app("other-address", "127.0.0.1", 443)
+	f.assign(src, other)
+	if err := move(other); err != nil {
+		t.Fatalf("a plain listener on another address: %v", err)
+	}
+	// The move waits for a save of the target's bundle: both take it.
+	held := f.agent(nil)
+	racer := f.app("racer", "0.0.0.0", 9000)
+	f.assign(src, racer)
+	hold := make(chan struct{})
+	entered := make(chan struct{})
+	go func() {
+		tx, err := f.repo.DB.Begin(ctx)
+		if err != nil {
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		if lockAgentBundle(ctx, tx, held) == nil {
+			close(entered)
+			<-hold
+		}
+	}()
+	<-entered
+	done := make(chan error, 1)
+	go func() { done <- f.repo.WAF.ReplaceAssignment(ctx, f.project, racer, held, "block", nil) }()
+	select {
+	case err := <-done:
+		t.Fatalf("a move onto an agent whose bundle is held did not wait: %v", err)
+	case <-time.After(400 * time.Millisecond):
+	}
+	close(hold)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDBTLSOneCurrentCertificatePerApplication(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	app := f.app("shop", "", 0)
+	f.mustUpdate(app, f.settings("proxy", "", "shop.example.com"))
+	first := newCert("shop.example.com")
+	f.mustUpload(app, first)
+	insert := func(id string, replaced bool) error {
+		var at any
+		if replaced {
+			at = time.Now()
+		}
+		_, err := f.repo.DB.Exec(ctx, `INSERT INTO app_certificates (id, project_id, app_id, chain_pem, leaf_sha256, key_type, not_before, not_after, trusted, replaced_at)
+			VALUES ($1, $2, $3, 'x', $4, 'rsa-2048', NOW(), NOW(), TRUE, $5)`, id, f.project, app, strings.Repeat("c", 64), at)
+		return err
+	}
+	if err := insert(uuid.NewString(), false); err == nil {
+		t.Error("a second current certificate was stored")
+	}
+	if err := insert(uuid.NewString(), true); err != nil {
+		t.Errorf("a replaced certificate was refused: %v", err)
+	}
+	// Another application has its own.
+	other := f.app("blog", "", 0)
+	f.mustUpload(other, newCert())
+
+	// Replace and delete both end with no more than one, and a delete with none.
+	for i := 0; i < 3; i++ {
+		f.mustUpload(app, newCert("shop.example.com"))
+	}
+	var current int
+	f.repo.DB.QueryRow(ctx, `SELECT count(*) FROM app_certificates WHERE app_id = $1 AND replaced_at IS NULL`, app).Scan(&current)
+	if current != 1 {
+		t.Errorf("%d current certificates after uploads", current)
+	}
+	if _, err := f.repo.TLS.DeleteCertificate(ctx, f.project, app); err != nil {
+		t.Fatal(err)
+	}
+	f.repo.DB.QueryRow(ctx, `SELECT count(*) FROM app_certificates WHERE app_id = $1 AND replaced_at IS NULL`, app).Scan(&current)
+	var keys int
+	f.repo.DB.QueryRow(ctx, `SELECT count(*) FROM app_certificate_keys k JOIN app_certificates c ON c.id = k.certificate_id WHERE c.app_id = $1`, app).Scan(&keys)
+	if current != 0 || keys != 0 {
+		t.Errorf("after a delete: %d current certificates, %d keys", current, keys)
+	}
+	if first.ID == "" || f.key(first.ID) != nil {
+		t.Error("a key of a replaced certificate stayed")
+	}
+}
+
+func TestDBTLSKeyTableFollowsItsCertificate(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	app := f.app("shop", "", 0)
+	c := newCert()
+	f.mustUpload(app, c)
+	foreign := f.second()
+	f.exec(`DELETE FROM app_certificate_keys WHERE certificate_id = $1`, c.ID)
+	if _, err := f.repo.DB.Exec(ctx, `INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, 'x')`, c.ID, foreign.project); err == nil {
+		t.Error("a key row was stored with another project than its certificate")
+	}
+	f.exec(`INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, 'x')`, c.ID, f.project)
+	if _, err := f.repo.DB.Exec(ctx, `INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, 'y')`, c.ID, f.project); err == nil {
+		t.Error("a second key row was stored for one certificate")
+	}
+	if _, err := f.repo.DB.Exec(ctx, `INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, 'x')`, uuid.NewString(), f.project); err == nil {
+		t.Error("a key row was stored without a certificate")
+	}
+	f.exec(`DELETE FROM apps WHERE id = $1`, app)
+	var n int
+	f.repo.DB.QueryRow(ctx, `SELECT count(*) FROM app_certificate_keys WHERE certificate_id = $1`, c.ID).Scan(&n)
+	if n != 0 {
+		t.Error("a key outlived its application")
+	}
+}
+
+// Two addresses on one port cannot both be bound by the agent when one of them is a wildcard.
+func TestDBTLSWildcardListenersOverlap(t *testing.T) {
+	f := newTLSDB(t)
+	agent := f.agent(nil)
+	a, b, c := f.app("a", "", 0), f.app("b", "", 0), f.app("c", "", 0)
+	for _, app := range []string{a, b, c} {
+		f.assign(agent, app)
+	}
+	f.gateway(a, "acme", "a.example.com")
+	var ce *domain.TLSConflictError
+	specific := f.settings("gateway", "acme", "b.example.com")
+	specific.Listen = "10.0.0.9:443"
+	if _, err := f.update(b, specific); !errors.As(err, &ce) || ce.Code != domain.TLSConflictListen || ce.Field != "listen" || ce.OtherAppID != a {
+		t.Fatalf("a specific address on the port of a wildcard: %v", err)
+	}
+	specific.Listen = "10.0.0.9:8443"
+	f.mustUpdate(b, specific)
+	wild := f.settings("gateway", "acme", "c.example.com")
+	wild.Listen = "[::]:8443"
+	if _, err := f.update(c, wild); !errors.As(err, &ce) || ce.OtherAppID != b {
+		t.Fatalf("an IPv6 wildcard over a specific address: %v", err)
+	}
+	redirect := f.settings("gateway", "acme", "c.example.com")
+	redirect.Listen, redirect.RedirectListen = "10.0.0.7:9443", "10.0.0.8:80"
+	f.mustUpdate(c, redirect)
+	// A redirect listener that is a wildcard over the HTTPS listener of another application.
+	redirect.RedirectListen = "0.0.0.0:8443"
+	if _, err := f.update(c, redirect); !errors.As(err, &ce) || ce.Field != "redirect_listen" || ce.OtherAppID != b {
+		t.Fatalf("a wildcard redirect listener over the HTTPS listener of another: %v", err)
 	}
 }

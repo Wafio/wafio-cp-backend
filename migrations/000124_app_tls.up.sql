@@ -16,11 +16,18 @@
 -- apps.acme_requested_at    when it was asked last; limits how often.
 --
 -- app_certificates          uploaded certificates, one row per upload, never updated in place
---                           except to retire it. chain_pem holds only CERTIFICATE blocks,
---                           re-encoded from the parsed DER. key_ciphertext is the private key,
---                           sealed with the AAD of project and certificate (encb:v1:); it is NULL
---                           once the row is replaced or its key deleted, and only the delivery
---                           to an agent reads it. The dashboard is the only writer.
+--                           except to retire it (replaced_at). chain_pem holds only CERTIFICATE
+--                           blocks, re-encoded from the parsed DER. At most one row per
+--                           application is current (replaced_at IS NULL). The dashboard is the
+--                           only writer.
+-- app_certificate_keys      the private key of a certificate, sealed with the AAD of project and
+--                           certificate (encb:v1:), in a table of its own so that no query on
+--                           app_certificates can return it by accident. Only the delivery to an
+--                           agent reads it. A replaced or deleted key is a DELETE of its row. The
+--                           ciphertext of a deleted row stays readable in dead tuples until
+--                           vacuum, and in the write-ahead log and in backups for as long as
+--                           those are kept; it stays sealed, so only changing totp.enc_key and
+--                           retiring the old key makes those copies useless.
 -- app_tls_status           what the agent last said about the application: one row per
 --                           application, replaced as a whole, never read back into apps. The
 --                           chain columns describe the certificate in use as the server parsed it
@@ -62,7 +69,6 @@ CREATE TABLE IF NOT EXISTS app_certificates (
     app_id               UUID NOT NULL,
     source               TEXT NOT NULL DEFAULT 'uploaded' CHECK (source = 'uploaded'),
     chain_pem            TEXT NOT NULL,
-    key_ciphertext       TEXT NULL,
     leaf_sha256          TEXT NOT NULL CHECK (leaf_sha256 ~ '^[0-9a-f]{64}$'),
     names                TEXT[] NOT NULL DEFAULT '{}',
     issuer               TEXT NOT NULL DEFAULT '',
@@ -74,10 +80,20 @@ CREATE TABLE IF NOT EXISTS app_certificates (
     created_by           UUID NULL REFERENCES users (id) ON DELETE SET NULL,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     replaced_at          TIMESTAMPTZ NULL,
+    CONSTRAINT app_certificates_id_project_key UNIQUE (id, project_id),
     FOREIGN KEY (app_id, project_id) REFERENCES apps (id, project_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_certificates_app ON app_certificates (app_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_app_certificates_current ON app_certificates (app_id) WHERE replaced_at IS NULL;
+
+-- No CHECK on the ciphertext: Postgres repeats the row in the text of a failed check.
+CREATE TABLE IF NOT EXISTS app_certificate_keys (
+    certificate_id UUID PRIMARY KEY,
+    project_id     UUID NOT NULL,
+    key_ciphertext TEXT NOT NULL,
+    FOREIGN KEY (certificate_id, project_id) REFERENCES app_certificates (id, project_id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS app_tls_status (
     app_id          UUID PRIMARY KEY,

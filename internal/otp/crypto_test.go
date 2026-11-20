@@ -240,3 +240,14 @@ func TestNilEncryptorNeverPassesBoundValuesThrough(t *testing.T) {
 		t.Fatalf("OpenBound on nil = %q, %v", got, err)
 	}
 }
+
+func TestIsBound(t *testing.T) {
+	e, _ := NewEncryptor(testKeyHex())
+	bound, _ := e.SealBound([]byte("key"), boundAAD)
+	old, _ := e.Encrypt("secret")
+	for stored, want := range map[string]bool{bound: true, old: false, "": false, "-----BEGIN PRIVATE KEY-----": false, "encb:v2:x:y": false, "ENCB:V1:x": false} {
+		if got := IsBound(stored); got != want {
+			t.Errorf("IsBound(%.20q) = %v, want %v", stored, got, want)
+		}
+	}
+}
