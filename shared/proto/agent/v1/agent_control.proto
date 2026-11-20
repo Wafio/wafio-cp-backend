@@ -243,7 +243,10 @@ message CertificateStatus {
   // "active"   a certificate is in use (after an order, a renewal or an install)
   // "failed"   the last order or install failed; chain_pem is set when an
   //            older certificate is still in use
-  // "missing"  TLS is on but there is no certificate to serve yet
+  // "missing"  TLS is on and the bundle names a certificate that the agent
+  //            does not hold: there is none to serve yet, or the agent still
+  //            serves the previous one, which chain_pem and leaf_sha256 then
+  //            describe. For "uploaded" this asks for a CertificateInstall.
   string state             = 3;
   // For "uploaded": the certificate_id the bundle names. Empty for "acme".
   string certificate_id    = 4;
@@ -321,10 +324,11 @@ message KeyRotation {
 // that reports the Hello feature "tls_certificates" and whose mTLS credential
 // is bound by host-key enrollment to this agent's host, kind and name; a
 // project-wide credential never receives a key. At send time it checks that
-// the app is assigned to this agent in this project. It sends it after the
-// BundleUpdate that names the certificate: after Welcome on connect, after an
-// upload, a replace or a move of the app, and again when a CertificateStatus
-// reports the app "missing". Every delivery is audited.
+// the app is assigned to this agent in this project. It sends it when a
+// CertificateStatus reports the app "missing" for the certificate that the
+// latest BundleUpdate names: a connect, an upload, a replace and a move of the
+// app each send such a bundle, and the agent asks by reporting "missing" once
+// it has applied it. Every delivery is audited.
 //
 // An upload or a replace always gets a new certificate_id, so an id never
 // names other bytes. The agent refuses an install that its latest applied
