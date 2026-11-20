@@ -151,7 +151,7 @@ func TestDBCertificateExpiryMailsOwnersAndMembersOnce(t *testing.T) {
 	release()
 	svc().Check(ctx)
 	sink.await(t, ownerEmail, "expires in 1 day")
-	if n := level(); n == nil || *n != 3 || sink.count() != 4 {
+	if n := level(); n == nil || *n != 1 || sink.count() != 4 {
 		t.Fatalf("after the lock was free: level %v, %d mails", n, sink.count())
 	}
 

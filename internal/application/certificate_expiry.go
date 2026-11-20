@@ -198,10 +198,17 @@ func expiryMail(c domain.ExpiryCandidate, now time.Time, baseURL string) (subjec
 		subject = "Wafio: the certificate of " + app + " expires " + when
 	}
 
+	// At the final level an ACME certificate is not late, it has failed to renew.
+	level, _ := domain.ExpiryLevel(c.Source, c.NotBefore, c.NotAfter, now)
+	final := expired || level == domain.FinalExpiryDays
+
 	var b strings.Builder
-	if expired {
+	switch {
+	case expired:
 		b.WriteString("The certificate that WAFio serves for an application of your project has expired.\n\n")
-	} else {
+	case final:
+		b.WriteString("The certificate that WAFio serves for an application of your project is about to expire.\n\n")
+	default:
 		b.WriteString("The certificate that WAFio serves for an application of your project expires soon.\n\n")
 	}
 	fmt.Fprintf(&b, "Project: %s\n", oneLine(c.ProjectName))
@@ -215,10 +222,15 @@ func expiryMail(c domain.ExpiryCandidate, now time.Time, baseURL string) (subjec
 		b.WriteString("  none\n")
 	}
 	fmt.Fprintf(&b, "Expires: %s (%s)\n\n", c.NotAfter.UTC().Format("2006-01-02 15:04 UTC"), when)
-	if c.Source == domain.TLSSourceACME {
+	switch {
+	case c.Source == domain.TLSSourceACME && final:
+		b.WriteString("The renewal has failed. The agent renews an ACME certificate well before it expires, and this one has no successor. " +
+			"Check the certificate status of the application, and check that the WAF agent is running and can reach the certificate authority. " +
+			"Visitors get a certificate error once it has expired.\n")
+	case c.Source == domain.TLSSourceACME:
 		b.WriteString("The agent renews an ACME certificate well before it expires, so a warning now means that the renewal is late. " +
 			"Check the certificate status of the application, and check that the WAF agent is running and can reach the certificate authority.\n")
-	} else {
+	default:
 		b.WriteString("Upload a new certificate for this application before that date. Visitors get a certificate error once it has expired.\n")
 	}
 	if baseURL != "" {

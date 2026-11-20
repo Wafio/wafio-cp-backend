@@ -256,8 +256,10 @@ func TestStateWarnings(t *testing.T) {
 		"no source":                      {tlsRead{tls: repository.AppTLS{}, cert: &repository.AppCertificate{NotAfter: inDays(1)}}, ""},
 		"acme source, old upload kept":   {tlsRead{tls: repository.AppTLS{Source: domain.TLSSourceACME}, cert: &repository.AppCertificate{NotAfter: inDays(1)}}, ""},
 		"acme of 90 days, 14.5 left":     {acmeFrom(&soon, inDays(14.5-90)), tlsWarnExpiresSoon},
-		"acme of 6 days, 1 day left":     {acmeFrom(at(inDays(1)), inDays(1-6)), ""},
-		"acme of 6 days, expired":        {acmeFrom(at(inDays(-1)), inDays(-1-6)), ""},
+		"acme of 6 days, 3 days left":    {acmeFrom(at(inDays(3)), inDays(3-6)), ""},
+		"acme of 6 days, 1 day left":     {acmeFrom(at(inDays(1)), inDays(1-6)), tlsWarnExpiresSoon},
+		"acme of 6 days, expired":        {acmeFrom(at(inDays(-1)), inDays(-1-6)), tlsWarnExpiresSoon},
+		"acme of 12 hours, 6 hours left": {acmeFrom(at(inDays(0.25)), inDays(0.25-0.5)), tlsWarnExpiresSoon},
 		"uploaded of 6 days, 1 day left": {tlsRead{tls: repository.AppTLS{Source: domain.TLSSourceUploaded}, cert: &repository.AppCertificate{Trusted: true, NotBefore: inDays(1 - 6), NotAfter: inDays(1)}}, tlsWarnExpiresSoon},
 	} {
 		if got := codes(c.r); got != c.want {

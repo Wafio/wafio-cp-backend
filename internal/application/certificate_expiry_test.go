@@ -208,8 +208,9 @@ func TestUploadedCertificateIsMailedOncePerLevel(t *testing.T) {
 		{13*expiryDay + time.Hour, 2, 14, "expires in 13 days"},
 		{13*expiryDay + time.Hour, 0, 14, ""},
 		{2*expiryDay + time.Hour, 2, 3, "expires in 2 days"},
-		{12 * time.Hour, 0, 3, ""},
-		{-expiryDay, 0, 3, ""},
+		{expiryDay + time.Hour, 2, 1, "expires in 1 day"},
+		{12 * time.Hour, 0, 1, ""},
+		{-expiryDay, 0, 1, ""},
 	}
 	notAfter := r.now.Add(90 * expiryDay)
 	for _, s := range steps {
@@ -247,7 +248,9 @@ func TestACMECertificateIsMailedOnlyWhenRenewalIsLate(t *testing.T) {
 		{13*expiryDay + time.Hour, 2, 14},
 		{13*expiryDay + time.Hour, 0, 14},
 		{2*expiryDay + time.Hour, 2, 3},
-		{expiryDay, 0, 3},
+		{expiryDay + time.Hour, 2, 1},
+		{expiryDay, 0, 1},
+		{12 * time.Hour, 0, 1},
 	} {
 		r.now = notAfter.Add(-s.left)
 		r.setAt(notAfter)
@@ -641,35 +644,89 @@ func TestInvisibleFormatCharactersAreDropped(t *testing.T) {
 	}
 }
 
-// A certificate of a few days is renewed from the day it is issued, so no level is late for it: an
-// ACME certificate of six days is not warned about, and an uploaded one of the same life still is.
-func TestShortLivedACMECertificateIsNotWarnedAbout(t *testing.T) {
+// A certificate of a few days is renewed from the day it is issued, so the levels that are late for a
+// long one mean nothing for it. An ACME certificate of six days gets the final level only: one mail,
+// in the last day, that says the renewal has failed.
+func TestShortLivedACMECertificateGetsTheFinalMailOnly(t *testing.T) {
 	r := newExpiryRig(domain.TLSSourceACME)
 	notAfter := r.now.Add(30 * expiryDay)
-	for _, left := range []time.Duration{4 * expiryDay, 2 * expiryDay, expiryDay, time.Hour, -time.Hour} {
+	step := func(left time.Duration) []expirySent {
 		r.now = notAfter.Add(-left)
 		r.store.candidates[0].NotAfter = notAfter
 		r.store.candidates[0].NotBefore = notAfter.Add(-6 * expiryDay)
-		if got := r.check(t); len(got) != 0 {
+		return r.check(t)
+	}
+	for _, left := range []time.Duration{5 * expiryDay, 4 * expiryDay, 3 * expiryDay, 2*expiryDay + time.Hour} {
+		if got := step(left); len(got) != 0 {
 			t.Fatalf("a six day certificate with %s left was mailed", left)
 		}
 	}
-	// The same life as an upload is the owner's to renew.
+	got := step(expiryDay + time.Hour)
+	if len(got) != 2 {
+		t.Fatalf("the final mail went to %d, want 2", len(got))
+	}
+	for _, want := range []string{"expires in 1 day", "is about to expire", "The renewal has failed", "WAF agent"} {
+		if !strings.Contains(got[0].subject+got[0].body, want) {
+			t.Errorf("the final mail lacks %q:\n%s\n%s", want, got[0].subject, got[0].body)
+		}
+	}
+	if strings.Contains(got[0].body, "renewal is late") || strings.Contains(got[0].body, "Upload a new certificate") {
+		t.Errorf("the final mail of an ACME certificate:\n%s", got[0].body)
+	}
+	if n := r.store.notified(r.store.candidates[0].AppID); n != 1 {
+		t.Errorf("stored level %d, want 1", n)
+	}
+	for _, left := range []time.Duration{expiryDay, 12 * time.Hour, time.Hour, -time.Hour, -expiryDay} {
+		if got := step(left); len(got) != 0 {
+			t.Fatalf("a second mail with %s left", left)
+		}
+	}
+	// The same life as an upload is the owner's to renew: it keeps all its levels.
 	up := newExpiryRig(domain.TLSSourceUploaded)
-	up.now = notAfter.Add(-expiryDay)
+	up.now = notAfter.Add(-5 * expiryDay)
 	up.store.candidates[0].NotAfter = notAfter
 	up.store.candidates[0].NotBefore = notAfter.Add(-6 * expiryDay)
-	if got := up.check(t); len(got) != 2 {
-		t.Fatalf("an uploaded certificate of six days was mailed to %d", len(got))
+	if got := up.check(t); len(got) != 2 || up.store.notified(up.store.candidates[0].AppID) != 14 {
+		t.Fatalf("an uploaded certificate of six days with 5 days left: %d mails, level %d", len(got), up.store.notified(up.store.candidates[0].AppID))
 	}
-	// A 90 day certificate keeps both levels, and an unknown start skips none.
+	// A 90 day certificate keeps its levels, and an unknown start skips none.
 	for _, notBefore := range []time.Time{{}, notAfter.Add(-90 * expiryDay), notAfter.Add(-45 * expiryDay)} {
 		r2 := newExpiryRig(domain.TLSSourceACME)
 		r2.now = notAfter.Add(-10 * expiryDay)
 		r2.store.candidates[0].NotAfter = notAfter
 		r2.store.candidates[0].NotBefore = notBefore
-		if got := r2.check(t); len(got) != 2 {
+		got := r2.check(t)
+		if len(got) != 2 || !strings.Contains(got[0].body, "renewal is late") {
 			t.Fatalf("an ACME certificate from %v with 10 days left was mailed to %d", notBefore, len(got))
+		}
+	}
+}
+
+// Whatever the lifetime, an ACME certificate that is about to expire gets exactly one mail, the
+// final one, and the dashboard shows expires_soon from the same day.
+func TestFinalMailForEveryLifetime(t *testing.T) {
+	for _, life := range []time.Duration{90 * expiryDay, 45 * expiryDay, 6 * expiryDay, 2 * expiryDay, 12 * time.Hour} {
+		r := newExpiryRig(domain.TLSSourceACME)
+		notAfter := r.now.Add(100 * expiryDay)
+		// Passes every 6 hours across the last days.
+		var mails []expirySent
+		for left := 4 * expiryDay; left >= -expiryDay; left -= 6 * time.Hour {
+			r.now = notAfter.Add(-left)
+			r.store.candidates[0].NotAfter = notAfter
+			r.store.candidates[0].NotBefore = notAfter.Add(-life)
+			mails = append(mails, r.check(t)...)
+		}
+		finals := 0
+		for _, m := range mails {
+			if strings.Contains(m.body, "The renewal has failed") {
+				finals++
+			}
+		}
+		if finals != 2 {
+			t.Errorf("a certificate of %s: %d final mails, want 2 (one for each recipient)", life, finals)
+		}
+		if r.store.notified(r.store.candidates[0].AppID) != 1 {
+			t.Errorf("a certificate of %s: stored level %d, want 1", life, r.store.notified(r.store.candidates[0].AppID))
 		}
 	}
 }

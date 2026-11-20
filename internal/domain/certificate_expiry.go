@@ -22,12 +22,17 @@ type ExpiryCandidate struct {
 }
 
 // Days left at which a certificate is warned about, largest first. The owner renews an uploaded
-// certificate, so it has three levels. The agent renews an ACME certificate once a third of its
-// lifetime is left, so a warning there means that the renewal is late, and only the last two apply.
+// certificate, so it has four levels. The agent renews an ACME certificate once a third of its
+// lifetime is left, so a warning there means that the renewal is late, and only the last three apply.
+// The last level, FinalExpiryDays, is the same for both and is never skipped.
 var (
-	UploadedExpiryDays = []int{30, 14, 3}
-	ACMEExpiryDays     = []int{14, 3}
+	UploadedExpiryDays = []int{30, 14, 3, FinalExpiryDays}
+	ACMEExpiryDays     = []int{14, 3, FinalExpiryDays}
 )
+
+// FinalExpiryDays is the last warning level of every certificate, whatever its lifetime. It is the
+// one mail that a short-lived ACME certificate whose renewal broke gets before it expires.
+const FinalExpiryDays = 1
 
 // DaysLeft is the whole days until notAfter, rounded down: 0 for less than a day, negative once the
 // certificate has expired. The dashboard shows it and the warnings are measured in it, so a
@@ -43,8 +48,8 @@ func DaysLeft(notAfter, now time.Time) int {
 //
 // An ACME level is skipped when it is a third of the lifetime or more (notBefore to notAfter): the
 // agent starts to renew at a third, so a certificate that is merely renewing in the ordinary way
-// would be reported as late. A certificate of a few days therefore has no level at all. An unknown
-// start (the zero time) skips nothing.
+// would be reported as late. The final level is never skipped, so a certificate of a few days has
+// that one only. An unknown start (the zero time) skips nothing.
 func ExpiryLevel(source string, notBefore, notAfter, now time.Time) (days int, due bool) {
 	var levels []int
 	switch source {
@@ -56,7 +61,7 @@ func ExpiryLevel(source string, notBefore, notAfter, now time.Time) (days int, d
 	left := DaysLeft(notAfter, now)
 	lifetime := notAfter.Sub(notBefore)
 	for _, d := range levels {
-		if source == TLSSourceACME && !notBefore.IsZero() && lifetime > 0 && time.Duration(d)*24*time.Hour*3 >= lifetime {
+		if source == TLSSourceACME && d != FinalExpiryDays && !notBefore.IsZero() && lifetime > 0 && time.Duration(d)*24*time.Hour*3 >= lifetime {
 			continue
 		}
 		if left <= d {
