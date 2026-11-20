@@ -326,6 +326,10 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 	if _, err := pool.Exec(ctx, `ALTER TABLE agents ADD COLUMN maintenance_mode BOOLEAN, ADD COLUMN tls_certificates BOOLEAN`); err != nil {
 		t.Fatalf("feature columns: %v", err)
 	}
+	// The write of the TLS flag asks whether a credential is bound to the agent row; only the columns it reads exist here.
+	if _, err := pool.Exec(ctx, `CREATE TABLE mtls_credentials (id uuid PRIMARY KEY, project_id uuid, host_id uuid, agent_kind text, agent_name text)`); err != nil {
+		t.Fatalf("credentials table: %v", err)
+	}
 
 	// 000117 adds waf_decisions.status.
 	up117 := readMigration(t, "000117_waf_decisions_status.up.sql")
