@@ -51,9 +51,11 @@ const (
 	certClaimsMax = 512
 	// certPendingMax bounds the installs waiting for an ack, process-wide.
 	certPendingMax = 1024
-	// certQueueMax bounds the deliveries that wait for the worker of a stream. A request that finds the
-	// queue full is dropped: the agent says missing again about once a minute.
-	certQueueMax = 8
+	// certQueueMax bounds the deliveries that wait for the worker of a stream. It holds one request per
+	// app of the stream, which is the burst after a connect, a replace or a move: one missing per app
+	// that has an uploaded certificate. A request that finds it full is dropped anyway, and the agent
+	// says missing again about once a minute.
+	certQueueMax = certAppsMax
 )
 
 // defaultCertInstallTimeout is how long an install waits for its ack.
@@ -88,6 +90,7 @@ type certificateStore interface {
 	CertificateForDelivery(ctx context.Context, projectID, agentID, appID, certID string) (repository.CertificateDelivery, error)
 	StatusPrior(ctx context.Context, projectID, agentID, appID, source, requestID, certificateID string) (repository.StatusPrior, bool, error)
 	UpsertTLSStatus(ctx context.Context, s repository.TLSStatusReport) (bool, error)
+	FailTLSStatus(ctx context.Context, projectID, agentID, appID, certificateID, text string) (bool, error)
 }
 
 // auditSink is the part of the audit repository that delivery uses.
@@ -211,27 +214,30 @@ func (h *streamHandle) stillOpen() bool { return h.open == nil || h.open() }
 type deliveryRequest struct{ appID, certID string }
 
 // enqueueDelivery hands a request to the worker of the stream, which the first request starts. It
-// never waits: it reports false, and drops the request, when the queue is full or the stream has
+// never waits. A certificate that is already queued or being served needs no second request, and is
+// reported as taken. It reports false, and drops the request, when the queue is full or the stream has
 // ended.
 func (s *Server) enqueueDelivery(h *streamHandle, appID, certID string) bool {
 	h.workerMu.Lock()
+	defer h.workerMu.Unlock()
 	if h.workerStopped {
-		h.workerMu.Unlock()
 		return false
+	}
+	if _, taken := h.pendingCerts[certID]; taken {
+		return true
 	}
 	if h.deliveries == nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		h.deliveries, h.workerCancel, h.workerDone = make(chan deliveryRequest, certQueueMax), cancel, make(chan struct{})
+		h.pendingCerts = make(map[string]struct{})
 		go s.deliveryWorker(ctx, h, h.deliveries, h.workerDone)
 	}
-	queue := h.deliveries
-	h.workerMu.Unlock()
-	h.queued.Add(1)
 	select {
-	case queue <- deliveryRequest{appID: appID, certID: certID}:
+	case h.deliveries <- deliveryRequest{appID: appID, certID: certID}:
+		h.pendingCerts[certID] = struct{}{}
+		h.queued.Add(1)
 		return true
 	default:
-		h.queued.Add(-1)
 		if h.queueFullLogged.CompareAndSwap(false, true) {
 			log.Printf("[agentserver] certificate delivery queue full, requests dropped until it drains agent=%s (logged once per stream)", h.agentID)
 		}
@@ -249,6 +255,9 @@ func (s *Server) deliveryWorker(ctx context.Context, h *streamHandle, queue <-ch
 			return
 		case r := <-queue:
 			s.deliverCertificate(ctx, h, r.appID, r.certID)
+			h.workerMu.Lock()
+			delete(h.pendingCerts, r.certID)
+			h.workerMu.Unlock()
 			h.queued.Add(-1)
 		}
 	}
@@ -370,8 +379,10 @@ func (s *Server) certificateKeyUnreadable(h *streamHandle, d repository.Certific
 }
 
 // failCertificate stores the state failed for the app, with a text that holds no agent-sent data.
-// It knows nothing about the certificate the agent serves meanwhile, so it keeps what is stored
-// of it: the leaf, and with the leaf the chain, the expiry and the expiry warning already mailed.
+// It knows nothing about the certificate the agent serves meanwhile, so it keeps what is stored of it:
+// the leaf, the chain, the expiry and the expiry warning already mailed. The store does that in one
+// statement, so a status that the receive loop stores at the same time, with another leaf, keeps its
+// chain.
 func (s *Server) failCertificate(h *streamHandle, p *certInstall, text string) {
 	store := s.certStore()
 	if store == nil {
@@ -379,17 +390,7 @@ func (s *Server) failCertificate(h *streamHandle, p *certInstall, text string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	prior, ok, err := store.StatusPrior(ctx, h.projectID, h.agentID, p.appID, domain.TLSSourceUploaded, "", p.certificateID)
-	if err != nil || !ok {
-		if err != nil {
-			log.Printf("[agentserver] certificate status not read agent=%s app=%s: %v", h.agentID, p.appID, err)
-		}
-		return
-	}
-	if _, err := store.UpsertTLSStatus(ctx, repository.TLSStatusReport{
-		ProjectID: h.projectID, AgentID: h.agentID, AppID: p.appID, LeafSHA256: prior.Leaf,
-		Source: domain.TLSSourceUploaded, State: "failed", CertificateID: p.certificateID, Error: text,
-	}); err != nil {
+	if _, err := store.FailTLSStatus(ctx, h.projectID, h.agentID, p.appID, p.certificateID, text); err != nil {
 		log.Printf("[agentserver] certificate status not stored agent=%s app=%s: %v", h.agentID, p.appID, err)
 	}
 }
@@ -430,7 +431,7 @@ func (s *Server) addCertInstall(id string, p *certInstall) bool {
 	if s.certInstalls == nil {
 		s.certInstalls = make(map[string]*certInstall)
 	}
-	if len(s.certInstalls) >= certPendingMax {
+	if len(s.certInstalls) >= certPendingMax || p.handle.installsDropped {
 		return false
 	}
 	p.expires = s.now().Add(s.certInstallTimeout())
@@ -443,6 +444,7 @@ func (s *Server) addCertInstall(id string, p *certInstall) bool {
 func (s *Server) dropCertInstallsOf(h *streamHandle) {
 	s.certMu.Lock()
 	defer s.certMu.Unlock()
+	h.installsDropped = true
 	for id, p := range s.certInstalls {
 		if p.handle == h {
 			p.timer.Stop()

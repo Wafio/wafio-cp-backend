@@ -263,8 +263,12 @@ type streamHandle struct {
 	workerCancel    context.CancelFunc
 	workerDone      chan struct{}
 	workerStopped   bool
+	pendingCerts    map[string]struct{} // certificate ids queued or being served, under workerMu
 	queued          atomic.Int64
 	queueFullLogged atomic.Bool
+	// installsDropped is set under Server.certMu when the installs of the stream were dropped, after
+	// which none is added.
+	installsDropped bool
 	// tlsApps are the ids of the apps whose entry in the last WAF bundle sent on this stream turns TLS
 	// on, under bundleMu. A status for any other app is dropped before it costs a query.
 	tlsApps map[string]struct{}
@@ -1376,7 +1380,6 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 		peerIP:       peerIP(ctx),
 		open:         func() bool { return ctx.Err() == nil && !live.ending() },
 	}
-	defer handle.stopDeliveries()
 	// Register before loading the first bundle so a push that lands in between
 	// reaches this connection rather than a predecessor with the same
 	// credential. sendHostBundle rejects an older generation, so the initial
@@ -1384,6 +1387,9 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 	rx.handle = handle
 	s.registerStream(handle)
 	defer s.unregisterStream(handle)
+	// Deferred after unregisterStream, so that it runs before it: the worker is stopped and refuses
+	// requests by the time unregisterStream drops the installs of the stream.
+	defer handle.stopDeliveries()
 	s.announceTelemetryDemand(handle)
 
 	// Send initial bundle for WAF agents only. Host/eBPF agents don't need routing

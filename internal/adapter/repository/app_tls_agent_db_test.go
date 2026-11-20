@@ -2,8 +2,11 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -358,5 +361,122 @@ func TestDBUpdateAgentFeaturesTLSFlagOfAHostAgent(t *testing.T) {
 	write(bound, nil, &yes, true)
 	if got := flag(bound); got != "true" {
 		t.Fatalf("a bound stream could not write the flag: %s", got)
+	}
+}
+
+// FailTLSStatus is one statement that changes the state and the text of the status of an app and
+// nothing else: the leaf, the chain, the names and dates parsed from it and the warning already mailed
+// stay, and a status stored with another leaf at the same moment keeps its chain. It writes only for an
+// agent that is enabled on the app in the project, with the uploaded source and this current certificate.
+func TestDBTLSFailStatus(t *testing.T) {
+	f := newTLSDB(t)
+	foreign := f.second()
+	ctx := context.Background()
+	agent, other := f.agent(ptr(true)), f.agent(ptr(true))
+	f.bind(agent)
+	app, acme := f.app("shop", "", 0), f.app("acme", "", 0)
+	f.assign(agent, app)
+	f.assign(agent, acme)
+	f.mustUpdate(app, f.settings("proxy", "", "shop.example.com"))
+	cert := newCert("shop.example.com")
+	f.mustUpload(app, cert)
+	f.gateway(app, "uploaded", "shop.example.com")
+	f.gateway(acme, "acme", "acme.example.com")
+
+	fail := func(project, agentID, appID, certID, text string) bool {
+		t.Helper()
+		ok, err := f.repo.TLS.FailTLSStatus(ctx, project, agentID, appID, certID, text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	row := func() *TLSStatus {
+		t.Helper()
+		st, err := f.repo.TLS.GetTLSStatus(ctx, f.project, app)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	// Nothing stored yet: the row is made, without a leaf.
+	if !fail(f.project, agent, app, cert.ID, "the agent refused the certificate (write_failed)") {
+		t.Fatal("no status was made for an agent that serves the app")
+	}
+	if st := row(); st == nil || st.State != "failed" || st.Source != "uploaded" || st.CertificateID != cert.ID || st.AgentID != agent ||
+		st.Error != "the agent refused the certificate (write_failed)" || st.LeafSHA256 != "" || len(st.Names) != 0 {
+		t.Fatalf("status made by the refusal: %+v", st)
+	}
+
+	// A stored status of the certificate the agent serves meanwhile stays whole.
+	leaf := strings.Repeat("c", 64)
+	next := time.Now().Add(time.Hour).Truncate(time.Second)
+	if ok, err := f.repo.TLS.UpsertTLSStatus(ctx, TLSStatusReport{
+		ProjectID: f.project, AgentID: agent, AppID: app, Source: "uploaded", State: "missing", CertificateID: cert.ID, LeafSHA256: leaf, NextAttemptAt: &next,
+		RequestID: "ignored", Chain: &domain.CertificateInfo{ChainPEM: "chain", LeafSHA256: leaf, Names: []string{"shop.example.com"}, Issuer: "Serving CA",
+			NotBefore: time.Now().Add(-time.Hour).Truncate(time.Microsecond), NotAfter: time.Now().Add(48 * time.Hour).Truncate(time.Microsecond)},
+	}); err != nil || !ok {
+		t.Fatalf("status: %v %v", ok, err)
+	}
+	f.exec(`UPDATE app_tls_status SET expiry_notified_days = 14 WHERE app_id = $1`, app)
+	before := row()
+	if !fail(f.project, agent, app, cert.ID, "the stored key cannot be read\x00\x1b (key_unreadable)") {
+		t.Fatal("the refusal was not stored over a status")
+	}
+	after := row()
+	if after.State != "failed" || after.Error != "the stored key cannot be read (key_unreadable)" || after.NextAttemptAt != nil || after.RequestID != "" ||
+		after.LeafSHA256 != before.LeafSHA256 || after.ChainPEM != before.ChainPEM || strings.Join(after.Names, ",") != strings.Join(before.Names, ",") ||
+		after.Issuer != before.Issuer || after.NotAfter == nil || !after.NotAfter.Equal(*before.NotAfter) ||
+		after.ExpiryNotifiedDays == nil || *after.ExpiryNotifiedDays != 14 {
+		t.Fatalf("the refusal changed more than the state and the text:\nbefore %+v\nafter  %+v", before, after)
+	}
+
+	// Nothing is written for an agent that may not, or for a certificate that is not the current one.
+	snapshot := row()
+	for name, ok := range map[string]bool{
+		"another agent":                     fail(f.project, other, app, cert.ID, "x"),
+		"another project":                   fail(foreign.project, agent, app, cert.ID, "x"),
+		"a certificate that is not current": fail(f.project, agent, app, uuid.NewString(), "x"),
+		"an app with the acme source":       fail(f.project, agent, acme, cert.ID, "x"),
+		"ids that are no UUID":              fail("x", "y", "z", "w", "x"),
+	} {
+		if ok {
+			t.Errorf("%s: a status was written", name)
+		}
+	}
+	if got := row(); got.Error != snapshot.Error || !got.ReceivedAt.Equal(snapshot.ReceivedAt) {
+		t.Errorf("a refused write changed the status: %+v", got)
+	}
+	if st, _ := f.repo.TLS.GetTLSStatus(ctx, f.project, acme); st != nil {
+		t.Errorf("a status was made for an app with another source: %+v", st)
+	}
+
+	// A status that is stored with another leaf while the refusal is written keeps its chain: whichever
+	// statement runs last, the names belong to the leaf.
+	var wg sync.WaitGroup
+	for round := 0; round < 40; round++ {
+		sum := sha256.Sum256([]byte{byte(round)})
+		newLeaf := hex.EncodeToString(sum[:])
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := f.repo.TLS.UpsertTLSStatus(ctx, TLSStatusReport{
+				ProjectID: f.project, AgentID: agent, AppID: app, Source: "uploaded", State: "active", CertificateID: cert.ID, LeafSHA256: newLeaf,
+				Chain: &domain.CertificateInfo{ChainPEM: "chain " + newLeaf, LeafSHA256: newLeaf, Names: []string{"n-" + newLeaf[:8]}},
+			}); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := f.repo.TLS.FailTLSStatus(ctx, f.project, agent, app, cert.ID, "refused"); err != nil {
+				t.Error(err)
+			}
+		}()
+		wg.Wait()
+		if st := row(); len(st.Names) != 1 || st.Names[0] != "n-"+st.LeafSHA256[:8] || st.ChainPEM != "chain "+st.LeafSHA256 {
+			t.Fatalf("round %d: the chain does not belong to the leaf: %+v", round, st)
+		}
 	}
 }

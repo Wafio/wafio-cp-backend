@@ -96,3 +96,33 @@ func (p StatusPrior) Unchanged(rep TLSStatusReport, now time.Time, refresh time.
 	return p.AgentID == rep.AgentID && p.State == rep.State && p.Source == rep.Source && p.CertificateID == rep.CertificateID &&
 		p.Leaf == rep.LeafSHA256 && p.RequestID == rep.RequestID && p.Error == cleanStatusError(rep.Error) && sameTime
 }
+
+// FailTLSStatus stores the state failed, with a text of the server's own, for an uploaded certificate
+// of the app, and reports whether it did. It stores nothing unless the app is enabled on the agent, in
+// the project, in gateway mode with the uploaded source, and names this certificate as its current one.
+//
+// It is one statement and writes the state and the text only. The leaf, the chain, the names and dates
+// parsed from it, and the expiry warning already mailed stay as they are, whatever they are when the
+// statement runs: a refusal knows nothing of the certificate the agent serves meanwhile, and a status
+// that the receive loop stores at the same time, with another leaf, must keep its chain. A row that
+// does not exist yet is made without a leaf.
+func (r *TLSRepo) FailTLSStatus(ctx context.Context, projectID, agentID, appID, certificateID, text string) (bool, error) {
+	if !canonicalIDs(&projectID, &agentID, &appID, &certificateID) {
+		return false, nil
+	}
+	tag, err := r.pool.Exec(ctx, `INSERT INTO app_tls_status (app_id, project_id, agent_id, source, state, certificate_id, error, received_at)
+		SELECT a.id, a.project_id, waa.agent_id, 'uploaded', 'failed', c.id, $5::text, NOW()
+		FROM apps a
+		JOIN waf_agent_apps waa ON waa.app_id = a.id AND waa.enabled = TRUE AND waa.agent_id = $3
+		JOIN agents ag ON ag.id = waa.agent_id AND ag.project_id = a.project_id AND ag.kind = 'waf' AND ag.deleted_at IS NULL
+		JOIN app_certificates c ON c.id = a.tls_certificate_id AND c.app_id = a.id AND c.project_id = a.project_id
+		WHERE a.id = $1 AND a.project_id = $2 AND a.tls_mode = 'gateway' AND a.tls_source = 'uploaded' AND c.id = $4::uuid
+		ON CONFLICT (app_id) DO UPDATE SET agent_id = EXCLUDED.agent_id, source = 'uploaded', state = 'failed',
+			certificate_id = EXCLUDED.certificate_id, error = EXCLUDED.error, next_attempt_at = NULL, request_id = '',
+			received_at = EXCLUDED.received_at`,
+		appID, projectID, agentID, certificateID, cleanStatusError(text))
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}

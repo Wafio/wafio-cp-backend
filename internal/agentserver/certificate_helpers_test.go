@@ -169,9 +169,11 @@ type fakeCertStore struct {
 	// slow. waiting counts the calls that wait.
 	gate    chan struct{}
 	waiting atomic.Int64
+	// more holds the deliveries of other certificates, by certificate id, for the tests of a burst.
+	more map[string]repository.CertificateDelivery
 
-	agentCalls, deliveryCalls, priorCalls int
-	reports                               []repository.TLSStatusReport
+	agentCalls, deliveryCalls, priorCalls, failCalls int
+	reports                                          []repository.TLSStatusReport
 }
 
 func newFakeCertStore(d repository.CertificateDelivery) *fakeCertStore {
@@ -209,13 +211,17 @@ func (f *fakeCertStore) CertificateForDelivery(_ context.Context, projectID, age
 	if f.deliveryErr != nil {
 		return repository.CertificateDelivery{}, f.deliveryErr
 	}
-	if projectID != e2eProject || agentID != e2eAgentID || appID != f.delivery.AppID || certID != f.delivery.CertificateID {
+	d := f.delivery
+	if other, ok := f.more[certID]; ok {
+		d = other
+	}
+	if projectID != e2eProject || agentID != e2eAgentID || appID != d.AppID || certID != d.CertificateID {
 		return repository.CertificateDelivery{}, pgx.ErrNoRows
 	}
 	if f.onDelivery != nil {
 		f.onDelivery()
 	}
-	return f.delivery, nil
+	return d, nil
 }
 
 func (f *fakeCertStore) StatusPrior(_ context.Context, projectID, agentID, _, _, _, _ string) (repository.StatusPrior, bool, error) {
@@ -236,6 +242,19 @@ func (f *fakeCertStore) UpsertTLSStatus(_ context.Context, s repository.TLSStatu
 	defer f.mu.Unlock()
 	f.reports = append(f.reports, s)
 	return f.upsertOK, f.upsertErr
+}
+
+func (f *fakeCertStore) FailTLSStatus(_ context.Context, projectID, agentID, appID, certID, text string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failCalls++
+	if projectID != e2eProject || agentID != e2eAgentID || !f.priorOK {
+		return false, nil
+	}
+	f.reports = append(f.reports, repository.TLSStatusReport{
+		ProjectID: projectID, AgentID: agentID, AppID: appID, Source: "uploaded", State: "failed", CertificateID: certID, Error: text,
+	})
+	return true, nil
 }
 
 func (f *fakeCertStore) counts() (agent, delivery int) {

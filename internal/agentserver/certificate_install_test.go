@@ -712,11 +712,11 @@ func TestBlockedCertificateSurvivesTheMakingOfRoom(t *testing.T) {
 	}
 }
 
-// A refusal writes the state failed and knows nothing about the certificate the agent serves meanwhile,
-// so what is stored of it (the leaf, which keeps the chain, the expiry and the mailed warning) stays.
-// An agent that may not report on the app gets nothing written.
-func TestRefusalKeepsTheStoredLeaf(t *testing.T) {
-	stored := strings.Repeat("a", 64)
+// A refusal writes the state failed and knows nothing about the certificate the agent serves
+// meanwhile, so it does not read the stored status and write it back: it asks the store for one
+// statement that changes the state and the text and leaves the rest of the row alone. An agent that
+// may not report on the app gets nothing written.
+func TestRefusalIsOneStatementThatKeepsTheStoredCertificate(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		act    func(f *certFixture, h *streamHandle)
@@ -738,14 +738,17 @@ func TestRefusalKeepsTheStoredLeaf(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCertFixture(t)
-			f.store.prior = repository.StatusPrior{Stored: true, Leaf: stored}
+			f.store.prior = repository.StatusPrior{Stored: true, Leaf: strings.Repeat("a", 64)}
 			tc.act(f, handleOf(true, &sentLog{}))
 			failed := f.store.reportsOf("failed")
 			if len(failed) != tc.failed {
 				t.Fatalf("%d failed statuses, want %d", len(failed), tc.failed)
 			}
-			if tc.failed == 1 && (failed[0].LeafSHA256 != stored || failed[0].Chain != nil || failed[0].Source != "uploaded") {
+			if tc.failed == 1 && (failed[0].LeafSHA256 != "" || failed[0].Chain != nil || failed[0].Source != "uploaded" || failed[0].CertificateID != certTestCert) {
 				t.Fatalf("failed status: %+v", failed[0])
+			}
+			if f.store.priorReads() != 0 || f.store.failCalls == 0 {
+				t.Fatalf("the refusal read the stored status %d times and made %d writes of its own", f.store.priorReads(), f.store.failCalls)
 			}
 		})
 	}
@@ -1093,8 +1096,15 @@ func TestDeliveryWorkerStopsWithItsStream(t *testing.T) {
 	}
 }
 
-// A worker that is busy keeps a small queue; a request that finds it full is dropped at once, without
-// blocking the caller, which is the receive loop, and the agent asks again with its next missing.
+// certIDOf is the i-th certificate id of the tests of a burst.
+func certIDOf(i int) string { return fmt.Sprintf("%08x-0000-4000-8000-000000000000", i+1) }
+
+// appIDOf is the i-th app id of the tests of a burst.
+func appIDOf(i int) string { return fmt.Sprintf("%08x-1111-4111-8111-111111111111", i+1) }
+
+// A worker that is busy keeps a queue of one request per app of the stream; a request that finds it full
+// is dropped at once, without blocking the caller, which is the receive loop, and the agent asks again
+// with its next missing. A request for a certificate that is already queued is not a new one.
 func TestFullDeliveryQueueDropsWithoutBlocking(t *testing.T) {
 	f := newCertFixture(t)
 	f.store.gate = make(chan struct{})
@@ -1108,14 +1118,14 @@ func TestFullDeliveryQueueDropsWithoutBlocking(t *testing.T) {
 	}
 	waitUntil(t, "the worker to take it", func() bool { return f.store.waiting.Load() == 1 })
 	for i := 0; i < certQueueMax; i++ {
-		if !f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+		if !f.s.enqueueDelivery(h, appIDOf(i), certIDOf(i)) {
 			t.Fatalf("request %d was refused with room in the queue", i)
 		}
 	}
 	start := time.Now()
 	out := captureLog(t)
-	for i := 0; i < 5; i++ {
-		if f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+	for i := certQueueMax; i < certQueueMax+5; i++ {
+		if f.s.enqueueDelivery(h, appIDOf(i), certIDOf(i)) {
 			t.Fatal("a request was accepted into a full queue")
 		}
 	}
@@ -1128,21 +1138,143 @@ func TestFullDeliveryQueueDropsWithoutBlocking(t *testing.T) {
 	if got := h.queued.Load(); got != int64(certQueueMax)+1 {
 		t.Fatalf("%d requests counted, want %d", got, certQueueMax+1)
 	}
+	// A certificate that is queued already is taken, not dropped, and costs nothing.
+	if !f.s.enqueueDelivery(h, appIDOf(0), certIDOf(0)) || h.queued.Load() != int64(certQueueMax)+1 {
+		t.Fatal("a request for a certificate that is queued was dropped or queued twice")
+	}
 	// A status that asks for the key is judged and stored on the loop even then.
 	f.s.handleCertificateStatus(h, missingStatus())
 	if len(f.store.reportsOf("missing")) != 1 {
 		t.Fatal("a status was not stored because the delivery queue was full")
 	}
 
-	// When the database answers, the worker serves the queue: the first request sends the key, the
-	// others are the same certificate in the same bundle generation and send nothing more.
+	// When the database answers, the worker serves the queue: the first request sends its key, the
+	// others name certificates the database does not know and send nothing.
 	close(f.store.gate)
 	waitUntil(t, "the queue to drain", func() bool { return h.queued.Load() == 0 })
 	if n := len(sent.installs()); n != 1 {
 		t.Fatalf("%d installs sent, want 1", n)
 	}
-	if !f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+	if !f.s.enqueueDelivery(h, appIDOf(0), certIDOf(0)) {
 		t.Fatal("the queue did not take a request after it drained")
+	}
+}
+
+// The agent says missing once per app that has an uploaded certificate, all at once after a connect, a
+// replace or a move. The queue holds that burst, so every key goes out on the first one, not one in
+// a minute for the apps that did not fit.
+func TestBurstOfAHundredAppsGetsEveryKey(t *testing.T) {
+	f := newCertFixture(t)
+	f.store.gate = make(chan struct{}) // the worker is busy with the first while the burst arrives
+	sent := &sentLog{}
+	h := handleOf(true, sent)
+	h.tlsApps = map[string]struct{}{}
+	f.store.more = map[string]repository.CertificateDelivery{}
+	const n = 100
+	for i := 0; i < n; i++ {
+		sealed, err := f.enc.SealBound(f.cert.key, domain.CertificateKeyAAD(e2eProject, certIDOf(i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.tlsApps[appIDOf(i)] = struct{}{}
+		f.store.more[certIDOf(i)] = repository.CertificateDelivery{
+			AppID: appIDOf(i), CertificateID: certIDOf(i), LeafSHA256: f.cert.leaf, ChainPEM: string(f.cert.chain), KeyCiphertext: sealed,
+		}
+	}
+	t.Cleanup(h.stopDeliveries)
+	out := captureLog(t)
+	for i := 0; i < n; i++ {
+		f.s.handleCertificateStatus(h, &agentv1.CertificateStatus{AppId: appIDOf(i), Source: "uploaded", State: "missing", CertificateId: certIDOf(i)})
+	}
+	close(f.store.gate)
+	waitUntil(t, "the worker to serve the burst", func() bool { return h.queued.Load() == 0 })
+	got := map[string]bool{}
+	for _, ins := range sent.installs() {
+		got[ins.GetCertificateId()] = true
+	}
+	if len(got) != n || strings.Contains(out.String(), "queue full") {
+		t.Fatalf("%d keys went out of %d requests; log %q", len(got), n, out.String())
+	}
+}
+
+// A certificate that is queued, or being served, is asked for once: the agent's repeat while its key
+// is on the way takes no place in the queue.
+func TestRequestForACertificateInServiceIsNotRepeated(t *testing.T) {
+	f := newCertFixture(t)
+	f.store.gate = make(chan struct{})
+	sent := &sentLog{}
+	h := handleOf(true, sent)
+	t.Cleanup(h.stopDeliveries)
+	for i := 0; i < 5; i++ {
+		if !f.s.enqueueDelivery(h, certTestApp, certTestCert) {
+			t.Fatalf("request %d was refused", i)
+		}
+	}
+	waitUntil(t, "the worker to take it", func() bool { return f.store.waiting.Load() == 1 })
+	if !f.s.enqueueDelivery(h, certTestApp, certTestCert) || h.queued.Load() != 1 {
+		t.Fatalf("%d requests counted for one certificate", h.queued.Load())
+	}
+	close(f.store.gate)
+	waitUntil(t, "the queue to drain", func() bool { return h.queued.Load() == 0 })
+	if n := len(sent.installs()); n != 1 {
+		t.Fatalf("%d installs, want 1", n)
+	}
+	// Once served, the certificate can be asked for again (the claim decides whether it is sent).
+	if !f.s.enqueueDelivery(h, certTestApp, certTestCert) || h.queued.Load() != 1 {
+		t.Fatal("a certificate that was served could not be queued again")
+	}
+}
+
+// After the installs of a stream were dropped, none is added: a delivery that was on its way when the
+// stream ended cannot leave an entry that waits for an ack that cannot come.
+func TestNoInstallIsAddedAfterTheInstallsOfTheStreamWereDropped(t *testing.T) {
+	f := newCertFixture(t)
+	h, other := handleOf(true, &sentLog{}), handleOf(true, &sentLog{})
+	if !f.s.addCertInstall("cert-1", &certInstall{handle: h}) {
+		t.Fatal("an install was refused before the drop")
+	}
+	f.s.dropCertInstallsOf(h)
+	if f.s.addCertInstall("cert-2", &certInstall{handle: h}) || f.s.pendingInstalls() != 0 {
+		t.Fatal("an install was added for a stream whose installs were dropped")
+	}
+	if !f.s.addCertInstall("cert-3", &certInstall{handle: other}) {
+		t.Fatal("the drop of one stream stopped the installs of another")
+	}
+	f.s.dropCertInstallsOf(other)
+}
+
+// Stream stops the worker before unregisterStream drops the installs: deferred calls run in the
+// opposite order, so stopDeliveries must be deferred after unregisterStream. The test reads the source.
+func TestStreamStopsTheWorkerBeforeItDropsTheInstalls(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "server.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "Stream" {
+			continue
+		}
+		for _, stmt := range fn.Body.List {
+			if d, ok := stmt.(*ast.DeferStmt); ok {
+				if sel, ok := d.Call.Fun.(*ast.SelectorExpr); ok {
+					order = append(order, sel.Sel.Name)
+				}
+			}
+		}
+	}
+	unregister, stop := -1, -1
+	for i, name := range order {
+		switch name {
+		case "unregisterStream":
+			unregister = i
+		case "stopDeliveries":
+			stop = i
+		}
+	}
+	if unregister < 0 || stop < 0 || stop < unregister {
+		t.Fatalf("deferred calls of Stream in source order: %v; stopDeliveries must come after unregisterStream", order)
 	}
 }
 
