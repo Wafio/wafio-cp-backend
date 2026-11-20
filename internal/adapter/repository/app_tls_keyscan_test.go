@@ -15,10 +15,11 @@ import (
 // keyStatement judges one SQL string of the program. delivery is true for the one statement that may
 // select the sealed key of a certificate; problem is "" when the string is allowed.
 //
-// The key lives in app_certificate_keys. Allowed: the delivery query (CertificateForDelivery, in the
-// TLS repository), the insert of a key and the deletes of key rows, without RETURNING. Never
-// allowed: the table or the column anywhere else, and a query that reads every column of either
-// table.
+// The key lives in app_certificate_keys. It is selected only by CertificateForDelivery, inserted
+// only by InsertCertificate and deleted only by retireCertificates (a replace and a delete of the
+// certificate both go through it; an application or project that goes takes its keys by the foreign
+// key, and nothing else deletes them), and none of the writes returns the row. The table and the
+// column are named nowhere else, and no query reads every column of either table.
 func keyStatement(sql, fn string, inTLSRepo bool) (delivery bool, problem string) {
 	lower := strings.ToLower(sql)
 	for _, table := range []string{"app_certificates", "app_certificate_keys"} {
@@ -33,12 +34,14 @@ func keyStatement(sql, fn string, inTLSRepo bool) (delivery bool, problem string
 	switch {
 	case !inTLSRepo:
 		return false, "names the key table or column outside the TLS repository"
-	case fn == "CertificateForDelivery":
+	case fn == "CertificateForDelivery" && strings.HasPrefix(trimmed, "select"):
 		return true, ""
-	case (strings.HasPrefix(trimmed, "insert into app_certificate_keys") || strings.HasPrefix(trimmed, "delete from app_certificate_keys")) && !strings.Contains(lower, "returning"):
+	case fn == "InsertCertificate" && strings.HasPrefix(trimmed, "insert into app_certificate_keys") && !strings.Contains(lower, "returning"):
+		return false, ""
+	case fn == "retireCertificates" && strings.HasPrefix(trimmed, "delete from app_certificate_keys") && !strings.Contains(lower, "returning"):
 		return false, ""
 	}
-	return false, "names the key table or column in " + fn + ", which is neither the delivery query nor a plain write"
+	return false, "names the key table or column in " + fn + ", which may not"
 }
 
 // keyMigration judges a migration file. Only the migration that creates the key table (and its down
@@ -160,6 +163,13 @@ func TestKeyStatementRules(t *testing.T) {
 		{"a read of the column alone", `SELECT key_ciphertext IS NOT NULL FROM app_certificate_keys`, "UpdateTLS", true, false, true},
 		{"a join that only counts", `SELECT count(*) FROM app_certificates c JOIN app_certificate_keys k ON k.certificate_id = c.id`, "GetTLS", true, false, true},
 		{"the insert of a key", "\n INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, $3)", "InsertCertificate", true, false, false},
+		{"an insert of a key elsewhere", `INSERT INTO app_certificate_keys (certificate_id, project_id, key_ciphertext) VALUES ($1, $2, $3)`, "UpdateTLS", true, false, true},
+		{"a delete of keys in the insert", `DELETE FROM app_certificate_keys WHERE project_id = $2`, "InsertCertificate", true, false, true},
+		{"a delete of keys elsewhere", `DELETE FROM app_certificate_keys WHERE project_id = $2`, "DeleteAgent", true, false, true},
+		{"a delete of keys in the certificate delete itself", `DELETE FROM app_certificate_keys WHERE project_id = $2`, "DeleteCertificate", true, false, true},
+		{"an insert in the retire", `INSERT INTO app_certificate_keys (certificate_id) VALUES ($1)`, "retireCertificates", true, false, true},
+		{"a select in the retire", `SELECT key_ciphertext FROM app_certificate_keys`, "retireCertificates", true, false, true},
+		{"a write in the delivery query", `DELETE FROM app_certificate_keys WHERE certificate_id = $1`, "CertificateForDelivery", true, false, true},
 		{"deleting keys", `DELETE FROM app_certificate_keys WHERE project_id = $2 AND certificate_id IN (SELECT id FROM app_certificates WHERE app_id = $1`, "retireCertificates", true, false, false},
 		{"deleting a key and reading it back", `DELETE FROM app_certificate_keys WHERE certificate_id = $1 RETURNING key_ciphertext`, "DeleteCertificate", true, false, true},
 		{"inserting and reading it back", `INSERT INTO app_certificate_keys (key_ciphertext) VALUES ($1) RETURNING key_ciphertext`, "InsertCertificate", true, false, true},

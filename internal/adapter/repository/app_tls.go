@@ -29,6 +29,22 @@ type TLSRepo struct {
 	pool *pgxpool.Pool
 }
 
+// canonicalIDs writes each id in its canonical lower-case hyphenated form and reports whether all of
+// them are UUIDs. Postgres reads upper case, braces and the form without hyphens as the same id, but
+// the key of a certificate is sealed for one spelling (domain.CertificateKeyAAD), so every function
+// that takes an id from a caller settles on the canonical one first. An id that is no UUID names no
+// row: the functions answer as for a row that is not there.
+func canonicalIDs(ids ...*string) bool {
+	for _, id := range ids {
+		u, err := uuid.Parse(*id)
+		if err != nil {
+			return false
+		}
+		*id = u.String()
+	}
+	return true
+}
+
 // The reasons a change of the TLS settings is refused, besides the *domain.TLSFieldError and
 // *domain.TLSConflictError that the checks in domain return.
 var (
@@ -254,6 +270,9 @@ func bumpBundle(ctx context.Context, tx pgx.Tx, appID string) (bool, error) {
 // nil when it has none. The key of the certificate is not read. It returns pgx.ErrNoRows when the
 // application is not in the project.
 func (r *TLSRepo) GetTLS(ctx context.Context, projectID, appID string) (AppTLS, *AppCertificate, error) {
+	if !canonicalIDs(&projectID, &appID) {
+		return AppTLS{}, nil, pgx.ErrNoRows
+	}
 	a, err := readTLSApp(ctx, r.pool, projectID, appID, false)
 	if err != nil {
 		return AppTLS{}, nil, err
@@ -301,6 +320,9 @@ type TLSAgent struct {
 
 // GetTLSAgent returns the agent that serves the application, nil when none does.
 func (r *TLSRepo) GetTLSAgent(ctx context.Context, projectID, appID string) (*TLSAgent, error) {
+	if !canonicalIDs(&projectID, &appID) {
+		return nil, pgx.ErrNoRows
+	}
 	a, err := readTLSApp(ctx, r.pool, projectID, appID, false)
 	if err != nil {
 		return nil, err
@@ -359,6 +381,9 @@ func (r *TLSRepo) beginTLSChange(ctx context.Context, projectID, appID string) (
 // as a draft, and the agent never sees them. An application that no agent serves is not checked
 // against any agent; a move onto one does that.
 func (r *TLSRepo) UpdateTLS(ctx context.Context, projectID, appID string, s domain.TLSSettings, now time.Time) (TLSUpdate, error) {
+	if !canonicalIDs(&projectID, &appID) {
+		return TLSUpdate{}, pgx.ErrNoRows
+	}
 	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return TLSUpdate{}, err
@@ -534,8 +559,11 @@ func (r *TLSRepo) InsertCertificate(ctx context.Context, projectID, appID string
 	if len(c.Key) == 0 {
 		return CertificateStored{}, errors.New("the certificate has no key")
 	}
-	if _, err := uuid.Parse(c.ID); err != nil {
+	if !canonicalIDs(&c.ID) {
 		return CertificateStored{}, errors.New("the certificate id is not a UUID")
+	}
+	if !canonicalIDs(&projectID, &appID) {
+		return CertificateStored{}, pgx.ErrNoRows
 	}
 	sealed, err := enc.SealBound(c.Key, domain.CertificateKeyAAD(projectID, c.ID))
 	clear(c.Key)
@@ -624,6 +652,9 @@ func retireCertificates(ctx context.Context, tx pgx.Tx, projectID, appID string,
 // application is not in the project. The bundle does not change: a bundle names no certificate
 // unless the application is in gateway mode with an uploaded source.
 func (r *TLSRepo) DeleteCertificate(ctx context.Context, projectID, appID string) (string, error) {
+	if !canonicalIDs(&projectID, &appID) {
+		return "", pgx.ErrNoRows
+	}
 	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return "", err
@@ -647,6 +678,9 @@ func (r *TLSRepo) DeleteCertificate(ctx context.Context, projectID, appID string
 // generation goes up when the application is in gateway mode. It returns pgx.ErrNoRows when the
 // application is not in the project.
 func (r *TLSRepo) RequestACME(ctx context.Context, projectID, appID string, now time.Time) (TLSUpdate, error) {
+	if !canonicalIDs(&projectID, &appID) {
+		return TLSUpdate{}, pgx.ErrNoRows
+	}
 	tx, a, err := r.beginTLSChange(ctx, projectID, appID)
 	if err != nil {
 		return TLSUpdate{}, err
@@ -692,6 +726,9 @@ type CertificateDelivery struct {
 // key row. It returns pgx.ErrNoRows otherwise. The agent is checked against its own row too: an agent
 // that was removed, or that did not say it serves TLS certificates, gets nothing.
 func (r *TLSRepo) CertificateForDelivery(ctx context.Context, projectID, agentID, appID, certID string) (CertificateDelivery, error) {
+	if !canonicalIDs(&projectID, &agentID, &appID, &certID) {
+		return CertificateDelivery{}, pgx.ErrNoRows
+	}
 	d := CertificateDelivery{AppID: appID, CertificateID: certID}
 	err := r.pool.QueryRow(ctx, `SELECT c.leaf_sha256, c.chain_pem, k.key_ciphertext
 		FROM apps a
@@ -773,15 +810,11 @@ func cleanStatusError(s string) string {
 // threshold already mailed stay; with another leaf both are cleared.
 func (r *TLSRepo) UpsertTLSStatus(ctx context.Context, s TLSStatusReport) (bool, error) {
 	// A malformed id would otherwise be a database error for what is only a bad report.
-	for _, id := range []string{s.ProjectID, s.AgentID, s.AppID} {
-		if _, err := uuid.Parse(id); err != nil {
-			return false, nil
-		}
+	if !canonicalIDs(&s.ProjectID, &s.AgentID, &s.AppID) {
+		return false, nil
 	}
-	if s.CertificateID != "" {
-		if _, err := uuid.Parse(s.CertificateID); err != nil {
-			return false, nil
-		}
+	if s.CertificateID != "" && !canonicalIDs(&s.CertificateID) {
+		return false, nil
 	}
 	var names []string
 	var issuer, chain string
@@ -827,6 +860,9 @@ func (r *TLSRepo) UpsertTLSStatus(ctx context.Context, s TLSStatusReport) (bool,
 // GetTLSStatus returns what the agent last reported for the application of the project, nil when
 // it reported nothing since the settings last changed.
 func (r *TLSRepo) GetTLSStatus(ctx context.Context, projectID, appID string) (*TLSStatus, error) {
+	if !canonicalIDs(&projectID, &appID) {
+		return nil, nil
+	}
 	var s TLSStatus
 	err := r.pool.QueryRow(ctx, `SELECT s.app_id::text, s.agent_id::text, s.source, s.state, COALESCE(s.certificate_id::text, ''),
 		s.leaf_sha256, s.error, s.next_attempt_at, s.request_id, s.received_at, s.names, s.issuer, s.not_before, s.not_after,
@@ -892,6 +928,9 @@ func (r *TLSRepo) ListExpiryCandidates(ctx context.Context) ([]ExpiryCandidate, 
 // certificate of c. It reports false when the certificate is no longer the one in use: a certificate
 // that was replaced meanwhile starts again from nothing.
 func (r *TLSRepo) MarkExpiryNotified(ctx context.Context, c ExpiryCandidate, days int) (bool, error) {
+	if !canonicalIDs(&c.ProjectID, &c.AppID) || (c.Source == domain.TLSSourceUploaded && !canonicalIDs(&c.CertificateID)) {
+		return false, nil
+	}
 	var tag pgconn.CommandTag
 	var err error
 	if c.Source == domain.TLSSourceUploaded {

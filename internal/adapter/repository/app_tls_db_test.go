@@ -534,8 +534,23 @@ func TestDBTLSPlainListenersOfTheAgent(t *testing.T) {
 	if _, err = f.update(tlsApp, s); !errors.As(err, &ce) || ce.Field != "redirect_listen" {
 		t.Fatalf("redirect listener on a plain listener: %v", err)
 	}
-	s.RedirectListen = "127.0.0.1:443" // another address
+	s.RedirectListen = "127.0.0.1:8080" // another port
 	f.mustUpdate(tlsApp, s)
+	// A plain listener on a specific address takes the port from a wildcard HTTPS listener (Linux refuses
+	// the second bind), and the other way round.
+	spec := f.app("spec", "127.0.0.1", 8443)
+	f.assign(agent, spec)
+	if _, err = f.update(tlsApp, s); !errors.As(err, &ce) || ce.Code != domain.TLSConflictListen || ce.Field != "listen" || ce.OtherAppID != spec {
+		t.Fatalf("a wildcard HTTPS listener over a specific plain one: %v", err)
+	}
+	wild := f.settings("gateway", "acme", "shop.example.com")
+	wild.Listen = "127.0.0.1:8081"
+	f.exec(`UPDATE apps SET listen_host = '0.0.0.0', listen_port = 8081 WHERE id = $1`, spec)
+	if _, err = f.update(tlsApp, wild); !errors.As(err, &ce) || ce.OtherAppID != spec {
+		t.Fatalf("a specific HTTPS listener over a wildcard plain one: %v", err)
+	}
+	f.exec(`UPDATE apps SET listen_host = '127.0.0.1', listen_port = 7000 WHERE id = $1`, spec)
+	s.Listen = "0.0.0.0:8443"
 	// The application's own plain listener counts too.
 	own := f.app("own", "::1", 9443)
 	f.assign(agent, own)
@@ -1558,6 +1573,7 @@ func TestDBTLSStatusRefusesBadIdsAndCertificatesThatAreNotCurrent(t *testing.T) 
 func TestDBTLSMovedApplicationKeepsItsPlainListenerOffTheirAddresses(t *testing.T) {
 	f := newTLSDB(t)
 	ctx := context.Background()
+	var ce *domain.TLSConflictError
 	src, dst := f.agent(nil), f.agent(nil)
 	g := f.app("gateway", "", 0)
 	f.assign(dst, g)
@@ -1565,7 +1581,6 @@ func TestDBTLSMovedApplicationKeepsItsPlainListenerOffTheirAddresses(t *testing.
 	s.RedirectListen = "0.0.0.0:80"
 	f.mustUpdate(g, s)
 	move := func(app string) error { return f.repo.WAF.ReplaceAssignment(ctx, f.project, app, dst, "block", nil) }
-	var ce *domain.TLSConflictError
 
 	onHTTPS := f.app("on-https", "0.0.0.0", 443)
 	f.assign(src, onHTTPS)
@@ -1592,11 +1607,21 @@ func TestDBTLSMovedApplicationKeepsItsPlainListenerOffTheirAddresses(t *testing.
 	if err := move(noPlain); err != nil {
 		t.Fatalf("an application without a plain listener: %v", err)
 	}
-	// Another address on the same port is not the same listener.
+	// Another address on the same port does not help when one of the two is a wildcard.
 	other := f.app("other-address", "127.0.0.1", 443)
 	f.assign(src, other)
-	if err := move(other); err != nil {
-		t.Fatalf("a plain listener on another address: %v", err)
+	if err := move(other); !errors.As(err, &ce) || ce.Field != "listen_port" || ce.OtherAppID != g {
+		t.Fatalf("a specific plain listener on the port of an HTTPS wildcard: %v", err)
+	}
+	v6 := f.app("v6", "::", 443)
+	f.assign(src, v6)
+	if err := move(v6); !errors.As(err, &ce) || ce.OtherAppID != g {
+		t.Fatalf("an IPv6 wildcard plain listener on the port of an HTTPS wildcard: %v", err)
+	}
+	v6other := f.app("v6-other", "2001:db8::1", 443)
+	f.assign(src, v6other)
+	if err := move(v6other); err != nil {
+		t.Fatalf("an IPv6 address next to an IPv4 wildcard: %v", err)
 	}
 	// The move waits for a save of the target's bundle: both take it.
 	held := f.agent(nil)
@@ -1733,5 +1758,101 @@ func TestDBTLSWildcardListenersOverlap(t *testing.T) {
 	redirect.RedirectListen = "0.0.0.0:8443"
 	if _, err := f.update(c, redirect); !errors.As(err, &ce) || ce.Field != "redirect_listen" || ce.OtherAppID != b {
 		t.Fatalf("a wildcard redirect listener over the HTTPS listener of another: %v", err)
+	}
+}
+
+// Postgres reads an id in upper case, in braces or without hyphens as the one id, and the key of a
+// certificate is sealed for one spelling, so the sealing and the delivery must not depend on it.
+func TestDBTLSKeyOpensWhateverTheSpellingOfTheIDs(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	agent := f.agent(ptr(true))
+	f.bind(agent)
+	spellings := map[string]func(string) string{
+		"upper case": strings.ToUpper,
+		"braces":     func(id string) string { return "{" + id + "}" },
+		"no hyphens": func(id string) string { return strings.ReplaceAll(id, "-", "") },
+		"braced upper case": func(id string) string { return "{" + strings.ToUpper(id) + "}" },
+	}
+	for name, spell := range spellings {
+		app := f.app("shop-"+strings.ReplaceAll(name, " ", "-"), "", 0)
+		f.assign(agent, app)
+		host := "shop-" + uuid.NewString()[:8] + ".example.com"
+		f.mustUpdate(app, f.settings("proxy", "", host))
+		c := newCert(host)
+		certID := c.ID
+		c.ID = spell(certID)
+		if _, err := f.repo.TLS.InsertCertificate(ctx, spell(f.project), spell(app), c, testEncryptor); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		f.gateway(app, "uploaded", host)
+
+		var stored string
+		if err := f.repo.DB.QueryRow(ctx, `SELECT certificate_id::text FROM app_certificate_keys WHERE certificate_id = $1`, certID).Scan(&stored); err != nil || stored != certID {
+			t.Fatalf("%s: key row of %q: %v", name, stored, err)
+		}
+		// Asked in the canonical form and in the spelling it was uploaded with, and the key opens with
+		// the context of the canonical ids and with the one built from the spelling.
+		for how, args := range map[string][4]string{
+			"canonical": {f.project, agent, app, certID},
+			"spelled":   {spell(f.project), spell(agent), spell(app), spell(certID)},
+		} {
+			d, err := f.repo.TLS.CertificateForDelivery(ctx, args[0], args[1], args[2], args[3])
+			if err != nil {
+				t.Fatalf("%s, asked %s: %v", name, how, err)
+			}
+			if d.CertificateID != certID || d.AppID != app {
+				t.Errorf("%s, asked %s: delivery names %s and %s", name, how, d.CertificateID, d.AppID)
+			}
+			for _, aad := range []string{domain.CertificateKeyAAD(f.project, certID), domain.CertificateKeyAAD(spell(f.project), spell(certID))} {
+				plain, err := testEncryptor.OpenBound(d.KeyCiphertext, aad)
+				if err != nil || string(plain) != plainKeyOf(certID) {
+					t.Errorf("%s, asked %s: the key does not open with %q: %v", name, how, aad, err)
+				}
+			}
+		}
+	}
+}
+
+// An id that is no UUID names no row, and the answer is the one for a row that is not there, not a
+// database error.
+func TestDBTLSIDsThatAreNoUUIDNameNoRow(t *testing.T) {
+	f := newTLSDB(t)
+	ctx := context.Background()
+	app := f.app("shop", "", 0)
+	bad := "x'; DROP TABLE apps; --"
+	tls := f.repo.TLS
+	if _, _, err := tls.GetTLS(ctx, bad, app); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("GetTLS: %v", err)
+	}
+	if _, _, err := tls.GetTLS(ctx, f.project, bad); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("GetTLS: %v", err)
+	}
+	if _, err := tls.GetTLSAgent(ctx, f.project, bad); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("GetTLSAgent: %v", err)
+	}
+	if _, err := tls.UpdateTLS(ctx, bad, app, f.settings("proxy", ""), time.Now()); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("UpdateTLS: %v", err)
+	}
+	if _, err := tls.DeleteCertificate(ctx, f.project, bad); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("DeleteCertificate: %v", err)
+	}
+	if _, err := tls.RequestACME(ctx, bad, app, time.Now()); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("RequestACME: %v", err)
+	}
+	if _, err := tls.InsertCertificate(ctx, bad, app, newCert(), testEncryptor); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("InsertCertificate: %v", err)
+	}
+	if _, err := tls.CertificateForDelivery(ctx, f.project, bad, app, uuid.NewString()); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("CertificateForDelivery: %v", err)
+	}
+	if st, err := tls.GetTLSStatus(ctx, bad, app); st != nil || err != nil {
+		t.Errorf("GetTLSStatus: %v, %v", st, err)
+	}
+	if ok, err := tls.MarkExpiryNotified(ctx, ExpiryCandidate{ProjectID: bad, AppID: app, Source: "acme"}, 3); ok || err != nil {
+		t.Errorf("MarkExpiryNotified: %v, %v", ok, err)
+	}
+	if ok, err := tls.MarkExpiryNotified(ctx, ExpiryCandidate{ProjectID: f.project, AppID: app, Source: "uploaded", CertificateID: bad}, 3); ok || err != nil {
+		t.Errorf("MarkExpiryNotified: %v, %v", ok, err)
 	}
 }

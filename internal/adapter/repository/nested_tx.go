@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -32,4 +33,18 @@ func enterNestedTx(ctx context.Context) (leave func(), err error) {
 func lockAgentBundle(ctx context.Context, tx pgx.Tx, agentID string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "waf-agent-bundle:"+agentID)
 	return err
+}
+
+// enabledAssignment reads the agent and the mode of the enabled assignment of an application, both
+// "" when it has none. A caller that holds the application row (SELECT ... FOR UPDATE) calls it in a
+// statement after the locking one, never inside it: a statement that waits for the row lock still
+// sees the assignments its snapshot had when it started, so a move that committed while it waited
+// would not show, and the caller would lock the bundle of the agent that the application has left.
+// A move holds the same row, so once the caller has it the assignment cannot change under it.
+func enabledAssignment(ctx context.Context, tx pgx.Tx, appID string) (agentID, mode string, err error) {
+	err = tx.QueryRow(ctx, `SELECT agent_id::text, mode FROM waf_agent_apps WHERE app_id = $1 AND enabled = TRUE LIMIT 1`, appID).Scan(&agentID, &mode)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", nil
+	}
+	return agentID, mode, err
 }
