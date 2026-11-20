@@ -66,7 +66,7 @@ func (m *maintenanceFixture) addRoute(t *testing.T, agentID, name string, port i
 // features stores what the agent said in Hello: script rules and maintenance mode.
 func (m *maintenanceFixture) features(t *testing.T, maintenance *bool) {
 	t.Helper()
-	if err := m.repo.EBPF.UpdateAgentFeatures(context.Background(), m.project, m.agentID, nil, maintenance); err != nil {
+	if err := m.repo.EBPF.UpdateAgentFeatures(context.Background(), m.project, m.agentID, nil, maintenance, nil, true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -200,7 +200,7 @@ func TestDBAppMaintenanceAgentSupport(t *testing.T) {
 	on := map[string]any{"enabled": true, "message": "Back soon", "end_time": futureTime(2 * time.Hour)}
 
 	// What Hello stores is what the agent reads give back, for both capabilities.
-	if err := m.repo.EBPF.UpdateAgentFeatures(ctx, m.project, m.agentID, &yes, &no); err != nil {
+	if err := m.repo.EBPF.UpdateAgentFeatures(ctx, m.project, m.agentID, &yes, &no, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	caps, err := m.repo.WAF.AppAgentCapabilities(ctx, m.project, m.appID)

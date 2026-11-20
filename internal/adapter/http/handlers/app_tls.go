@@ -20,6 +20,7 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/adapter/http/auth"
 	"github.com/wafio/wafio-cp-backend/internal/adapter/repository"
 	"github.com/wafio/wafio-cp-backend/internal/domain"
+	"github.com/wafio/wafio-cp-backend/internal/engine"
 	"github.com/wafio/wafio-cp-backend/internal/otp"
 )
 
@@ -34,6 +35,9 @@ type HostResolver interface {
 type AppTLSHandler struct {
 	Repo        *repository.Repository
 	AgentServer interface{ PushBundleToProject(projectID string) }
+	// Bundles measures the bundle of an agent, so that a save does not bring it over what an agent
+	// accepts; nil when no agent can connect, so there is nothing to measure.
+	Bundles BundleSizer
 	// Resolver looks up the hosts for the dns_mismatch warning; nil uses the system resolver.
 	Resolver HostResolver
 	// Roots decide whether an uploaded chain is trusted; nil uses the system roots.
@@ -65,6 +69,7 @@ const (
 	tlsCodeInvalidCert = "INVALID_CERTIFICATE"
 	tlsCodeInvalidTLS  = "INVALID_TLS_SETTINGS"
 	tlsCodeKeyEncrypt  = "KEY_ENCRYPTION_UNAVAILABLE"
+	tlsCodeBundleSize  = "TLS_BUNDLE_TOO_LARGE"
 )
 
 // ── Views ─────────────────────────────────────────────────────────────────
@@ -275,11 +280,15 @@ func tlsRefused(c *fiber.Ctx, err error) (handled bool, answered error) {
 }
 
 func (h *AppTLSHandler) refused(c *fiber.Ctx, err error) error {
+	var refuse *refusal
 	if errors.Is(err, pgx.ErrNoRows) {
 		return maintenanceNotFound(c)
 	}
 	if handled, answered := tlsRefused(c, err); handled {
 		return answered
+	}
+	if errors.As(err, &refuse) {
+		return c.Status(refuse.status).JSON(refuse.body)
 	}
 	apiErr := ResolveDBError(err, "app")
 	return c.Status(apiErr.HTTPStatus).JSON(fiber.Map{"error": apiErr.Message, "code": apiErr.Code})
@@ -319,6 +328,35 @@ func (h *AppTLSHandler) Get(c *fiber.Ctx) error {
 	return c.JSON(r.view(time.Now()))
 }
 
+// checkBundle refuses settings that would make the bundle of the serving agent larger than the agent
+// accepts. The entry of an application has up to 100 hosts of up to 253 characters, so many such
+// applications on one agent can pass the limit. It measures with the entry the settings would give the
+// application, under the lock of the bundle that the change holds, so two saves for one agent are
+// measured one after the other.
+func (h *AppTLSHandler) checkBundle(ctx context.Context, projectID, appID string, saved repository.AppTLS, agentID string) error {
+	if h.Bundles == nil {
+		return nil
+	}
+	entry := saved.BundleEntry()
+	name, size, over, err := bundleOverLimit(ctx, h.Repo, h.Bundles, projectID, agentID, func(rows []repository.WAFBundleAppRow) []repository.WAFBundleAppRow {
+		for i := range rows {
+			if rows[i].AppID == appID {
+				rows[i].TLS = entry
+			}
+		}
+		return rows
+	})
+	if err != nil || !over {
+		return err
+	}
+	return &refusal{status: fiber.StatusConflict, body: fiber.Map{
+		"error": fmt.Sprintf("The WAF agent %q can receive a configuration of at most %s bytes; with these hosts it would be %s bytes. "+
+			"Use fewer hosts, or serve some applications from another agent.",
+			shownName(name), groupDigits(engine.MaxAgentBundleBytes), groupDigits(size)),
+		"code": tlsCodeBundleSize, "field": "hosts",
+	}}
+}
+
 // Put replaces the TLS settings and pushes the bundle. The checks that need the other applications
 // of the agent run in the repository under a lock, so two saves at once are measured one after the
 // other.
@@ -333,7 +371,9 @@ func (h *AppTLSHandler) Put(c *fiber.Ctx) error {
 	if err := in.Normalize(); err != nil {
 		return h.refused(c, err)
 	}
-	out, err := h.Repo.TLS.UpdateTLS(c.UserContext(), projectID, appID, in, time.Now())
+	out, err := h.Repo.TLS.UpdateTLSChecked(c.UserContext(), projectID, appID, in, time.Now(), func(saved repository.AppTLS, agentID string) error {
+		return h.checkBundle(c.UserContext(), projectID, appID, saved, agentID)
+	})
 	if err != nil {
 		return h.refused(c, err)
 	}

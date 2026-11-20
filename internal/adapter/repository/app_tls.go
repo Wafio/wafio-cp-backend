@@ -370,19 +370,33 @@ func (r *TLSRepo) beginTLSChange(ctx context.Context, projectID, appID string) (
 	return tx, a, done, nil
 }
 
-// UpdateTLS stores new TLS settings of an application, which s must have passed through
+// TLSAdmit judges settings that are about to be saved, after every check of the repository and
+// before the write, with the row of the application and the bundle of its agent held. saved is what
+// would be stored and agentID the agent that serves the application. It is called only for settings
+// in gateway mode of an application that an agent serves. It may query the pool (the change holds a
+// place among the transactions of its kind for that), and an error from it stops the change as it
+// is: nothing is written and the error is returned.
+type TLSAdmit func(saved AppTLS, agentID string) error
+
+// UpdateTLS is UpdateTLSChecked with nothing to admit.
+func (r *TLSRepo) UpdateTLS(ctx context.Context, projectID, appID string, s domain.TLSSettings, now time.Time) (TLSUpdate, error) {
+	return r.UpdateTLSChecked(ctx, projectID, appID, s, now, nil)
+}
+
+// UpdateTLSChecked stores new TLS settings of an application, which s must have passed through
 // domain.TLSSettings.Normalize. In one transaction, with the application row and the bundle of its
 // agent held, it checks what needs other applications (hosts, listeners, listener settings), and
 // for a switch to gateway or a change of source or hosts what the agent and the certificate must
-// satisfy. It then writes the settings and raises the bundle generation. Nothing is written when a
-// check fails; the error is returned as it is: a *domain.TLSConflictError, a *TLSCoverageError,
-// ErrTLSUnsupported, ErrCertificateRequired or ErrAgentNotHostBound. It returns pgx.ErrNoRows when
-// the application is not in the project.
+// satisfy. It then asks admit, if there is one, and writes the settings and raises the bundle
+// generation. Nothing is written when a check fails; the error is returned as it is: a
+// *domain.TLSConflictError, a *TLSCoverageError, ErrTLSUnsupported, ErrCertificateRequired,
+// ErrAgentNotHostBound, or what admit returned. It returns pgx.ErrNoRows when the application is
+// not in the project.
 //
 // The checks apply to applications in gateway mode only: a proxy application keeps its settings
 // as a draft, and the agent never sees them. An application that no agent serves is not checked
 // against any agent; a move onto one does that.
-func (r *TLSRepo) UpdateTLS(ctx context.Context, projectID, appID string, s domain.TLSSettings, now time.Time) (TLSUpdate, error) {
+func (r *TLSRepo) UpdateTLSChecked(ctx context.Context, projectID, appID string, s domain.TLSSettings, now time.Time, admit TLSAdmit) (TLSUpdate, error) {
 	if !canonicalIDs(&projectID, &appID) {
 		return TLSUpdate{}, pgx.ErrNoRows
 	}
@@ -414,6 +428,11 @@ func (r *TLSRepo) UpdateTLS(ctx context.Context, projectID, appID string, s doma
 		}
 		if saved.Source == domain.TLSSourceACME && saved.ACMERequestID == "" {
 			saved.ACMERequestID, saved.ACMERequestedAt = uuid.NewString(), &now
+		}
+		if admit != nil && a.agentID != "" {
+			if err := admit(saved, a.agentID); err != nil {
+				return TLSUpdate{}, err
+			}
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE apps SET tls_mode = $3, tls_hosts = $4, tls_listen = $5, tls_redirect_listen = $6,

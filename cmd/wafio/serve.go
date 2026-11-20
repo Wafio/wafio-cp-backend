@@ -404,6 +404,8 @@ func runServe(*cobra.Command, []string) error {
 							goodBotFetcher := agentserver.NewGoodBotFetcher(runCtx)
 							loader := agentserver.NewProjectBundleLoaderWithGoodBot(repo, goodBotFetcher)
 							agentGRPCSrv = agentserver.NewServer(repo, loader, decisionBroker)
+							// The sealed keys of uploaded certificates open with the same key as the TOTP secrets.
+							agentGRPCSrv.KeyCrypto = repo.User.TOTPCrypto
 							onConfigUpdated = func(projectID string) {
 								if agentGRPCSrv != nil {
 									go agentGRPCSrv.PushBundleToProject(projectID)

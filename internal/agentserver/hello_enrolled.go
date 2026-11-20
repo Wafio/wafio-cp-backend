@@ -138,6 +138,16 @@ func (s *Server) validateBoundHello(ctx context.Context, projectID string, hello
 	return "host", aid, b.hostID, nil
 }
 
+// peerIP is the address the transport saw for the stream of ctx, "" when it has none.
+func peerIP(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok && p != nil && p.Addr != nil {
+		if h, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
+			return h
+		}
+	}
+	return ""
+}
+
 // auditBoundRefusal writes an agent.rejected audit row for a refused Hello
 // of a host-bound credential, at most once per credential and reason every
 // boundRefusalAuditEvery, in the background (best effort).
@@ -156,12 +166,7 @@ func (s *Server) auditBoundRefusal(ctx context.Context, projectID string, b cred
 	if !due {
 		return
 	}
-	ip := ""
-	if p, ok := peer.FromContext(ctx); ok && p != nil && p.Addr != nil {
-		if h, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
-			ip = h
-		}
-	}
+	ip := peerIP(ctx)
 	clip := func(v string) string {
 		if len(v) > 128 {
 			return v[:128]

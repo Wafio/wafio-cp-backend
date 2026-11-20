@@ -890,7 +890,13 @@ type CertificateStatus struct {
 	//
 	//	older certificate is still in use
 	//
-	// "missing"  TLS is on but there is no certificate to serve yet
+	// "missing"  TLS is on and the bundle names a certificate that the agent
+	//
+	//	does not hold: there is none to serve yet, or the agent still
+	//	serves the previous one, which chain_pem and leaf_sha256 then
+	//	describe. For "uploaded" this asks for a CertificateInstall;
+	//	the agent repeats it about once a minute while the bundle names
+	//	a certificate it does not hold.
 	State string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
 	// For "uploaded": the certificate_id the bundle names. Empty for "acme".
 	CertificateId string `protobuf:"bytes,4,opt,name=certificate_id,json=certificateId,proto3" json:"certificate_id,omitempty"`
@@ -1351,10 +1357,15 @@ func (x *KeyRotation) GetNewHostKey() string {
 // that reports the Hello feature "tls_certificates" and whose mTLS credential
 // is bound by host-key enrollment to this agent's host, kind and name; a
 // project-wide credential never receives a key. At send time it checks that
-// the app is assigned to this agent in this project. It sends it after the
-// BundleUpdate that names the certificate: after Welcome on connect, after an
-// upload, a replace or a move of the app, and again when a CertificateStatus
-// reports the app "missing". Every delivery is audited.
+// the app is assigned to this agent in this project. It sends it when a
+// CertificateStatus reports the app "missing" for the certificate that the
+// latest BundleUpdate names: a connect, an upload, a replace and a move of the
+// app each send such a bundle, and the agent asks by reporting "missing" once
+// it has applied it, and again about once a minute while it still lacks the
+// certificate. The server answers the same certificate on the same stream at
+// most once per 50 seconds, so a repeat after 60 seconds is never refused, and
+// not again after a refusal that the same bytes would meet again, until it has
+// sent the stream another bundle. Every delivery is audited.
 //
 // An upload or a replace always gets a new certificate_id, so an id never
 // names other bytes. The agent refuses an install that its latest applied
