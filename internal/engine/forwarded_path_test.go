@@ -25,7 +25,7 @@ func TestForwardedPath(t *testing.T) {
 		{"/a?x=%zz", "/a", true},
 		{"/static/%2E%2E/api", "/api", true},
 		{"/./admin", "/admin", true},
-		{"/a/./b/.", "/a/b/.", true},
+		{"/a/./b/.", "/a/b/", true},
 		{"/a/b/..", "/a/", true},
 		{"/../../x", "/x", true},
 		{"//admin//panel", "/admin/panel", true},

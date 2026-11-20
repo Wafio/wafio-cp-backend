@@ -27,7 +27,7 @@ import (
 //     "%2f" becomes a real "/" and "%2e%2e" a real "..";
 //   - duplicate slashes are collapsed;
 //   - "/./" segments are removed and "/x/../" segments resolved (a trailing
-//     "/.." too), never above the root; a trailing "/." is kept;
+//     "/.." or "/." too), never above the root;
 //   - "..;" and other path parameters are left alone (the matchers read them
 //     under both the servlet and the literal reading, see
 //     cleanPathInterpretations);
