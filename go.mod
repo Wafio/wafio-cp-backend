@@ -10,7 +10,7 @@ require (
 	github.com/getkin/kin-openapi v0.153.0
 	github.com/go-playground/validator/v10 v10.30.6
 	github.com/goccy/go-json v0.12.0
-	github.com/gofiber/fiber/v2 v2.52.14
+	github.com/gofiber/fiber/v2 v2.52.16
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/uuid v1.6.1-0.20241114170450-2d3c2a9cc518
