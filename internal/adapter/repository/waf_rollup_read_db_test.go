@@ -807,7 +807,7 @@ func TestDBRollupDistinctAddressesCountOnceAcrossAgents(t *testing.T) {
 
 // Every upsert of a seen row moves an indexed column, so no update is a HOT update and dead rows
 // pile up with the traffic. The migration has autovacuum visit the table at 1 % of its rows, which
-// keeps its pages all-visible, and the count of distinct addresses reads the index alone.
+// keeps most of its pages all-visible, and the count of distinct addresses mostly reads the index alone.
 func TestDBRollupSeenTableVacuumsEarly(t *testing.T) {
 	f := newReaderFixture(t)
 	var options []string

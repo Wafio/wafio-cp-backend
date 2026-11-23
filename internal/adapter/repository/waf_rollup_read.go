@@ -102,10 +102,11 @@ func (r *WAFRepo) lastMinutes(ctx context.Context, minutes int) (from, to time.T
 // of a few days or less through the last_seen index instead.
 //
 // shortcut: both reads are index-only, so they need vacuum to keep the pages all-visible. With the
-// vacuum settings of the migration (1 % of the rows, 28,000 at 2.8 M) the 30 day count of two agents
-// took 600 to 650 ms through an hour of minute fills at 1.1 M decisions a day, with 4,000 to 24,000
-// dead rows in the table, and 8 % of the pages were not all-visible after 13,000 upserts. An install
-// with autovacuum off is not covered: upgrade to a coarser grain if one needs it.
+// vacuum settings of the migration (1 % of the rows, 28,000 at 2.8 M) the 30 day summary of two
+// agents, read alone, took 600 to 650 ms while an hour of traffic at 1.1 M decisions a day was filled
+// minute by minute in ten minutes, with 4,000 to 24,000 dead rows in the table, and 8 % of the pages
+// were not all-visible after 13,000 upserts. An install with autovacuum off is not covered: upgrade
+// to a coarser grain if one needs it.
 func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, from, to time.Time) (*AppWAFSummary, error) {
 	var s AppWAFSummary
 	err := r.readWindow(ctx, "1 minute", "minute_mark", true, true, from, to, func(tx pgx.Tx, c windowCut) error {
