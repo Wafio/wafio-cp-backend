@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -59,12 +60,13 @@ const (
 
 const rollupBadActions = `action IN ('block','monitor','log','challenge')`
 
-// rollupDim says what one dimension ranks: the rows it counts (from, the decisions of the hour by
-// default, and where), their value and how many values of an hour it keeps. blocks and logs default to 0.
+// rollupDim says what one dimension ranks: the rows it counts (the decisions of the hour, expanded
+// by expand when one decision gives several values, and filtered by where), their value and how many
+// values of an hour it keeps. blocks and logs default to 0.
 type rollupDim struct {
 	id           int
 	keep         int
-	from         string
+	expand       string
 	value        string
 	where        string
 	blocks, logs string
@@ -78,7 +80,7 @@ var rollupDims = []rollupDim{
 		blocks: `COUNT(*) FILTER (WHERE lower(action) = 'block')`, logs: `COUNT(*) FILTER (WHERE lower(action) IN ('monitor','log'))`},
 	{id: rollupDimAttackAddr, keep: 1000, value: `remote_addr`, where: `COALESCE(remote_addr, '') <> '' AND ` + rollupBadActions},
 	{id: rollupDimCategory, keep: 200, value: `cat`, where: rollupBadActions + ` AND COALESCE(cat, '') <> ''`,
-		from: rollupRows + ` CROSS JOIN LATERAL unnest(COALESCE(d.categories, '{}'::text[])) AS u(cat)`},
+		expand: ` CROSS JOIN LATERAL unnest(COALESCE(d.categories, '{}'::text[])) AS u(cat)`},
 	{id: rollupDimMethod, keep: 50, value: `COALESCE(method, 'GET')`, where: `true`},
 }
 
@@ -88,10 +90,7 @@ var rollupDims = []rollupDim{
 // and cannot fail the insert on the primary key. Ties go by that text, then by key. A second fill of
 // the same hour fails on the key.
 func (d rollupDim) sql() string {
-	from, blocks, logs := d.from, d.blocks, d.logs
-	if from == "" {
-		from = rollupRows
-	}
+	blocks, logs := d.blocks, d.logs
 	if blocks == "" {
 		blocks, logs = "0", "0"
 	}
@@ -105,7 +104,7 @@ func (d rollupDim) sql() string {
 		        SELECT agent_id, ` + rollupAppKey + ` AS app_key, md5(` + d.value + `)::uuid AS key,
 		               min(left(` + d.value + `, 1024) COLLATE "C") AS value,
 		               COUNT(*) AS total, ` + blocks + ` AS blocks, ` + logs + ` AS logs
-		        FROM ` + from + `
+		        FROM ` + rollupRows + d.expand + `
 		        WHERE ` + d.where + `
 		        GROUP BY 1, 2, 3
 		    ) g
@@ -113,15 +112,29 @@ func (d rollupDim) sql() string {
 		WHERE rn <= $4`
 }
 
-const fillMinuteSQL = `
-	INSERT INTO waf_rollup_minute (agent_id, app_key, bucket, requests, blocks, allows, monitors, logs, errors, challenges,
-	                               semantic, other, ws_blocked, ws_logged, ws_handshake_rejected, latency_sum)
+// rollupCounters are the counters of a minute row in column order, each with the aggregate that
+// fills it from decisions. The fill and the readers both take them from here; timelines read the first seven.
+var rollupCounters = []struct{ col, agg string }{
+	{"requests", wafCountRequests}, {"blocks", wafCountBlocks}, {"allows", wafCountAllows}, {"monitors", wafCountMonitors},
+	{"logs", wafCountLogs}, {"errors", wafCountErrors}, {"challenges", wafCountChallenges},
+	{"semantic", wafCountSemantic}, {"other", wafCountOther},
+	{"ws_blocked", wafCountWSBlocked}, {"ws_logged", wafCountWSLogged}, {"ws_handshake_rejected", wafCountWSHandshakeRejected},
+	{"latency_sum", `COALESCE(SUM(latency_us), 0)`},
+}
+
+// counterList renders the first n counters with piece, comma separated.
+func counterList(n int, piece func(col, agg string) string) string {
+	parts := make([]string, n)
+	for i, c := range rollupCounters[:n] {
+		parts[i] = piece(c.col, c.agg)
+	}
+	return strings.Join(parts, ", ")
+}
+
+var fillMinuteSQL = `
+	INSERT INTO waf_rollup_minute (agent_id, app_key, bucket, ` + counterList(len(rollupCounters), func(col, _ string) string { return col }) + `)
 	SELECT agent_id, ` + rollupAppKey + `, date_bin('1 minute', recorded_at, TIMESTAMPTZ 'epoch'),
-	       ` + wafCountRequests + `, ` + wafCountBlocks + `, ` + wafCountAllows + `, ` + wafCountMonitors + `,
-	       ` + wafCountLogs + `, ` + wafCountErrors + `, ` + wafCountChallenges + `,
-	       ` + wafCountSemantic + `, ` + wafCountOther + `,
-	       ` + wafCountWSBlocked + `, ` + wafCountWSLogged + `, ` + wafCountWSHandshakeRejected + `,
-	       COALESCE(SUM(latency_us), 0)
+	       ` + counterList(len(rollupCounters), func(_, agg string) string { return agg }) + `
 	FROM ` + rollupRows + `
 	GROUP BY 1, 2, 3`
 

@@ -55,7 +55,9 @@ CREATE INDEX IF NOT EXISTS waf_rollup_addr_seen_expiry ON waf_rollup_addr_seen (
 
 -- The largest values of one agent, app, dimension and hour. dim: 1 uri, 2 user_agent, 3 addr,
 -- 4 attack_addr, 5 category, 6 method. key is the md5 of the full value, value is cut to 1024
--- characters. blocks and logs are filled for addr only.
+-- characters. blocks and logs are filled for addr only. The primary key carries the counts, so a
+-- list over a month reads the index alone and not the values; vacuum early, so that most of it
+-- stays index-only as hours are added.
 CREATE TABLE IF NOT EXISTS waf_rollup_hour (
     agent_id uuid        NOT NULL,
     app_key  uuid        NOT NULL,
@@ -66,8 +68,8 @@ CREATE TABLE IF NOT EXISTS waf_rollup_hour (
     total    bigint      NOT NULL,
     blocks   bigint      NOT NULL,
     logs     bigint      NOT NULL,
-    PRIMARY KEY (agent_id, app_key, dim, bucket, key)
-);
+    PRIMARY KEY (agent_id, app_key, dim, bucket, key) INCLUDE (total, blocks, logs)
+) WITH (autovacuum_vacuum_insert_scale_factor = 0.01);
 
 -- Retention deletes by time alone, which the primary key cannot serve.
 CREATE INDEX IF NOT EXISTS waf_rollup_hour_expiry ON waf_rollup_hour (bucket);

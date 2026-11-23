@@ -54,7 +54,9 @@ func TestAppGeoLocationsCapsBeforeEnrichment(t *testing.T) {
 	if _, err := repo.DB.Exec(ctx, `
 		CREATE TABLE projects(id uuid PRIMARY KEY, user_id uuid, name text, code text, description text, created_at timestamptz, updated_at timestamptz);
 		CREATE TABLE agents(id uuid PRIMARY KEY, project_id uuid,deleted_at timestamptz);
-		CREATE TABLE waf_decisions(agent_id uuid, app_id uuid, remote_addr text, action text, event_time timestamptz);
+		CREATE TABLE waf_decisions(agent_id uuid, app_id uuid, remote_addr text, action text, event_time timestamptz, recorded_at timestamptz);
+		CREATE TABLE waf_rollup_state(covered_from timestamptz, minute_mark timestamptz, hour_mark timestamptz);
+		CREATE TABLE waf_rollup_hour(agent_id uuid, app_key uuid, dim smallint, bucket timestamptz, key uuid, value text, total bigint, blocks bigint, logs bigint);
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -65,10 +67,10 @@ func TestAppGeoLocationsCapsBeforeEnrichment(t *testing.T) {
 	if _, err := repo.DB.Exec(ctx, `INSERT INTO agents VALUES($1,$2)`, agentID, projectID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.DB.Exec(ctx, `INSERT INTO waf_decisions SELECT $1,$2,'198.51.' || (n/256)::text || '.' || (n%256)::text,'allow',now()-interval '1 minute' FROM generate_series(0,1199) n`, agentID, appID); err != nil {
+	if _, err := repo.DB.Exec(ctx, `INSERT INTO waf_decisions SELECT $1,$2,'198.51.' || (n/256)::text || '.' || (n%256)::text,'allow',now()-interval '1 minute',now()-interval '1 minute' FROM generate_series(0,1199) n`, agentID, appID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.DB.Exec(ctx, `INSERT INTO waf_decisions VALUES($1,$2,'198.51.0.0','block',now()-interval '1 minute')`, agentID, appID); err != nil {
+	if _, err := repo.DB.Exec(ctx, `INSERT INTO waf_decisions VALUES($1,$2,'198.51.0.0','block',now()-interval '1 minute',now()-interval '1 minute')`, agentID, appID); err != nil {
 		t.Fatal(err)
 	}
 	enricher := &countingGeoEnricher{}

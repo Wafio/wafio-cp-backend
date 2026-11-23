@@ -339,6 +339,11 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 		}
 	}
 
+	// The app summary reads the rollup tables.
+	if _, err := pool.Exec(ctx, readMigration(t, "000126_waf_rollups.up.sql")); err != nil {
+		t.Fatalf("000126 up: %v", err)
+	}
+
 	projectID, otherProject := uuid.NewString(), uuid.NewString()
 	userID := uuid.NewString()
 	wafID, oldID, foreignID := uuid.NewString(), uuid.NewString(), uuid.NewString()

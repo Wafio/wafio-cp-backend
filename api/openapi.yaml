@@ -10154,10 +10154,11 @@ paths:
         - name: minutes
           in: query
           required: false
-          description: Window length in minutes. Values below 1 fall back to 60; there is no upper bound.
+          description: Window length in minutes, 1 to 43200 (30 days). Values below 1 fall back to 60, larger ones are capped at 43200.
           schema:
             type: integer
             minimum: 1
+            maximum: 43200
             default: 60
       responses:
         '200':
@@ -10211,7 +10212,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppTimeline
       summary: Decision counts over time for an application
-      description: 'Returns request counts per time bucket for the timeline chart. At most 200 buckets: a bucket_seconds that would give more is raised.'
+      description: 'Returns request counts per time bucket for the timeline chart. Decisions are placed by the time the control plane recorded them. At most 200 buckets: a bucket_seconds that would give more is raised to the next whole number of minutes.'
       tags:
         - Applications
         - WAF analytics
@@ -10232,7 +10233,7 @@ paths:
         - name: bucket_seconds
           in: query
           required: false
-          description: 'Bucket width in seconds. Default: window divided into about 60 buckets; raised so there are at most 200.'
+          description: 'Bucket width in seconds. Default: window divided into about 60 buckets; raised, to a whole number of minutes, so there are at most 200. A width that is a whole number of minutes is read from per-minute rollups for the part of the window they cover.'
           schema:
             type: integer
             minimum: 1
@@ -10290,7 +10291,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppTop
       summary: Top-N list of an application
-      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents.'
+      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour: a count can be lower than the true one, and a value that is never among the busiest of an hour can be missing from the list. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - Applications
         - WAF analytics
@@ -10402,7 +10403,7 @@ paths:
     get:
       operationId: DashboardHandler_AppGeoLocations
       summary: Client locations of an application
-      description: Returns the busiest client IPs of the application with their GeoIP location and allow, log and block counts, for the map view. Location fields are empty when no GeoIP database is loaded. Time filters are Unix seconds on the event time.
+      description: 'Returns the busiest client IPs of the application with their GeoIP location and allow, log and block counts, for the map view. Location fields are empty when no GeoIP database is loaded. Time filters are Unix seconds on the time the control plane recorded the decision. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest addresses of each hour: a count can be lower than the true one, and an address that is never among the busiest of an hour can be missing. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - Applications
         - WAF analytics
