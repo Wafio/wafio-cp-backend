@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"slices"
 	"sort"
@@ -19,6 +20,10 @@ const (
 	perfKeepDays     = 30
 	perfLimit        = time.Second
 	perfMinutesAHour = 60
+	// perfMonth and perfWeek are the windows of the tab in minutes. A doubled window past a month is not
+	// asked for: the tab has nothing older to compare with.
+	perfMonth = 30 * 24 * 60
+	perfWeek  = 7 * 24 * 60
 	// perfMaxConns and perfMinConns are the defaults of database.max_conns and database.min_conns.
 	perfMaxConns = 20
 	perfMinConns = 2
@@ -26,8 +31,8 @@ const (
 	// first two minutes of an hour a top list reads the whole last hour and a bit more raw.
 	perfWorstTail = 62 * time.Minute
 	// perfDeadRows is how many row versions perfDuringVacuum leaves dead in the seen table: over 1 % of
-	// its 2.8 M rows. perfHotRows is how many addresses they are spread over. Traffic updates the same
-	// busy addresses every minute, so 13,000 updates left about 8 % of the pages not all-visible, not all of them.
+	// its 2.8 M rows, so autovacuum starts. perfHotRows is how many addresses they are spread over. Traffic
+	// updates the same busy addresses every minute, so 13,000 updates left about 8 % of the pages not all-visible.
 	perfDeadRows = 40_000
 	perfHotRows  = 5_000
 	// perfMinTail is the fewest decisions of the app that perfWorstTail holds at 1.1 M a day, with margin.
@@ -91,53 +96,60 @@ func perfNewest(ctx context.Context, t *testing.T, repo *Repository) time.Time {
 	return newest
 }
 
+// perfWidget is one read of the Monitoring tab. tab says whether the tab sends it for a window of that
+// many minutes; nil means always.
 type perfWidget struct {
 	name string
+	tab  func(minutes int) bool
 	read func(ctx context.Context, minutes int) (int, error)
 }
 
-// perfWidgets are the readers behind the widgets of the app Monitoring tab.
+// perfWidgets are the readers the app Monitoring tab and its API behind it offer. The tab sends seven of
+// them at 30 days and eight at 7 days (TestRollupPerfTabSet); the others are timed alone, and in a round
+// that is logged and not asserted.
 func perfWidgets(repo *Repository) []perfWidget {
 	return []perfWidget{
-		{"summary", func(ctx context.Context, m int) (int, error) {
+		{"summary", nil, func(ctx context.Context, m int) (int, error) {
 			s, err := repo.WAF.SummarizeApp(ctx, perfProject, perfApp, m)
 			if err != nil {
 				return 0, err
 			}
 			return int(s.UniqueIPs), nil
 		}},
-		{"summary, twice the window", func(ctx context.Context, m int) (int, error) {
-			s, err := repo.WAF.SummarizeApp(ctx, perfProject, perfApp, min(2*m, 43200))
+		// The tab asks for the doubled window only when it ends within the month, and the API clamps it.
+		{"summary, twice the window", func(m int) bool { return 2*m <= perfMonth }, func(ctx context.Context, m int) (int, error) {
+			s, err := repo.WAF.SummarizeApp(ctx, perfProject, perfApp, min(2*m, perfMonth))
 			if err != nil {
 				return 0, err
 			}
 			return int(s.UniqueIPs), nil
 		}},
-		{"timeline", func(ctx context.Context, m int) (int, error) {
+		{"timeline", nil, func(ctx context.Context, m int) (int, error) {
 			b, err := repo.WAF.TimelineForApp(ctx, perfProject, perfApp, m, 0)
 			return len(b), err
 		}},
-		{"top addresses, attackers", func(ctx context.Context, m int) (int, error) {
+		{"top addresses, attackers", nil, func(ctx context.Context, m int) (int, error) {
 			r, err := repo.WAF.TopIPsForApp(ctx, perfProject, perfApp, m, 10, true)
 			return len(r), err
 		}},
-		{"top addresses, all", func(ctx context.Context, m int) (int, error) {
+		// The tab sends no scope, which the handler reads as attackers.
+		{"top addresses, all", func(int) bool { return false }, func(ctx context.Context, m int) (int, error) {
 			r, err := repo.WAF.TopIPsForApp(ctx, perfProject, perfApp, m, 10, false)
 			return len(r), err
 		}},
-		{"top URIs", func(ctx context.Context, m int) (int, error) {
+		{"top URIs", nil, func(ctx context.Context, m int) (int, error) {
 			r, err := repo.WAF.TopURIsForApp(ctx, perfProject, perfApp, m, 10)
 			return len(r), err
 		}},
-		{"top categories", func(ctx context.Context, m int) (int, error) {
+		{"top categories", nil, func(ctx context.Context, m int) (int, error) {
 			r, err := repo.WAF.TopCategoriesForApp(ctx, perfProject, perfApp, m, 10)
 			return len(r), err
 		}},
-		{"top user agents", func(ctx context.Context, m int) (int, error) {
+		{"top user agents", nil, func(ctx context.Context, m int) (int, error) {
 			r, err := repo.WAF.TopUserAgentsForApp(ctx, perfProject, perfApp, m, 10)
 			return len(r), err
 		}},
-		{"geo", func(ctx context.Context, m int) (int, error) {
+		{"geo", nil, func(ctx context.Context, m int) (int, error) {
 			now := time.Now()
 			r, err := repo.WAF.DecisionsGeoAggregatesForApp(ctx, perfProject, perfApp, now.Add(-time.Duration(m)*time.Minute).Unix(), now.Unix(), 500)
 			return len(r), err
@@ -145,8 +157,56 @@ func perfWidgets(repo *Repository) []perfWidget {
 	}
 }
 
-// perfRound reads every widget once, all at the same moment, and returns how long each took.
-func perfRound(ctx context.Context, t *testing.T, widgets []perfWidget, window string, minutes int) []time.Duration {
+// perfOnTab are the widgets the tab sends for a window of that many minutes.
+func perfOnTab(widgets []perfWidget, minutes int) []perfWidget {
+	var out []perfWidget
+	for _, w := range widgets {
+		if w.tab == nil || w.tab(minutes) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// perfMS renders what a widget took in a round, or a dash when the round did not read it.
+func perfMS(took map[string]time.Duration, w perfWidget) string {
+	d, ok := took[w.name]
+	if !ok {
+		return "     -   "
+	}
+	return fmt.Sprintf("%5d ms", d.Milliseconds())
+}
+
+// TestRollupPerfTabSet pins the widgets the timing asserts to what AppOverview.svelte sends: the
+// summary, timeline, attacker addresses, URIs, categories, user agents and geo at every window, and the
+// doubled summary when it ends within the month. Top addresses of all actions is not on the tab.
+func TestRollupPerfTabSet(t *testing.T) {
+	for _, c := range []struct {
+		window  string
+		minutes int
+		want    int
+		absent  []string
+	}{
+		{"30d", perfMonth, 7, []string{"summary, twice the window", "top addresses, all"}},
+		{"7d", perfWeek, 8, []string{"top addresses, all"}},
+	} {
+		on := map[string]bool{}
+		for _, w := range perfOnTab(perfWidgets(nil), c.minutes) {
+			on[w.name] = true
+		}
+		if len(on) != c.want {
+			t.Errorf("%s: the tab sends %d reads, want %d: %v", c.window, len(on), c.want, on)
+		}
+		for _, name := range c.absent {
+			if on[name] {
+				t.Errorf("%s: %s is not on the tab", c.window, name)
+			}
+		}
+	}
+}
+
+// perfRound reads every widget once, all at the same moment, and returns how long each took by name.
+func perfRound(ctx context.Context, t *testing.T, widgets []perfWidget, window string, minutes int) map[string]time.Duration {
 	t.Helper()
 	var wg sync.WaitGroup
 	took := make([]time.Duration, len(widgets))
@@ -161,74 +221,92 @@ func perfRound(ctx context.Context, t *testing.T, widgets []perfWidget, window s
 		}()
 	}
 	wg.Wait()
-	for i := range widgets {
+	out := map[string]time.Duration{}
+	for i, w := range widgets {
 		if errs[i] != nil {
-			t.Fatalf("%s at %s: %v", widgets[i].name, window, errs[i])
+			t.Fatalf("%s at %s: %v", w.name, window, errs[i])
 		}
+		out[w.name] = took[i]
 	}
-	return took
+	return out
 }
 
 // perfAtOnce reads each widget alone, which also warms the caches, and then all of them at once, the
 // slowest of rounds. A first round that is not timed opens the connections the pool lacks, so that the
 // rounds that count are those of a dashboard in use; perfCold times the first load.
-func perfAtOnce(ctx context.Context, t *testing.T, widgets []perfWidget, window string, minutes, rounds int) (alone, together []time.Duration) {
+func perfAtOnce(ctx context.Context, t *testing.T, widgets []perfWidget, window string, minutes, rounds int) (alone, together map[string]time.Duration) {
 	t.Helper()
-	alone = make([]time.Duration, len(widgets))
-	for i, w := range widgets {
+	alone = map[string]time.Duration{}
+	for _, w := range widgets {
 		begin := time.Now()
 		if n, err := w.read(ctx, minutes); err != nil || n == 0 {
 			t.Fatalf("%s at %s: %d rows, %v", w.name, window, n, err)
 		}
-		alone[i] = time.Since(begin)
+		alone[w.name] = time.Since(begin)
 	}
-	together = make([]time.Duration, len(widgets))
+	together = map[string]time.Duration{}
 	for round := -1; round < rounds; round++ {
 		took := perfRound(ctx, t, widgets, window, minutes)
 		if round < 0 {
 			continue
 		}
-		for i := range widgets {
-			together[i] = max(together[i], took[i])
+		for name, d := range took {
+			together[name] = max(together[name], d)
 		}
 	}
 	return alone, together
 }
 
-// perfCold reads every widget at 30 days at once on a new pool with the server's defaults: the first
+// perfCold reads the widgets at once for a window on a new pool with the server's defaults: the first
 // load after 30 idle minutes, when the pool has closed its connections. Each backend it opens for the
-// requests past min_conns reads the chunk catalog on its first statement.
-func perfCold(ctx context.Context, t *testing.T, dsn string) []time.Duration {
+// requests past min_conns reads the chunk catalog on its first statement. onTab leaves out what the
+// tab does not send.
+func perfCold(ctx context.Context, t *testing.T, dsn, window string, minutes int, onTab bool) map[string]time.Duration {
 	t.Helper()
 	repo, err := NewWithPool(ctx, dsn, PoolOptions{MaxConns: perfMaxConns, MinConns: perfMinConns, StatementTimeout: 15 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer repo.Close()
-	return perfRound(ctx, t, perfWidgets(repo), "30d on a new pool", 43200)
+	widgets := perfWidgets(repo)
+	if onTab {
+		widgets = perfOnTab(widgets, minutes)
+	}
+	return perfRound(ctx, t, widgets, window+" on a new pool", minutes)
 }
 
-// perfMeasure reads each widget of the Monitoring tab at 30 days on a new pool, at 30 and at 7 days
-// alone and with all of them at once, then ten times in a row on one connection, and fails when a
-// read takes a second or more. phase says when, for the log.
+// perfMeasure reads the widgets of the Monitoring tab at 30 and at 7 days: the first load on a new pool,
+// each widget alone, and the widgets at once, worst of three rounds, then ten times in a row on one
+// connection. It fails when a read takes a second or more alone, or when one that the tab sends does with
+// the others the tab sends. The widgets the tab does not send are read at once as well, for the log only.
+// phase says when, for the log.
 func perfMeasure(ctx context.Context, t *testing.T, dsn string, repo *Repository, phase string) {
 	t.Helper()
 	widgets := perfWidgets(repo)
-	for i, took := range perfCold(ctx, t, dsn) {
-		t.Logf("%s, 30d, %-26s first load on a new pool, all at once %5d ms", phase, widgets[i].name, took.Milliseconds())
-		if took >= perfLimit {
-			t.Errorf("%s: %s at 30d took %v with the others on a new pool, over %v", phase, widgets[i].name, took, perfLimit)
-		}
-	}
-	for _, window := range []struct {
+	windows := []struct {
 		name    string
 		minutes int
-	}{{"30d", 43200}, {"7d", 10080}} {
-		alone, together := perfAtOnce(ctx, t, widgets, window.name, window.minutes, 3)
-		for i, w := range widgets {
-			t.Logf("%s, %s, %-26s alone %5d ms, all at once %5d ms", phase, window.name, w.name, alone[i].Milliseconds(), together[i].Milliseconds())
-			if alone[i] >= perfLimit || together[i] >= perfLimit {
-				t.Errorf("%s: %s at %s took %v alone and %v with the others, over %v", phase, w.name, window.name, alone[i], together[i], perfLimit)
+	}{{"30d", perfMonth}, {"7d", perfWeek}}
+	for _, window := range windows {
+		onTab := perfCold(ctx, t, dsn, window.name, window.minutes, true)
+		everything := perfCold(ctx, t, dsn, window.name, window.minutes, false)
+		for _, w := range widgets {
+			t.Logf("%s, %s, %-26s first load on a new pool, the tab's reads at once %s, all at once %s", phase, window.name, w.name, perfMS(onTab, w), perfMS(everything, w))
+			if took, ok := onTab[w.name]; ok && took >= perfLimit {
+				t.Errorf("%s: %s at %s took %v with the other reads of the tab on a new pool, over %v", phase, w.name, window.name, took, perfLimit)
+			}
+		}
+	}
+	for _, window := range windows {
+		_, onTab := perfAtOnce(ctx, t, perfOnTab(widgets, window.minutes), window.name, window.minutes, 3)
+		alone, everything := perfAtOnce(ctx, t, widgets, window.name, window.minutes, 3)
+		for _, w := range widgets {
+			t.Logf("%s, %s, %-26s alone %5d ms, the tab's reads at once %s, all at once %s", phase, window.name, w.name, alone[w.name].Milliseconds(), perfMS(onTab, w), perfMS(everything, w))
+			if alone[w.name] >= perfLimit {
+				t.Errorf("%s: %s at %s took %v alone, over %v", phase, w.name, window.name, alone[w.name], perfLimit)
+			}
+			if took, ok := onTab[w.name]; ok && took >= perfLimit {
+				t.Errorf("%s: %s at %s took %v with the other reads of the tab, over %v", phase, w.name, window.name, took, perfLimit)
 			}
 		}
 	}
@@ -244,7 +322,7 @@ func perfMeasure(ctx context.Context, t *testing.T, dsn string, repo *Repository
 		var slowest time.Duration
 		for run := 0; run < 10; run++ {
 			begin := time.Now()
-			if _, err := w.read(ctx, 43200); err != nil {
+			if _, err := w.read(ctx, perfMonth); err != nil {
 				t.Errorf("%s: %s, run %d on one connection: %v", phase, w.name, run+1, err)
 				break
 			}
@@ -266,10 +344,7 @@ func perfMeasure(ctx context.Context, t *testing.T, dsn string, repo *Repository
 		}
 	}()
 	for _, w := range perfWidgets(one)[:2] {
-		for _, window := range []struct {
-			name    string
-			minutes int
-		}{{"30d", 43200}, {"7d", 10080}} {
+		for _, window := range windows {
 			var slowest time.Duration
 			for run := 0; run < 10; run++ {
 				begin := time.Now()
@@ -363,10 +438,11 @@ func perfTail(ctx context.Context, t *testing.T, repo *Repository, hour time.Tim
 	return n
 }
 
-// perfDuringVacuum reads every widget at 30 days at once while autovacuum works on the seen table, the
-// case perfQuiet keeps out of the other rounds, and logs how long that vacuum ran. The steady hour
-// leaves fewer dead rows than the table's threshold, so it updates an indexed column of perfHotRows
-// addresses, as the fill's upserts do, until the vacuum starts.
+// perfDuringVacuum reads the widgets at 30 days at once while autovacuum works on the seen table, the
+// case perfQuiet keeps out of the other rounds, and logs how long that vacuum ran. Whatever dead rows
+// the hour before left, it updates an indexed column of perfHotRows addresses perfDeadRows/perfHotRows
+// times, as the fill's upserts do, which passes the table's threshold, and then waits for the vacuum.
+// The reads the tab sends go first and must stay under a second; all of them follow, for the log only.
 func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 	t.Helper()
 	running := func() bool {
@@ -392,17 +468,19 @@ func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 	}
 	begin := time.Now()
 	widgets := perfWidgets(repo)
-	took := perfRound(ctx, t, widgets, "30d during a vacuum", 43200)
-	stillRunning := running()
+	onTab := perfRound(ctx, t, perfOnTab(widgets, perfMonth), "30d during a vacuum", perfMonth)
+	runningAfterTab := running()
+	everything := perfRound(ctx, t, widgets, "30d during a vacuum", perfMonth)
+	runningAfterAll := running()
 	for running() {
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Logf("autovacuum of the seen table ran for about %v; it was %s when the round ended", time.Since(begin).Round(100*time.Millisecond),
-		map[bool]string{true: "still running", false: "already done"}[stillRunning])
-	for i, w := range widgets {
-		t.Logf("during a vacuum, 30d, %-26s all at once %5d ms", w.name, took[i].Milliseconds())
-		if took[i] >= perfLimit {
-			t.Errorf("during a vacuum: %s at 30d took %v with the others, over %v", w.name, took[i], perfLimit)
+	t.Logf("autovacuum of the seen table ran for about %v; it was still running after the tab's reads: %v, after all of them: %v",
+		time.Since(begin).Round(100*time.Millisecond), runningAfterTab, runningAfterAll)
+	for _, w := range widgets {
+		t.Logf("during a vacuum, 30d, %-26s the tab's reads at once %s, all at once %s", w.name, perfMS(onTab, w), perfMS(everything, w))
+		if took, ok := onTab[w.name]; ok && took >= perfLimit {
+			t.Errorf("during a vacuum: %s at 30d took %v with the other reads of the tab, over %v", w.name, took, perfLimit)
 		}
 	}
 }
@@ -421,7 +499,8 @@ func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 // up to the one before the last, so there a top list or the map reads that whole hour and a bit more
 // raw, 62 minutes and about 47,000 decisions of the app, and a summary reads the last three minutes.
 // TestRollupSteadyHourPerf adds the next hour from H plus 59 minutes. Each widget is read as
-// perfMeasure says. It vacuums nothing: a second run shows the tables after autovacuum has been at them.
+// perfMeasure says. Each run needs a fresh clone of the migrated and loaded database: the state row of
+// an earlier run stops it.
 func TestRollupAppReadersPerf(t *testing.T) {
 	ctx, dsn, repo := perfRepo(t)
 	wr := repo.WAFRollup
@@ -501,8 +580,8 @@ func TestRollupAppReadersPerf(t *testing.T) {
 // autovacuum ran and what the count cost before and after. Then it fills the minutes up to now, as
 // the job would have meanwhile, so the raw part of a top list is what the time of the run leaves, from
 // two to 62 minutes (logged), logs all the widgets at 30 days at once, which fails nothing, waits for
-// autovacuum to be idle and times every widget again, which must stay under a second. The last round
-// reads them all at once while autovacuum works on the seen table.
+// autovacuum to be idle and times every widget again as perfMeasure says. The last round reads the
+// widgets at once while autovacuum works on the seen table.
 func TestRollupSteadyHourPerf(t *testing.T) {
 	ctx, dsn, repo := perfRepo(t)
 	wr := repo.WAFRollup
@@ -538,7 +617,7 @@ func TestRollupSteadyHourPerf(t *testing.T) {
 		hourFills = append(hourFills, time.Since(begin))
 		if (i+1)%10 == 0 {
 			begin = time.Now()
-			if _, err := summary.read(ctx, 43200); err != nil {
+			if _, err := summary.read(ctx, perfMonth); err != nil {
 				t.Fatal(err)
 			}
 			took := time.Since(begin)
@@ -561,9 +640,9 @@ func TestRollupSteadyHourPerf(t *testing.T) {
 		hour.UTC().Format(time.RFC3339), time.Since(hour).Round(time.Second), perfTail(ctx, t, repo, hour))
 
 	widgets := perfWidgets(repo)
-	alone, together := perfAtOnce(ctx, t, widgets, "30d", 43200, 1)
-	for i, w := range widgets {
-		t.Logf("right after the hour, 30d, %-26s alone %5d ms, all at once %5d ms", w.name, alone[i].Milliseconds(), together[i].Milliseconds())
+	alone, together := perfAtOnce(ctx, t, widgets, "30d", perfMonth, 1)
+	for _, w := range widgets {
+		t.Logf("right after the hour, 30d, %-26s alone %5d ms, all at once %5d ms", w.name, alone[w.name].Milliseconds(), together[w.name].Milliseconds())
 	}
 	perfQuiet(ctx, t, repo)
 	t.Logf("before the second round: seen table %s", perfSeen(ctx, t, repo))
