@@ -95,11 +95,17 @@ func (r *WAFRepo) lastMinutes(ctx context.Context, minutes int) (from, to time.T
 }
 
 // summarizeApp counts the decisions of an app recorded after from and up to to. Distinct addresses
-// are the seen rows of the window, plus the addresses of the raw decisions at its ends that they lack.
-// With one agent that has seen rows they are counted, and the few raw addresses are looked up in
-// them. With several agents their rows overlap, so all of them are merged with the raw addresses in
-// one hash, which costs about half a microsecond a row; looking up each row of the others in the
-// largest agent's rows costs about five.
+// are the seen rows of the window, plus the addresses of the raw decisions at its ends that they
+// lack. The seen rows of all live agents of the project are read in the order of the primary key,
+// address first, so that an address several agents saw counts once in a streaming pass: a hash of
+// every row of the window cost over a second at 30 days for two agents. The planner reads a window
+// of a few days or less through the last_seen index instead.
+//
+// shortcut: both reads are index-only, which holds while vacuum keeps the pages of the table
+// all-visible. Its upserts touch pages all over the table, and after 43,000 of them (half an hour
+// of a 1.1 M a day app) the 30 day count of two agents took 2.9 s instead of 0.55 s, until the next
+// vacuum. Upgrade to a tighter vacuum of this table, or a coarser grain, when a day of fills
+// without a vacuum has been timed and misses the bar.
 func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, from, to time.Time) (*AppWAFSummary, error) {
 	var s AppWAFSummary
 	err := r.readWindow(ctx, "1 minute", "minute_mark", true, true, from, to, func(tx pgx.Tx, c windowCut) error {
@@ -108,35 +114,23 @@ func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, fro
 		if !c.seen {
 			rawLo, rawHi = c.last.Add(-time.Microsecond), c.last.Add(-time.Microsecond)
 		}
-		// shortcut: the hash of several agents is exact but reads every seen row of the window, about 1.2 s
-		// for two agents of 1.4 M addresses each at 30 days; upgrade when an app behind several busy agents
-		// needs less, to a streaming count over an index ordered by address (0.5 s in a trial).
-		const seenWhere = `$11::boolean AND s.app_key = $6 AND s.last_seen > $9::timestamptz AND s.last_seen >= $10::timestamptz`
-		seen := `FROM waf_rollup_addr_seen s JOIN agents a ON a.id = s.agent_id AND a.deleted_at IS NULL
-			    WHERE a.project_id = $5 AND ` + seenWhere
+		// ANY over an array, not a join with agents: a join makes the planner read every row and hash it.
+		seenOf := func(alias string) string {
+			return `$11::boolean AND ` + alias + `.app_key = $6 AND ` + alias + `.last_seen > $9::timestamptz AND ` + alias + `.last_seen >= $10::timestamptz
+			    AND ` + alias + `.agent_id = ANY (ARRAY(SELECT a.id FROM agents a WHERE a.project_id = $5 AND a.deleted_at IS NULL))`
+		}
 		raw := `SELECT DISTINCT md5(d.remote_addr)::uuid AS addr_key FROM ` + appRows("$7", "$8") + ` WHERE d.remote_addr IS NOT NULL`
-		counters := len(rollupCounters) - 1
 		return tx.QueryRow(ctx, `
-			SELECT `+counterList(counters, func(col, _ string) string { return `COALESCE(sum(` + col + `), 0)::bigint` })+`,
+			SELECT `+counterList(len(rollupCounters)-1, func(col, _ string) string { return `COALESCE(sum(` + col + `), 0)::bigint` })+`,
 			       COALESCE((sum(latency_sum)::numeric / NULLIF(sum(requests), 0))::int, 0),
-			       CASE WHEN (
-			           SELECT count(*) FROM agents a
-			           WHERE a.project_id = $5 AND a.deleted_at IS NULL
-			             AND EXISTS (SELECT 1 FROM waf_rollup_addr_seen s WHERE s.agent_id = a.id AND s.app_key = $6)
-			       ) > 1 THEN (
-			           SELECT count(*) FROM (SELECT s.addr_key `+seen+` UNION `+raw+`) x
-			       ) ELSE (
-			           SELECT count(*) `+seen+`
+			       (
+			           SELECT count(*) FROM (SELECT s.addr_key FROM waf_rollup_addr_seen s WHERE `+seenOf("s")+` GROUP BY s.addr_key) x
 			       ) + (
 			           SELECT count(*) FROM (`+raw+`) x
 			           -- OFFSET 0 keeps the planner from turning this into an anti join, which reads every seen row
 			           -- into a hash table to look up a few thousand addresses.
-			           WHERE NOT EXISTS (
-			               SELECT 1 FROM waf_rollup_addr_seen y JOIN agents ya ON ya.id = y.agent_id AND ya.deleted_at IS NULL
-			               WHERE $11::boolean AND ya.project_id = $5 AND y.app_key = $6 AND y.addr_key = x.addr_key
-			                 AND y.last_seen > $9::timestamptz AND y.last_seen >= $10::timestamptz
-			               OFFSET 0)
-			       ) END
+			           WHERE NOT EXISTS (SELECT 1 FROM waf_rollup_addr_seen y WHERE `+seenOf("y")+` AND y.addr_key = x.addr_key OFFSET 0)
+			       )
 			FROM (
 			    SELECT `+counterList(len(rollupCounters), func(col, _ string) string { return "m." + col })+`
 			    FROM `+appMinuteRows+`

@@ -751,3 +751,50 @@ func TestDBRollupReadersTopBoundPastWhatAnHourKeeps(t *testing.T) {
 		t.Fatal("no count was ever below the true one, so the bound was not exercised")
 	}
 }
+
+// An address that several agents of the project saw counts once, one that only a deleted agent or
+// another project's agent saw does not count, and the addresses of the last minutes, which the seen
+// rows do not hold yet, count with them: new ones, and ones another agent saw before the window.
+func TestDBRollupDistinctAddressesCountOnceAcrossAgents(t *testing.T) {
+	f := newReaderFixture(t)
+	a0, a1, app := f.agents[0], f.agents[1], f.apps[0]
+	add := func(agent, appID string, addr any, ago time.Duration) {
+		f.exec(`INSERT INTO waf_decisions (agent_id, app_id, remote_addr, action, event_time, recorded_at)
+			VALUES ($1, $2, $3, 'allow', $4, $4)`, agent, appID, addr, f.now.Add(-ago))
+	}
+	add(a0, app, "10.1.0.1", 10*time.Hour)
+	add(a0, app, "10.1.0.2", 10*time.Hour)
+	add(a0, app, "10.1.0.3", 5*time.Hour)
+	add(a1, app, "10.1.0.2", 8*time.Hour)
+	add(a1, app, "10.1.0.3", 3*time.Hour)
+	add(a1, app, "10.1.0.4", 3*time.Hour)
+	add(f.gone, app, "10.1.0.5", 4*time.Hour)
+	add(f.foreign, app, "10.1.0.6", 4*time.Hour)
+	add(a1, app, "10.1.0.7", 30*time.Second)
+	add(a1, app, "10.1.0.1", 30*time.Second)
+	add(a0, app, "10.1.0.8", 48*time.Hour)
+	add(a0, f.apps[1], "10.1.0.9", 2*time.Hour)
+	add(a0, app, nil, 2*time.Hour)
+	add(a1, app, "", 2*time.Hour)
+	f.fill(-1)
+	check := func(name string, from time.Duration, want int64) {
+		t.Helper()
+		w := window{f.now.Add(-from), f.now}
+		s, err := f.repo.WAF.summarizeApp(f.ctx, f.project, app, w.from, w.to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.UniqueIPs != want {
+			t.Errorf("%s: %d distinct addresses, want %d", name, s.UniqueIPs, want)
+		}
+		if raw := f.oracleSummary(f.project, app, w)[13]; raw != want {
+			t.Fatalf("%s: the decisions say %d distinct addresses, the test expects %d", name, raw, want)
+		}
+	}
+	// .1 to .4 and .7 from the live agents, and the empty address; not .5, .6, .8, .9 or the NULL one.
+	check("a day", 24*time.Hour, 6)
+	// .1 only through the last minutes, since both of its seen rows are older than the window.
+	check("six hours", 6*time.Hour, 5)
+	f.exec(`UPDATE agents SET deleted_at = now() WHERE id = $1`, a1)
+	check("one agent deleted", 24*time.Hour, 3)
+}

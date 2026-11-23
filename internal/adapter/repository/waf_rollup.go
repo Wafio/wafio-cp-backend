@@ -146,7 +146,7 @@ const fillSeenSQL = `
 	FROM ` + rollupRows + `
 	WHERE remote_addr IS NOT NULL
 	GROUP BY 1, 2, 3
-	ON CONFLICT (agent_id, app_key, addr_key) DO UPDATE SET last_seen = EXCLUDED.last_seen
+	ON CONFLICT (app_key, addr_key, agent_id) DO UPDATE SET last_seen = EXCLUDED.last_seen
 	WHERE waf_rollup_addr_seen.last_seen < EXCLUDED.last_seen`
 
 // TryRollupLock takes a session advisory lock on a dedicated connection.

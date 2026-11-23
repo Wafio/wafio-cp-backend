@@ -36,7 +36,8 @@ const topUpSQL = `
 // and with all of them at once, and last runs each widget ten times in a row on one connection. It
 // fails when any read takes a second or more. It vacuums nothing: a second run shows the tables
 // after autovacuum has been at them. The raw part of a top list is longest in the first two minutes
-// of an hour, about 62 minutes, and shortest just after that, so time it then.
+// of an hour, about 62 minutes, and shortest just after that, so time it then. Last it hides the
+// second agent and times the two summaries again, for an app behind one agent.
 func TestRollupAppReadersPerf(t *testing.T) {
 	dsn := os.Getenv("WAFIO_PERF_DSN")
 	if dsn == "" {
@@ -253,6 +254,37 @@ func TestRollupAppReadersPerf(t *testing.T) {
 		t.Logf("30d, %-26s ten runs on one connection, slowest %5d ms", w.name, slowest.Milliseconds())
 		if slowest >= limit {
 			t.Errorf("%s took %v in ten runs on one connection, over %v", w.name, slowest, limit)
+		}
+	}
+
+	// Most installs run one agent for an app, and the same statement may plan differently for it.
+	const second = "00000000-0000-4000-8000-0000000000a4"
+	if _, err := repo.DB.Exec(ctx, `UPDATE agents SET deleted_at = now() WHERE id = $1`, second); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := repo.DB.Exec(ctx, `UPDATE agents SET deleted_at = NULL WHERE id = $1`, second); err != nil {
+			t.Errorf("the second agent is still deleted: %v", err)
+		}
+	}()
+	for _, w := range widgetsOf(one)[:2] {
+		for _, window := range []struct {
+			name    string
+			minutes int
+		}{{"30d", 43200}, {"7d", 10080}} {
+			var slowest time.Duration
+			for run := 0; run < 10; run++ {
+				begin := time.Now()
+				if _, err := w.read(ctx, window.minutes); err != nil {
+					t.Errorf("%s at %s with one agent, run %d: %v", w.name, window.name, run+1, err)
+					break
+				}
+				slowest = max(slowest, time.Since(begin))
+			}
+			t.Logf("%s, %-26s one agent, ten runs on one connection, slowest %5d ms", window.name, w.name, slowest.Milliseconds())
+			if slowest >= limit {
+				t.Errorf("%s at %s with one agent took %v in ten runs on one connection, over %v", w.name, window.name, slowest, limit)
+			}
 		}
 	}
 }

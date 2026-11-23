@@ -38,15 +38,18 @@ CREATE TABLE IF NOT EXISTS waf_rollup_minute (
 );
 
 -- The last time each client address ('' included, NULL not) was seen, to count distinct addresses of
--- a window. Its upserts move an indexed column, so no update is a HOT update: vacuum early.
+-- a window. Its upserts move an indexed column, so no update is a HOT update: vacuum early. The key
+-- starts with the app and the address and carries last_seen, so that an app behind several agents
+-- counts its distinct addresses in one ordered pass over the index, without a hash of every row.
 CREATE TABLE IF NOT EXISTS waf_rollup_addr_seen (
     agent_id  uuid        NOT NULL,
     app_key   uuid        NOT NULL,
     addr_key  uuid        NOT NULL,
     last_seen timestamptz NOT NULL,
-    PRIMARY KEY (agent_id, app_key, addr_key)
+    PRIMARY KEY (app_key, addr_key, agent_id) INCLUDE (last_seen)
 ) WITH (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_insert_scale_factor = 0.01);
 
+-- The count of a short window reads its rows through this one.
 CREATE INDEX IF NOT EXISTS waf_rollup_addr_seen_last_seen
     ON waf_rollup_addr_seen (agent_id, app_key, last_seen);
 
