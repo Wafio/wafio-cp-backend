@@ -32,8 +32,8 @@ type rollupFixture struct {
 	agents  []string
 	apps    [2]string
 	// keep is the retention in days the job sees, oldest the start of the oldest chunk it sees. A test
-	// that compares against a cutoff sets oldest to a whole hour well after now minus keep, so the
-	// cutoff does not move up when the clock passes an hour while the test runs.
+	// that compares against a fixed cutoff sets oldest to a whole hour well after now minus keep, so
+	// the cutoff does not move up when the clock passes an hour while the test runs.
 	keep   int
 	oldest *time.Time
 }
@@ -734,22 +734,38 @@ func TestDBRollupCleanupLeavesNothingBeforeTheCutoff(t *testing.T) {
 		}
 	}
 
-	// Both cutoffs are whole hours after now minus the days, so the clock does not move them.
+	// A pinned cutoff is a whole hour after now minus the days, so the clock does not move it. With no
+	// oldest chunk, as in delete mode on plain PostgreSQL, now minus the days decides: the test works it out
+	// from the database clock before and after the call, and takes either, so a clock passing a whole
+	// hour cannot fail it. That case runs first because the cutoff only moves up.
+	ceilHour := func(at time.Time) time.Time {
+		if h := at.Truncate(time.Hour); h.Before(at) {
+			return h.Add(time.Hour)
+		}
+		return at
+	}
 	oneDay, oldest := hour.Add(-22*time.Hour), hour.Add(-10*time.Hour-20*time.Minute)
 	for _, c := range []struct {
 		days   int
 		oldest *time.Time
-	}{{1, &oneDay}, {7, &oldest}} {
-		cutoff, err := f.repo.WAFRollup.RollupFloor(f.ctx, c.days, c.oldest)
-		if err != nil {
-			t.Fatal(err)
-		}
+		want   time.Time
+	}{{1, nil, time.Time{}}, {1, &oneDay, oneDay}, {7, &oldest, hour.Add(-10 * time.Hour)}} {
+		before := f.queryTime(`SELECT now()`)
 		if err := f.job().Cleanup(f.ctx, c.days, c.oldest); err != nil {
 			t.Fatal(err)
 		}
-		covered, minute, hourMark := f.marks()
-		if !covered.Equal(cutoff) || minute.Before(cutoff) || hourMark.Before(cutoff) {
-			t.Fatalf("after a cutoff of %v: covered %v, minute mark %v, hour mark %v", cutoff, covered, minute, hourMark)
+		after := f.queryTime(`SELECT now()`)
+		cutoff, minute, hourMark := f.marks()
+		keep := time.Duration(c.days) * 24 * time.Hour
+		if c.oldest == nil {
+			if !cutoff.Equal(ceilHour(before.Add(-keep))) && !cutoff.Equal(ceilHour(after.Add(-keep))) {
+				t.Fatalf("no oldest chunk, %d days: covered_from %v, want %v or %v", c.days, cutoff, ceilHour(before.Add(-keep)), ceilHour(after.Add(-keep)))
+			}
+		} else if !cutoff.Equal(c.want) {
+			t.Fatalf("oldest chunk %v, %d days: covered_from %v, want %v", *c.oldest, c.days, cutoff, c.want)
+		}
+		if minute.Before(cutoff) || hourMark.Before(cutoff) {
+			t.Fatalf("after a cutoff of %v: minute mark %v, hour mark %v", cutoff, minute, hourMark)
 		}
 		var old int
 		if err := f.repo.DB.QueryRow(f.ctx, `
@@ -761,6 +777,31 @@ func TestDBRollupCleanupLeavesNothingBeforeTheCutoff(t *testing.T) {
 		// What stays is what the decisions after the cutoff say: an address last seen before it is gone.
 		f.sameRows("minute rows after the cutoff", rawMinuteSQL, rollMinuteSQL, cutoff, start.Add(time.Hour))
 		f.sameRows("seen rows after the cutoff", rawSeenSQL+` HAVING max(recorded_at) >= $2`, rollSeenSQL, cutoff, start.Add(time.Hour))
+	}
+}
+
+// A batch deletes no more than its limit of the rows before covered_from, and with no state row there
+// is no covered_from and nothing goes.
+func TestDBRollupDeleteExpiredBatchStopsAtTheLimit(t *testing.T) {
+	f := newRollupFixture(t)
+	hour := f.hour()
+	f.exec(`INSERT INTO waf_rollup_addr_seen (agent_id, app_key, addr_key, last_seen)
+		SELECT $1::uuid, $2::uuid, gen_random_uuid(), $3::timestamptz - i * interval '1 hour' FROM generate_series(1, 3) AS i`,
+		f.agents[0], nilApp, hour)
+	left := func() (n int) {
+		if err := f.repo.DB.QueryRow(f.ctx, `SELECT count(*) FROM waf_rollup_addr_seen WHERE agent_id = $1::uuid`, f.agents[0]).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n, err := f.repo.WAFRollup.DeleteExpiredRollups(f.ctx, 2); err != nil || n != 0 || left() != 3 {
+		t.Fatalf("without a state row: deleted %d (%v), %d rows left, want 0 and 3", n, err, left())
+	}
+	f.settleAt(hour)
+	for _, want := range []struct{ deleted, left int }{{2, 1}, {1, 0}} {
+		if n, err := f.repo.WAFRollup.DeleteExpiredRollups(f.ctx, 2); err != nil || n != int64(want.deleted) || left() != want.left {
+			t.Fatalf("deleted %d (%v), %d rows left, want %d and %d", n, err, left(), want.deleted, want.left)
+		}
 	}
 }
 

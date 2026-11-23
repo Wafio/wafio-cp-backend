@@ -288,11 +288,13 @@ func (r *WAFRollupRepo) RaiseRollupFloor(ctx context.Context, floor time.Time) e
 	})
 }
 
-// expireSQL deletes up to $1 rows before covered_from. The condition is repeated in the delete, so
-// a row a unit has moved since the subselect stays.
+// expireSQL deletes up to $1 rows before $2, which is covered_from as the batch read it. The planner
+// cannot see a value behind a subselect and guesses a third of the table, which can make it scan the
+// whole table for a few expired rows. The delete repeats the condition with the subselect, so a row a
+// unit has moved since, or a covered_from that has moved since, stays.
 func expireSQL(table, column string) string {
-	cond := column + ` < (SELECT covered_from FROM waf_rollup_state)`
-	return `DELETE FROM ` + table + ` WHERE ctid = ANY (ARRAY(SELECT ctid FROM ` + table + ` WHERE ` + cond + ` LIMIT $1)) AND ` + cond
+	return `DELETE FROM ` + table + ` WHERE ctid = ANY (ARRAY(SELECT ctid FROM ` + table + ` WHERE ` + column + ` < $2 LIMIT $1))
+		AND ` + column + ` < (SELECT covered_from FROM waf_rollup_state)`
 }
 
 var rollupExpiry = []string{
@@ -309,8 +311,13 @@ func (r *WAFRollupRepo) DeleteExpiredRollups(ctx context.Context, limit int) (in
 		if _, err := tx.Exec(ctx, `SELECT set_config('statement_timeout', $1, true)`, deleteBatchTimeout); err != nil {
 			return err
 		}
+		// No state row reads as NULL, which deletes nothing.
+		var covered *time.Time
+		if err := tx.QueryRow(ctx, `SELECT (SELECT covered_from FROM waf_rollup_state)`).Scan(&covered); err != nil {
+			return err
+		}
 		for _, q := range rollupExpiry {
-			tag, err := tx.Exec(ctx, q, limit)
+			tag, err := tx.Exec(ctx, q, limit, covered)
 			if err != nil {
 				return err
 			}
