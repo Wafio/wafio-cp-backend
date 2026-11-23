@@ -3,12 +3,14 @@
 --
 --   psql -v ON_ERROR_STOP=1 -d wafio_perf -f rollup_perf.sql
 --
--- It adds one project with one agent and two apps (ids ending b1 and b2). App b1 gets 1.1 M decisions a day for 30 days
+-- It adds one project with two agents and two apps (ids ending b1 and b2). App b1 gets 1.1 M decisions a day for 30 days
 -- (33 M), in the shape measured on a customer install: 63 k to 79 k client addresses and 250 k to
 -- 520 k URIs a day, 74 % of the URIs with a query string, 3.3 k user agents, 97.2 % allow, 2.5 %
--- block and 0.3 % log. App b2 gets a tenth of that. Each day is its own transaction, and a chunk
--- older than a day is compressed as soon as it is loaded, so the table never holds more than two
--- days uncompressed. Recorded times run from the start of the UTC day 30 days ago to now.
+-- block and 0.3 % log. Its decisions come from either agent at random, as behind a load balancer, so
+-- each agent sees most of the clients. App b2 gets a tenth of that, from the first agent. Each day is
+-- its own transaction, and a chunk older than a day is compressed as soon as it is loaded, so the
+-- table never holds more than two days uncompressed. Recorded times run from the start of the UTC day
+-- 30 days ago to the moment the load starts.
 --
 -- Adding -v per_day=20000 -v days=2 loads a small set, to try a change to this file.
 \if :{?per_day} \else \set per_day 1100000 \endif
@@ -20,18 +22,20 @@ INSERT INTO projects (id, user_id, name, code)
 VALUES ('00000000-0000-4000-8000-0000000000a2', '00000000-0000-4000-8000-0000000000a1', 'perf', 'perf') ON CONFLICT DO NOTHING;
 INSERT INTO agents (id, user_id, project_id, name, kind)
 VALUES ('00000000-0000-4000-8000-0000000000a3', '00000000-0000-4000-8000-0000000000a1',
-        '00000000-0000-4000-8000-0000000000a2', 'perf-agent', 'waf') ON CONFLICT DO NOTHING;
+        '00000000-0000-4000-8000-0000000000a2', 'perf-agent', 'waf'),
+       ('00000000-0000-4000-8000-0000000000a4', '00000000-0000-4000-8000-0000000000a1',
+        '00000000-0000-4000-8000-0000000000a2', 'perf-agent-2', 'waf') ON CONFLICT DO NOTHING;
 
--- Decisions of one app recorded in [from_ts, to_ts). The pools scale with n, so a small set keeps the
+-- Decisions of one app recorded in [from_ts, to_ts), each from one of agent_ids at random. The pools scale with n, so a small set keeps the
 -- same shape. A client, a URI and a user agent are drawn with a skew towards low numbers; the path of
 -- a URI follows from its number, so the same query string always has the same path. The 20 k clients
 -- with the lowest numbers come back every day, the others are new each day, so 30 days hold about 1.5 M.
-CREATE FUNCTION pg_temp.perf_rows(from_ts timestamptz, to_ts timestamptz, n int, app uuid) RETURNS void
+CREATE FUNCTION pg_temp.perf_rows(from_ts timestamptz, to_ts timestamptz, n int, app uuid, agent_ids uuid[]) RETURNS void
 LANGUAGE sql AS $f$
 INSERT INTO waf_decisions (agent_id, app_id, host, method, uri, remote_addr, country_code, user_agent, content_type,
                            action, score, categories, analyze_method, body_size, latency_us, match_source, status,
                            event_time, recorded_at)
-SELECT '00000000-0000-4000-8000-0000000000a3', app, 'www.example.test',
+SELECT agent_ids[1 + floor(r.r18 * cardinality(agent_ids))::int], app, 'www.example.test',
        (ARRAY['GET', 'GET', 'GET', 'POST', 'HEAD'])[1 + floor(r.r1 * 5)::int],
        '/' || (ARRAY['api', 'static', 'blog', 'shop', 'wp-content'])[1 + u % 5] || '/p' || u % 2000 ||
            CASE WHEN r.r4 < 0.74 THEN '?q=' || u ELSE '' END,
@@ -48,7 +52,7 @@ SELECT '00000000-0000-4000-8000-0000000000a3', app, 'www.example.test',
 FROM (
     SELECT random() AS r1, random() AS r4, random() AS r5, random() AS r6, random() AS r7, random() AS r8, random() AS r9,
            random() AS r10, random() AS r11, random() AS r12, random() AS r13, random() AS r14, random() AS r15,
-           random() AS r16, random() AS r17
+           random() AS r16, random() AS r17, random() AS r18
     FROM generate_series(1, n)
 ) r
 CROSS JOIN LATERAL (SELECT floor(71000.0 * n / 1100000 * r.r6 ^ 1.5)::int AS c) c0
@@ -66,9 +70,11 @@ WITH days AS (
     FROM (SELECT date_bin('1 day', now(), TIMESTAMPTZ 'epoch') - d * interval '1 day' AS day FROM generate_series(:days, 0, -1) d) s
 )
 SELECT stmt FROM (
-    SELECT day, 1 AS ord, format('SELECT pg_temp.perf_rows(%L, %L, %s, %L)', day, day_end, n, '00000000-0000-4000-8000-0000000000b1') AS stmt FROM days
+    SELECT day, 1 AS ord, format('SELECT pg_temp.perf_rows(%L, %L, %s, %L, %L::uuid[])', day, day_end, n, '00000000-0000-4000-8000-0000000000b1',
+                                 '{00000000-0000-4000-8000-0000000000a3,00000000-0000-4000-8000-0000000000a4}') AS stmt FROM days
     UNION ALL
-    SELECT day, 2, format('SELECT pg_temp.perf_rows(%L, %L, %s, %L)', day, day_end, n / 10, '00000000-0000-4000-8000-0000000000b2') FROM days
+    SELECT day, 2, format('SELECT pg_temp.perf_rows(%L, %L, %s, %L, %L::uuid[])', day, day_end, n / 10, '00000000-0000-4000-8000-0000000000b2',
+                          '{00000000-0000-4000-8000-0000000000a3}') FROM days
     UNION ALL
     SELECT day, 3, 'SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks(''waf_decisions'', older_than => interval ''1 day'') c' FROM days
 ) s ORDER BY day, ord

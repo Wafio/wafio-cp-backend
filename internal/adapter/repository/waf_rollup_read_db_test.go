@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/wafio/wafio-cp-backend/internal/testutil/dbfixture"
 )
@@ -236,7 +237,7 @@ var summaryNames = []string{"requests", "blocks", "allows", "monitors", "logs", 
 func (f *readerFixture) oracleTimeline(project, app string, w window, bucket int) map[time.Time][7]int64 {
 	f.t.Helper()
 	rows, err := f.repo.DB.Query(f.ctx, rawWindow+`
-		SELECT to_timestamp(floor(extract(epoch FROM recorded_at) / $5::int) * $5::int), count(*), count(*) FILTER (WHERE action = 'block'),
+		SELECT to_timestamp(floor(extract(epoch FROM recorded_at) / $5::bigint) * $5::bigint), count(*), count(*) FILTER (WHERE action = 'block'),
 		       count(*) FILTER (WHERE action = 'allow'), count(*) FILTER (WHERE action = 'monitor'),
 		       count(*) FILTER (WHERE action = 'upstream_error'), count(*) FILTER (WHERE action = 'log'),
 		       count(*) FILTER (WHERE action = 'challenge')
@@ -320,6 +321,58 @@ func checkTop(t *testing.T, name string, got []topRow, want map[string]int64, li
 	}
 }
 
+// checkWindow fails unless every counter, the distinct addresses, each timeline bucket, each top list
+// and the geo list of an app over the window equal what the decisions say.
+func (f *readerFixture) checkWindow(t *testing.T, at, app string, w window) {
+	t.Helper()
+	got, err := f.repo.WAF.summarizeApp(f.ctx, f.project, app, w.from, w.to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := f.oracleSummary(f.project, app, w)
+	for i, g := range summaryCounts(got) {
+		if g != want[i] {
+			t.Fatalf("%s: %s is %d, the decisions say %d", at, summaryNames[i], g, want[i])
+		}
+	}
+	for _, bucket := range []int{60, 150, 1440, 3600, 86400} {
+		line, err := f.repo.WAF.timelineApp(f.ctx, f.project, app, w.from, w.to, bucket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantLine := f.oracleTimeline(f.project, app, w, bucket)
+		if len(line) != len(wantLine) {
+			t.Fatalf("%s, buckets of %d s: %d buckets, the decisions say %d", at, bucket, len(line), len(wantLine))
+		}
+		for i, b := range line {
+			c := [7]int64{b.Requests, b.Blocks, b.Allows, b.Monitors, b.Errors, b.Logs, b.Challenges}
+			if wc, ok := wantLine[b.BucketStart.UTC()]; !ok || wc != c || (i > 0 && !line[i-1].BucketStart.Before(b.BucketStart)) {
+				t.Fatalf("%s, buckets of %d s: bucket %v is %v, the decisions say %v", at, bucket, b.BucketStart, c, wc)
+			}
+		}
+	}
+	for _, d := range oracleDims {
+		wantTop := f.oracleTop(f.project, app, w, d.sql)
+		for _, limit := range []int{3, 50} {
+			top, err := f.repo.WAF.topApp(f.ctx, f.project, app, rollupDims[d.dim-1], w.from, w.to, true, limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkTop(t, fmt.Sprintf("%s, %s, limit %d", at, d.name, limit), top, wantTop, limit, 0)
+		}
+	}
+	// The geo list takes whole seconds and both ends in the window.
+	gw := window{w.from.Truncate(time.Second).Add(time.Second), w.to.Truncate(time.Second)}
+	if gw.from.After(gw.to) {
+		return
+	}
+	geo, err := f.repo.WAF.DecisionsGeoAggregatesForApp(f.ctx, f.project, app, gw.from.Unix(), gw.to.Unix(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.checkGeo(at, app, gw, geo)
+}
+
 // Over windows from 5 minutes to 30 days, before, during and after the backfill, every counter, the
 // distinct addresses, each timeline bucket and each top list of an app equal what the decisions
 // say, and the deleted agent and the other project's agent count in none.
@@ -337,53 +390,7 @@ func TestDBRollupReadersEqualRaw(t *testing.T) {
 		covered, minuteMark, _ := f.state()
 		for _, app := range f.apps {
 			for _, w := range wins {
-				at := fmt.Sprintf("%s, app %s, window %s to %s", phase.name, app[:8], w.from.Format(time.RFC3339Nano), w.to.Format(time.RFC3339Nano))
-				got, err := f.repo.WAF.summarizeApp(f.ctx, f.project, app, w.from, w.to)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want := f.oracleSummary(f.project, app, w)
-				for i, g := range summaryCounts(got) {
-					if g != want[i] {
-						t.Fatalf("%s: %s is %d, the decisions say %d (covered from %v, minute mark %v)", at, summaryNames[i], g, want[i], covered, minuteMark)
-					}
-				}
-				for _, bucket := range []int{60, 150, 1440, 3600, 86400} {
-					line, err := f.repo.WAF.timelineApp(f.ctx, f.project, app, w.from, w.to, bucket)
-					if err != nil {
-						t.Fatal(err)
-					}
-					wantLine := f.oracleTimeline(f.project, app, w, bucket)
-					if len(line) != len(wantLine) {
-						t.Fatalf("%s, buckets of %d s: %d buckets, the decisions say %d", at, bucket, len(line), len(wantLine))
-					}
-					for i, b := range line {
-						c := [7]int64{b.Requests, b.Blocks, b.Allows, b.Monitors, b.Errors, b.Logs, b.Challenges}
-						if wc, ok := wantLine[b.BucketStart.UTC()]; !ok || wc != c || (i > 0 && !line[i-1].BucketStart.Before(b.BucketStart)) {
-							t.Fatalf("%s, buckets of %d s: bucket %v is %v, the decisions say %v", at, bucket, b.BucketStart, c, wc)
-						}
-					}
-				}
-				for _, d := range oracleDims {
-					wantTop := f.oracleTop(f.project, app, w, d.sql)
-					for _, limit := range []int{3, 50} {
-						top, err := f.repo.WAF.topApp(f.ctx, f.project, app, rollupDims[d.dim-1], w.from, w.to, true, limit)
-						if err != nil {
-							t.Fatal(err)
-						}
-						checkTop(t, fmt.Sprintf("%s, %s, limit %d", at, d.name, limit), top, wantTop, limit, 0)
-					}
-				}
-				// The geo list takes whole seconds and both ends in the window.
-				gw := window{w.from.Truncate(time.Second).Add(time.Second), w.to.Truncate(time.Second)}
-				if gw.from.After(gw.to) {
-					continue
-				}
-				geo, err := f.repo.WAF.DecisionsGeoAggregatesForApp(f.ctx, f.project, app, gw.from.Unix(), gw.to.Unix(), 1000)
-				if err != nil {
-					t.Fatal(err)
-				}
-				f.checkGeo(at, app, gw, geo)
+				f.checkWindow(t, fmt.Sprintf("%s (covered from %v, minute mark %v), app %s, window %s to %s", phase.name, covered, minuteMark, app[:8], w.from.Format(time.RFC3339Nano), w.to.Format(time.RFC3339Nano)), app, w)
 				if lo, hi := f.hourRange(w); hi.Sub(lo) >= 2*time.Hour {
 					rolled++
 					if phase.units > 0 && w.from.Before(covered) {
@@ -395,6 +402,35 @@ func TestDBRollupReadersEqualRaw(t *testing.T) {
 	}
 	if rolled == 0 || spanning == 0 {
 		t.Fatalf("%d windows read two hours or more of hour rows, %d of them while the backfill was under way and the window began before it", rolled, spanning)
+	}
+}
+
+// Until the job's first pass there is no state row and the rollup tables are empty: every reader
+// counts the decisions, whatever the window and whether it is whole minutes or hours.
+func TestDBRollupReadersWithoutStateReadRaw(t *testing.T) {
+	f := newReaderFixture(t)
+	f.seedAll()
+	var rows int
+	if err := f.repo.DB.QueryRow(f.ctx, `SELECT (SELECT count(*) FROM waf_rollup_state) + (SELECT count(*) FROM waf_rollup_minute) + (SELECT count(*) FROM waf_rollup_hour)`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("%d rollup rows before the first pass (%v)", rows, err)
+	}
+	for _, w := range f.windows(rand.New(rand.NewSource(20261124)), 12) {
+		for _, app := range f.apps {
+			f.checkWindow(t, fmt.Sprintf("no state row, app %s, window %s to %s", app[:8], w.from.Format(time.RFC3339Nano), w.to.Format(time.RFC3339Nano)), app, w)
+		}
+	}
+}
+
+// Every read plans for its own bounds. A generic plan, which PostgreSQL may take from the sixth run
+// of a statement on a connection, cannot see them and reads the hour table by its expiry index.
+func TestDBRollupReadersPlanForTheirBounds(t *testing.T) {
+	f := newReaderFixture(t)
+	var mode string
+	err := f.repo.WAF.readWindow(f.ctx, "1 hour", "hour_mark", false, true, f.now.Add(-time.Hour), f.now, func(tx pgx.Tx, _ windowCut) error {
+		return tx.QueryRow(f.ctx, `SHOW plan_cache_mode`).Scan(&mode)
+	})
+	if err != nil || mode != "force_custom_plan" {
+		t.Fatalf("plan_cache_mode is %q in a read (%v)", mode, err)
 	}
 }
 
@@ -526,7 +562,7 @@ func TestDBRollupExportedReadersEqualRaw(t *testing.T) {
 				t.Fatalf("%s: %s is %d, the decisions say %d", at, summaryNames[i], g, want[i])
 			}
 		}
-		for _, bucket := range []int{0, 5, 90, 3600} {
+		for _, bucket := range []int{0, 5, 90, 3600, 3_000_000_000} {
 			line, err := f.repo.WAF.TimelineForApp(f.ctx, f.project, app, m, bucket)
 			if err != nil {
 				t.Fatal(err)

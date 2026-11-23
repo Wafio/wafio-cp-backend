@@ -735,8 +735,9 @@ func (r *WAFRepo) SummarizeApp(ctx context.Context, projectID, appID string, sin
 // ── App-scoped aggregates (used by the per-app Overview dashboard) ───────
 
 // TimelineForApp returns request/block buckets over time for a single app. The window and the
-// buckets are on recorded_at, as the rollups are. A bucket is whole minutes when it is not set or
-// when the 200 bucket cap picks it, so that minute rows can make it.
+// buckets are on recorded_at, as the rollups are. Minute rows make a bucket of whole minutes: the
+// default when minutes is a multiple of 60 (the dashboard's ranges are) and the width the 200 bucket
+// cap picks. Any other bucket reads every decision.
 func (r *WAFRepo) TimelineForApp(ctx context.Context, projectID, appID string, sinceMinutes, bucketSeconds int) ([]WAFTimelineBucket, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60

@@ -26,6 +26,7 @@ type windowCut struct {
 // mark is the state column that says how far they are filled) and calls read with the cut in the
 // same transaction. A bucket counts when all of it lies in the window and between covered_from and
 // the mark. useRollups false leaves the window uncut, exclusiveStart leaves out a decision at from.
+// Before the first pass of the job there is no state row and no rollup row: the window is read raw.
 // The cut goes to the next statements as parameters, so that the planner sees the bounds.
 func (r *WAFRepo) readWindow(ctx context.Context, grain, mark string, exclusiveStart, useRollups bool, from, to time.Time, read func(tx pgx.Tx, c windowCut) error) error {
 	skip := "0"
@@ -37,9 +38,12 @@ func (r *WAFRepo) readWindow(ctx context.Context, grain, mark string, exclusiveS
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// shortcut: 32 MB and no parallel workers for every read, as the nine of the Monitoring tab run at
-	// once and workers only compete for cores, upgrade to a setting when a database has cores to spare.
-	if _, err := tx.Exec(ctx, `SET LOCAL work_mem = '32MB'; SET LOCAL max_parallel_workers_per_gather = 0`); err != nil {
+	// shortcut: 32 MB of work_mem (a hash node may use twice that from PostgreSQL 15, hash_mem_multiplier)
+	// and no parallel workers for every read, as the nine of the Monitoring tab run at once and workers only
+	// compete for cores, upgrade to settings when a database has memory and cores to spare. A custom plan
+	// each time: a generic plan cannot see the bounds of the cut, takes the hour table by its expiry index
+	// and reads millions of rows.
+	if _, err := tx.Exec(ctx, `SET LOCAL work_mem = '32MB'; SET LOCAL max_parallel_workers_per_gather = 0; SET LOCAL plan_cache_mode = force_custom_plan`); err != nil {
 		return err
 	}
 	var c windowCut
@@ -49,7 +53,7 @@ func (r *WAFRepo) readWindow(ctx context.Context, grain, mark string, exclusiveS
 		       COALESCE(lo < hi AND until >= mark, false), covered_from
 		FROM (
 		    SELECT $1::timestamptz AS since, $2::timestamptz AS until, st.covered_from, st.`+mark+` AS mark,
-		           CASE WHEN $3::boolean THEN greatest(st.covered_from,
+		           CASE WHEN $3::boolean AND st.covered_from IS NOT NULL THEN greatest(st.covered_from,
 		               date_bin('`+grain+`', $1::timestamptz, TIMESTAMPTZ 'epoch') + interval '`+grain+`') END AS lo,
 		           least(st.`+mark+`, date_bin('`+grain+`', $2::timestamptz, TIMESTAMPTZ 'epoch')) AS hi
 		    FROM (SELECT 1) one LEFT JOIN waf_rollup_state st ON true
@@ -91,8 +95,11 @@ func (r *WAFRepo) lastMinutes(ctx context.Context, minutes int) (from, to time.T
 }
 
 // summarizeApp counts the decisions of an app recorded after from and up to to. Distinct addresses
-// are the seen rows of the agent with the most of them, counted, plus the addresses of the other
-// agents and of the raw decisions that it lacks.
+// are the seen rows of the window, plus the addresses of the raw decisions at its ends that they lack.
+// With one agent that has seen rows they are counted, and the few raw addresses are looked up in
+// them. With several agents their rows overlap, so all of them are merged with the raw addresses in
+// one hash, which costs about half a microsecond a row; looking up each row of the others in the
+// largest agent's rows costs about five.
 func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, from, to time.Time) (*AppWAFSummary, error) {
 	var s AppWAFSummary
 	err := r.readWindow(ctx, "1 minute", "minute_mark", true, true, from, to, func(tx pgx.Tx, c windowCut) error {
@@ -101,33 +108,35 @@ func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, fro
 		if !c.seen {
 			rawLo, rawHi = c.last.Add(-time.Microsecond), c.last.Add(-time.Microsecond)
 		}
+		// shortcut: the hash of several agents is exact but reads every seen row of the window, about 1.2 s
+		// for two agents of 1.4 M addresses each at 30 days; upgrade when an app behind several busy agents
+		// needs less, to a streaming count over an index ordered by address (0.5 s in a trial).
 		const seenWhere = `$11::boolean AND s.app_key = $6 AND s.last_seen > $9::timestamptz AND s.last_seen >= $10::timestamptz`
+		seen := `FROM waf_rollup_addr_seen s JOIN agents a ON a.id = s.agent_id AND a.deleted_at IS NULL
+			    WHERE a.project_id = $5 AND ` + seenWhere
+		raw := `SELECT DISTINCT md5(d.remote_addr)::uuid AS addr_key FROM ` + appRows("$7", "$8") + ` WHERE d.remote_addr IS NOT NULL`
 		counters := len(rollupCounters) - 1
 		return tx.QueryRow(ctx, `
-			WITH per AS (
-			    SELECT s.agent_id, count(*) AS n
-			    FROM waf_rollup_addr_seen s JOIN agents a ON a.id = s.agent_id AND a.deleted_at IS NULL
-			    WHERE a.project_id = $5 AND `+seenWhere+`
-			    GROUP BY s.agent_id
-			), base AS (SELECT agent_id, n FROM per ORDER BY n DESC, agent_id LIMIT 1)
 			SELECT `+counterList(counters, func(col, _ string) string { return `COALESCE(sum(` + col + `), 0)::bigint` })+`,
 			       COALESCE((sum(latency_sum)::numeric / NULLIF(sum(requests), 0))::int, 0),
-			       COALESCE((SELECT n FROM base), 0) + (
-			           SELECT count(*) FROM (
-			               SELECT s.addr_key
-			               FROM waf_rollup_addr_seen s JOIN agents a ON a.id = s.agent_id AND a.deleted_at IS NULL
-			               WHERE a.project_id = $5 AND `+seenWhere+` AND a.id IS DISTINCT FROM (SELECT agent_id FROM base)
-			               UNION
-			               SELECT md5(d.remote_addr)::uuid FROM `+appRows("$7", "$8")+` WHERE d.remote_addr IS NOT NULL
-			           ) x
+			       CASE WHEN (
+			           SELECT count(*) FROM agents a
+			           WHERE a.project_id = $5 AND a.deleted_at IS NULL
+			             AND EXISTS (SELECT 1 FROM waf_rollup_addr_seen s WHERE s.agent_id = a.id AND s.app_key = $6)
+			       ) > 1 THEN (
+			           SELECT count(*) FROM (SELECT s.addr_key `+seen+` UNION `+raw+`) x
+			       ) ELSE (
+			           SELECT count(*) `+seen+`
+			       ) + (
+			           SELECT count(*) FROM (`+raw+`) x
 			           -- OFFSET 0 keeps the planner from turning this into an anti join, which reads every seen row
-			           -- of the agent into a hash table to look up a few thousand addresses.
+			           -- into a hash table to look up a few thousand addresses.
 			           WHERE NOT EXISTS (
-			               SELECT 1 FROM waf_rollup_addr_seen y
-			               WHERE y.agent_id = (SELECT agent_id FROM base) AND y.app_key = $6 AND y.addr_key = x.addr_key
+			               SELECT 1 FROM waf_rollup_addr_seen y JOIN agents ya ON ya.id = y.agent_id AND ya.deleted_at IS NULL
+			               WHERE $11::boolean AND ya.project_id = $5 AND y.app_key = $6 AND y.addr_key = x.addr_key
 			                 AND y.last_seen > $9::timestamptz AND y.last_seen >= $10::timestamptz
 			               OFFSET 0)
-			       )
+			       ) END
 			FROM (
 			    SELECT `+counterList(len(rollupCounters), func(col, _ string) string { return "m." + col })+`
 			    FROM `+appMinuteRows+`
@@ -157,11 +166,11 @@ func (r *WAFRepo) timelineApp(ctx context.Context, projectID, appID string, from
 		rows, err := tx.Query(ctx, `
 			SELECT bucket_start, `+counterList(columns, func(col, _ string) string { return `COALESCE(sum(` + col + `), 0)::bigint` })+`
 			FROM (
-			    SELECT to_timestamp(floor(extract(epoch FROM m.bucket) / $7::int) * $7::int) AS bucket_start,
+			    SELECT to_timestamp(floor(extract(epoch FROM m.bucket) / $7::bigint) * $7::bigint) AS bucket_start,
 			           `+counterList(columns, func(col, _ string) string { return "m." + col })+`
 			    FROM `+appMinuteRows+`
 			    UNION ALL
-			    SELECT to_timestamp(floor(extract(epoch FROM d.recorded_at) / $7::int) * $7::int),
+			    SELECT to_timestamp(floor(extract(epoch FROM d.recorded_at) / $7::bigint) * $7::bigint),
 			           `+counterList(columns, func(_, agg string) string { return agg })+`
 			    FROM `+appRows("$2", "$3")+`
 			    GROUP BY 1

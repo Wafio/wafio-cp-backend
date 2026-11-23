@@ -10291,7 +10291,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppTop
       summary: Top-N list of an application
-      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour: a count can be lower than the true one, and a value that is never among the busiest of an hour can be missing from the list. The ends of the window that fall outside the rollups are counted exactly.'
+      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour: a count can be lower than the true one, and a value that is never among the busiest of an hour can be missing from the list. The ends of the window that fall outside the rollups are counted exactly. A value longer than 1024 characters is shown cut to 1024; two values that differ only after that point are listed as separate rows with the same text.'
       tags:
         - Applications
         - WAF analytics
