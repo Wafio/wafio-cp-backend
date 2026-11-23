@@ -96,6 +96,9 @@ func (j *WAFRollup) floor(ctx context.Context) (time.Time, error) {
 // Cleanup is the part of the retention pass that trims the rollups: rows older than the oldest
 // decision retention keeps leave, and the rollups stop claiming to cover that range. Raw rows
 // between the cutoff and the next whole hour stay, and a reader counts them from the decisions.
+// It deletes until a batch is short, with no cap per pass: TimescaleDB drops the raw chunks at
+// once, and the addresses, URIs and user agents in the rollups must leave with them. Each batch is
+// its own short transaction.
 func (j *WAFRollup) Cleanup(ctx context.Context, keepDays int, oldestChunk *time.Time) error {
 	floor, err := j.Store.RollupFloor(ctx, keepDays, oldestChunk)
 	if err != nil {
@@ -104,13 +107,13 @@ func (j *WAFRollup) Cleanup(ctx context.Context, keepDays int, oldestChunk *time
 	if err := j.Store.RaiseRollupFloor(ctx, floor); err != nil {
 		return err
 	}
-	for i := 0; i < maxDeleteBatches; i++ {
+	for {
 		n, err := j.Store.DeleteExpiredRollups(ctx, deleteBatch)
 		if err != nil {
 			return err
 		}
 		if n < deleteBatch {
-			break
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -118,5 +121,4 @@ func (j *WAFRollup) Cleanup(ctx context.Context, keepDays int, oldestChunk *time
 		case <-time.After(deleteBatchPause):
 		}
 	}
-	return nil
 }

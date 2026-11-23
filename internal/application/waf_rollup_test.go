@@ -11,15 +11,17 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 )
 
-// fakeRollupStore records the calls of the rollup job and reports a fixed number of backfilled hours.
+// fakeRollupStore records the calls of the rollup job, reports a fixed number of backfilled hours
+// and of full delete batches.
 type fakeRollupStore struct {
-	mu        sync.Mutex
-	busy      bool
-	calls     []string
-	backfills int
-	floor     time.Time
-	keepDays  int
-	oldest    *time.Time
+	mu          sync.Mutex
+	busy        bool
+	calls       []string
+	backfills   int
+	fullBatches int
+	floor       time.Time
+	keepDays    int
+	oldest      *time.Time
 }
 
 func (f *fakeRollupStore) note(call string) {
@@ -68,8 +70,12 @@ func (f *fakeRollupStore) RaiseRollupFloor(context.Context, time.Time) error {
 	return nil
 }
 
-func (f *fakeRollupStore) DeleteExpiredRollups(context.Context, int) (int64, error) {
+func (f *fakeRollupStore) DeleteExpiredRollups(_ context.Context, limit int) (int64, error) {
 	f.note("delete")
+	if f.fullBatches > 0 {
+		f.fullBatches--
+		return int64(limit), nil
+	}
 	return 0, nil
 }
 
@@ -103,25 +109,68 @@ func TestWAFRollupPassWhileAnotherHoldsTheLockDoesNothing(t *testing.T) {
 	}
 }
 
-// The retention pass trims the rollups with the retention of waf_decisions, also where TimescaleDB
-// drops the chunks itself, and not when that retention cannot be read.
+// Cleanup deletes while batches come back full, however many that takes: the rollups hold addresses,
+// URIs and user agents that leave with the raw rows.
+func TestWAFRollupCleanupDeletesUntilABatchIsShort(t *testing.T) {
+	store := &fakeRollupStore{fullBatches: maxDeleteBatches + 3}
+	if err := (&WAFRollup{Store: store}).Cleanup(context.Background(), 14, nil); err != nil {
+		t.Fatal(err)
+	}
+	deletes := 0
+	for _, c := range store.calls {
+		if c == "delete" {
+			deletes++
+		}
+	}
+	if want := maxDeleteBatches + 4; deletes != want {
+		t.Fatalf("%d delete batches, want %d", deletes, want)
+	}
+}
+
+// The retention pass trims the rollups with the retention of waf_decisions in every mode, also where
+// TimescaleDB drops the chunks itself, and not when that retention cannot be read.
 func TestRetentionPassTrimsRollups(t *testing.T) {
 	ctx := context.Background()
 	oldest := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	trimmed := []string{"floor", "raise", "delete"}
 	for _, c := range []struct {
 		name         string
+		prepare      func(store *fakeStorageStore)
+		saved        bool
 		settingsDown bool
 		wantCalls    []string
+		wantDays     int
+		wantOldest   bool
 	}{
-		{"policy mode, saved retention", false, []string{"floor", "raise", "delete"}},
-		{"retention unreadable", true, nil},
+		{name: "policy mode, saved retention", saved: true, wantCalls: trimmed, wantDays: 14, wantOldest: true},
+		{name: "policy mode, a live policy of 6 hours and nothing saved", wantCalls: trimmed, wantDays: 1, wantOldest: true,
+			prepare: func(store *fakeStorageStore) {
+				st := store.stats["waf_decisions"]
+				st.Retention.DropAfter = 6 * time.Hour
+				store.stats["waf_decisions"] = st
+			}},
+		{name: "drop_chunks mode", saved: true, wantCalls: trimmed, wantDays: 14, wantOldest: true,
+			prepare: func(store *fakeStorageStore) {
+				store.ts = domain.TimescaleInfo{Installed: true, Version: "2.14.2", License: "apache"}
+			}},
+		{name: "delete mode, plain table", saved: true, wantCalls: trimmed, wantDays: 14,
+			prepare: func(store *fakeStorageStore) {
+				store.ts = domain.TimescaleInfo{}
+				store.stats = map[string]domain.TableStorageStats{}
+			}},
+		{name: "retention unreadable", saved: true, settingsDown: true},
 	} {
 		store, set := newPolicyStore()
 		st := store.stats["waf_decisions"]
 		st.Chunks = []domain.StorageChunk{{Start: oldest, End: oldest.Add(24 * time.Hour)}}
 		store.stats["waf_decisions"] = st
-		if err := set.SetJSON(ctx, dataRetentionKey, retentionRecord{Tables: map[string]int{"waf_decisions": 14}}); err != nil {
-			t.Fatal(err)
+		if c.prepare != nil {
+			c.prepare(store)
+		}
+		if c.saved {
+			if err := set.SetJSON(ctx, dataRetentionKey, retentionRecord{Tables: map[string]int{"waf_decisions": 14}}); err != nil {
+				t.Fatal(err)
+			}
 		}
 		set.fail = c.settingsDown
 		rollups := &fakeRollupStore{}
@@ -130,8 +179,11 @@ func TestRetentionPassTrimsRollups(t *testing.T) {
 		if !reflect.DeepEqual(rollups.calls, c.wantCalls) {
 			t.Fatalf("%s: calls %v, want %v", c.name, rollups.calls, c.wantCalls)
 		}
-		if c.wantCalls != nil && (rollups.keepDays != 14 || rollups.oldest == nil || !rollups.oldest.Equal(oldest)) {
-			t.Fatalf("%s: floor asked for %d days and oldest %v, want 14 and %v", c.name, rollups.keepDays, rollups.oldest, oldest)
+		if c.wantCalls == nil {
+			continue
+		}
+		if rollups.keepDays != c.wantDays || (rollups.oldest != nil) != c.wantOldest || (c.wantOldest && !rollups.oldest.Equal(oldest)) {
+			t.Fatalf("%s: floor asked for %d days and oldest %v, want %d and %v (oldest set: %v)", c.name, rollups.keepDays, rollups.oldest, c.wantDays, oldest, c.wantOldest)
 		}
 	}
 }

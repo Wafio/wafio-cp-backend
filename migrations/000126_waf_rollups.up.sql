@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS waf_rollup_addr_seen (
 CREATE INDEX IF NOT EXISTS waf_rollup_addr_seen_last_seen
     ON waf_rollup_addr_seen (agent_id, app_key, last_seen);
 
+-- Retention deletes by time alone, which the primary key and the index above cannot serve.
+CREATE INDEX IF NOT EXISTS waf_rollup_addr_seen_expiry ON waf_rollup_addr_seen (last_seen);
+
 -- The largest values of one agent, app, dimension and hour. dim: 1 uri, 2 user_agent, 3 addr,
 -- 4 attack_addr, 5 category, 6 method. key is the md5 of the full value, value is cut to 1024
 -- characters. blocks and logs are filled for addr only.
@@ -65,3 +68,6 @@ CREATE TABLE IF NOT EXISTS waf_rollup_hour (
     logs     bigint      NOT NULL,
     PRIMARY KEY (agent_id, app_key, dim, bucket, key)
 );
+
+-- Retention deletes by time alone, which the primary key cannot serve.
+CREATE INDEX IF NOT EXISTS waf_rollup_hour_expiry ON waf_rollup_hour (bucket);

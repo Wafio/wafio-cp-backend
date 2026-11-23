@@ -82,8 +82,11 @@ var rollupDims = []rollupDim{
 	{id: rollupDimMethod, keep: 50, value: `COALESCE(method, 'GET')`, where: `true`},
 }
 
-// sql ranks the values of the hour [$1, $2) per agent and app, largest first, ties by byte order of
-// the value, and inserts the first keep of them. A second fill of the same hour fails on the key.
+// sql ranks the values of the hour [$1, $2) per agent and app, largest first, and inserts the first
+// keep of them. Values are grouped by the md5 of the whole value, which is the key of the row, so
+// two values with one md5 are one row (the stored text is the smaller one, cut to 1024 characters)
+// and cannot fail the insert on the primary key. Ties go by that text, then by key. A second fill of
+// the same hour fails on the key.
 func (d rollupDim) sql() string {
 	from, blocks, logs := d.from, d.blocks, d.logs
 	if from == "" {
@@ -94,12 +97,13 @@ func (d rollupDim) sql() string {
 	}
 	return `
 		INSERT INTO waf_rollup_hour (agent_id, app_key, dim, bucket, key, value, total, blocks, logs)
-		SELECT agent_id, app_key, $3::smallint, $1::timestamptz, md5(value)::uuid, left(value, 1024), total, blocks, logs
+		SELECT agent_id, app_key, $3::smallint, $1::timestamptz, key, value, total, blocks, logs
 		FROM (
-		    SELECT agent_id, app_key, value, total, blocks, logs,
-		           row_number() OVER (PARTITION BY agent_id, app_key ORDER BY total DESC, value COLLATE "C") AS rn
+		    SELECT agent_id, app_key, key, value, total, blocks, logs,
+		           row_number() OVER (PARTITION BY agent_id, app_key ORDER BY total DESC, value COLLATE "C", key) AS rn
 		    FROM (
-		        SELECT agent_id, ` + rollupAppKey + ` AS app_key, ` + d.value + ` AS value,
+		        SELECT agent_id, ` + rollupAppKey + ` AS app_key, md5(` + d.value + `)::uuid AS key,
+		               min(left(` + d.value + `, 1024) COLLATE "C") AS value,
 		               COUNT(*) AS total, ` + blocks + ` AS blocks, ` + logs + ` AS logs
 		        FROM ` + from + `
 		        WHERE ` + d.where + `
@@ -297,8 +301,8 @@ var rollupExpiry = []string{
 	expireSQL("waf_rollup_addr_seen", "last_seen"),
 }
 
-// DeleteExpiredRollups deletes one batch of rows before covered_from. The tables have no index on
-// the time alone, so a batch may scan a table; the retention pass runs it a few times an hour.
+// DeleteExpiredRollups deletes one batch of rows before covered_from. The retention pass repeats it
+// until a batch is short.
 func (r *WAFRollupRepo) DeleteExpiredRollups(ctx context.Context, limit int) (int64, error) {
 	var most int64
 	err := r.unit(ctx, func(tx pgx.Tx) error {

@@ -805,7 +805,9 @@ func (s *Storage) WAFKeep(ctx context.Context) (int, *time.Time, error) {
 	if len(st.Chunks) > 0 {
 		oldest = &st.Chunks[0].Start
 	}
-	return s.tableView(t, ts, st, rec.Tables, s.now()).RetentionDays, oldest, nil
+	// A live policy set by hand below 12 hours rounds to 0 days, which no cutoff accepts; the
+	// oldest chunk still bounds the cutoff once the chunks are dropped.
+	return max(s.tableView(t, ts, st, rec.Tables, s.now()).RetentionDays, 1), oldest, nil
 }
 
 // trimRollups is the rollup part of a retention pass; it needs a readable

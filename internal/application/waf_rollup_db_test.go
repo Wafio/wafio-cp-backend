@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"sort"
 	"sync"
@@ -30,8 +31,11 @@ type rollupFixture struct {
 	project string
 	agents  []string
 	apps    [2]string
-	// keep is the retention in days the job sees.
-	keep int
+	// keep is the retention in days the job sees, oldest the start of the oldest chunk it sees. A test
+	// that compares against a cutoff sets oldest to a whole hour well after now minus keep, so the
+	// cutoff does not move up when the clock passes an hour while the test runs.
+	keep   int
+	oldest *time.Time
 }
 
 func newRollupFixture(t *testing.T) *rollupFixture {
@@ -74,7 +78,7 @@ func (f *rollupFixture) empty() {
 func (f *rollupFixture) job() *application.WAFRollup {
 	return &application.WAFRollup{
 		Store: f.repo.WAFRollup,
-		Keep:  func(context.Context) (int, *time.Time, error) { return f.keep, nil, nil },
+		Keep:  func(context.Context) (int, *time.Time, error) { return f.keep, f.oldest, nil },
 	}
 }
 
@@ -303,8 +307,9 @@ var rawDims = []struct {
 	{6, 50, hourRawHead + `COALESCE(method, 'GET'), count(*), 0::bigint, 0::bigint` + hourRawFrom + `GROUP BY 1, 2, 3`},
 }
 
-// expectedTop ranks the groups of each agent and app by count, then by the bytes of the value, keeps
-// the first keep, and gives them the key and the cut value the rollup stores.
+// expectedTop merges the groups of each agent and app that have one md5 key (the key is what the
+// rollup stores, so the smaller cut text stands for the group), ranks them by count, then by text,
+// then by key, keeps the first keep, and gives them the key and the cut value the rollup stores.
 func (f *rollupFixture) expectedTop(sql string, keep int, from time.Time) map[string]hourRow {
 	f.t.Helper()
 	rows, err := f.repo.DB.Query(f.ctx, sql, f.agents, from, from.Add(time.Hour))
@@ -312,32 +317,47 @@ func (f *rollupFixture) expectedTop(sql string, keep int, from time.Time) map[st
 		f.t.Fatal(err)
 	}
 	defer rows.Close()
-	groups := map[string][]hourRow{}
+	groups := map[string]map[string]hourRow{}
 	for rows.Next() {
 		var r hourRow
 		if err := rows.Scan(&r.agent, &r.app, &r.value, &r.total, &r.blocks, &r.logs); err != nil {
 			f.t.Fatal(err)
 		}
-		groups[r.agent+"|"+r.app] = append(groups[r.agent+"|"+r.app], r)
+		r.key = fmt.Sprintf("%x", md5.Sum([]byte(r.value)))
+		if cut := []rune(r.value); len(cut) > 1024 {
+			r.value = string(cut[:1024])
+		}
+		scope := r.agent + "|" + r.app
+		if groups[scope] == nil {
+			groups[scope] = map[string]hourRow{}
+		}
+		if m, ok := groups[scope][r.key]; ok {
+			m.total, m.blocks, m.logs = m.total+r.total, m.blocks+r.blocks, m.logs+r.logs
+			m.value = min(m.value, r.value)
+			r = m
+		}
+		groups[scope][r.key] = r
 	}
 	if err := rows.Err(); err != nil {
 		f.t.Fatal(err)
 	}
 	want := map[string]hourRow{}
-	for _, g := range groups {
+	for _, group := range groups {
+		g := make([]hourRow, 0, len(group))
+		for _, r := range group {
+			g = append(g, r)
+		}
 		sort.Slice(g, func(i, j int) bool {
 			if g[i].total != g[j].total {
 				return g[i].total > g[j].total
 			}
-			return g[i].value < g[j].value
+			if g[i].value != g[j].value {
+				return g[i].value < g[j].value
+			}
+			return g[i].key < g[j].key
 		})
 		for i := 0; i < len(g) && i < keep; i++ {
-			r := g[i]
-			r.key = fmt.Sprintf("%x", md5.Sum([]byte(r.value)))
-			if cut := []rune(r.value); len(cut) > 1024 {
-				r.value = string(cut[:1024])
-			}
-			want[r.agent+"|"+r.app+"|"+r.key] = r
+			want[g[i].agent+"|"+g[i].app+"|"+g[i].key] = g[i]
 		}
 	}
 	return want
@@ -386,8 +406,9 @@ func (f *rollupFixture) seedHour(agent string, app any, clients int, hour time.T
 		agent, app, hour, clients)
 }
 
-// The hour rows are the raw top K of each agent, app and dimension, ties by the bytes of the value,
-// values cut to 1024 characters under the md5 of the whole value, each category of a request counted.
+// The hour rows are the raw top K of each agent, app and dimension, ties by the bytes of the cut
+// value and then by key, values cut to 1024 characters under the md5 of the whole value, each
+// category of a request counted.
 func TestDBRollupHourRowsEqualRawTopK(t *testing.T) {
 	f := newRollupFixture(t)
 	hour := f.hour().Add(-3 * time.Hour)
@@ -435,6 +456,70 @@ func TestDBRollupHourRowsEqualRawTopK(t *testing.T) {
 	}
 	if long != 3 {
 		t.Fatalf("%d cut URIs with their own key, want 3", long)
+	}
+}
+
+// The key of an hour row is the md5 of the whole value and part of the primary key, so values that
+// share an md5 are one row. If they were two, a client that sends such a pair would fail the unit of
+// that hour on its key for every project, on every pass. Printable MD5 collisions exist, but a pair
+// is too long to keep here, so a function in a schema before pg_catalog stands in for md5() and
+// ignores case: "Agent" and "agent" share a key.
+func TestDBRollupHourMergesValuesOfOneKey(t *testing.T) {
+	f := newRollupFixture(t)
+	f.exec(`CREATE SCHEMA rollup_md5_shadow`)
+	t.Cleanup(func() { f.exec(`DROP SCHEMA rollup_md5_shadow CASCADE`) })
+	f.exec(`CREATE FUNCTION rollup_md5_shadow.md5(text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT pg_catalog.md5(lower($1))'`)
+	dsn, err := url.Parse(os.Getenv("TEST_DB_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := dsn.Query()
+	q.Set("search_path", "rollup_md5_shadow,pg_catalog,public")
+	dsn.RawQuery = q.Encode()
+	shadow, err := repository.New(f.ctx, dsn.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(shadow.Close)
+
+	hour := f.hour().Add(-3 * time.Hour)
+	f.exec(`
+		INSERT INTO waf_decisions (agent_id, app_id, uri, remote_addr, user_agent, action, event_time, recorded_at)
+		SELECT $1::uuid, $2::uuid, '/m', '10.9.0.1', ua, 'allow', $3::timestamptz + n * interval '1 second', $3::timestamptz + n * interval '1 second'
+		FROM (VALUES ('Agent', 5), ('agent', 3), ('Zed', 6)) AS u(ua, c), generate_series(1, c) AS n`,
+		f.agents[0], f.apps[0], hour)
+	f.settleAt(hour)
+	settled, err := shadow.WAFRollup.RollupSettled(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shadow.WAFRollup.FillRollupMinutes(f.ctx, settled); err != nil {
+		t.Fatal(err)
+	}
+	if err := shadow.WAFRollup.FillRollupHour(f.ctx); err != nil {
+		t.Fatalf("the hour unit fails on values that share a key: %v", err)
+	}
+	if _, _, hourMark := f.marks(); !hourMark.Equal(hour.Add(time.Hour)) {
+		t.Fatalf("the hour mark is %v, want %v", hourMark, hour.Add(time.Hour))
+	}
+
+	// The merged row keeps the smaller text, in byte order, and the sum of both.
+	want := map[string]hourRow{}
+	for _, c := range []struct {
+		lower, shown string
+		total        int64
+	}{{"agent", "Agent", 8}, {"zed", "Zed", 6}} {
+		k := fmt.Sprintf("%x", md5.Sum([]byte(c.lower)))
+		want[f.agents[0]+"|"+f.apps[0]+"|"+k] = hourRow{agent: f.agents[0], app: f.apps[0], key: k, value: c.shown, total: c.total}
+	}
+	got := f.hourRows(2, hour)
+	if len(got) != len(want) {
+		t.Fatalf("%d user agent rows, want %d: %+v", len(got), len(want), got)
+	}
+	for k, w := range want {
+		if g := got[k]; g != w {
+			t.Fatalf("row %q is %+v, want %+v", k, g, w)
+		}
 	}
 }
 
@@ -557,11 +642,13 @@ func TestDBRollupOneInstanceFills(t *testing.T) {
 func TestDBRollupBackfillEqualsFullFill(t *testing.T) {
 	f := newRollupFixture(t)
 	f.keep = 2
-	floor, err := f.repo.WAFRollup.RollupFloor(f.ctx, f.keep, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	hour := f.hour()
+	pinned := hour.Add(-46 * time.Hour)
+	f.oldest = &pinned
+	floor, err := f.repo.WAFRollup.RollupFloor(f.ctx, f.keep, f.oldest)
+	if err != nil || !floor.Equal(pinned) {
+		t.Fatalf("cutoff %v (%v), want %v", floor, err, pinned)
+	}
 	start := hour.Add(-2 * time.Hour)
 	f.seed(f.agents[0], 330, floor.Add(10*time.Minute), 5*time.Minute)
 	f.seed(f.agents[1], 120, floor.Add(time.Hour), 7*time.Minute)
@@ -631,9 +718,11 @@ func TestDBRollupCleanupLeavesNothingBeforeTheCutoff(t *testing.T) {
 	f.keep = 2
 	hour := f.hour()
 	start := hour.Add(-2 * time.Hour)
-	floor, err := f.repo.WAFRollup.RollupFloor(f.ctx, 2, nil)
-	if err != nil {
-		t.Fatal(err)
+	pinned := hour.Add(-46 * time.Hour)
+	f.oldest = &pinned
+	floor, err := f.repo.WAFRollup.RollupFloor(f.ctx, f.keep, f.oldest)
+	if err != nil || !floor.Equal(pinned) {
+		t.Fatalf("cutoff %v (%v), want %v", floor, err, pinned)
 	}
 	f.seed(f.agents[0], 400, floor.Add(10*time.Minute), 6*time.Minute)
 	f.seed(f.agents[1], 150, floor.Add(2*time.Hour), 10*time.Minute)
@@ -645,11 +734,12 @@ func TestDBRollupCleanupLeavesNothingBeforeTheCutoff(t *testing.T) {
 		}
 	}
 
-	oldest := hour.Add(-10*time.Hour - 20*time.Minute)
+	// Both cutoffs are whole hours after now minus the days, so the clock does not move them.
+	oneDay, oldest := hour.Add(-22*time.Hour), hour.Add(-10*time.Hour-20*time.Minute)
 	for _, c := range []struct {
 		days   int
 		oldest *time.Time
-	}{{1, nil}, {7, &oldest}} {
+	}{{1, &oneDay}, {7, &oldest}} {
 		cutoff, err := f.repo.WAFRollup.RollupFloor(f.ctx, c.days, c.oldest)
 		if err != nil {
 			t.Fatal(err)
