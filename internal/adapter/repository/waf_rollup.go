@@ -75,8 +75,9 @@ type rollupDim struct {
 var rollupDims = []rollupDim{
 	{id: rollupDimURI, keep: 500, value: `uri`, where: `COALESCE(uri, '') <> ''`},
 	{id: rollupDimUserAgent, keep: 500, value: `COALESCE(user_agent, '(none)')`, where: `true`},
-	// Blocks and logs are counted as the geo readers count them.
-	{id: rollupDimAddr, keep: 1000, value: `remote_addr`, where: `COALESCE(remote_addr, '') <> ''`,
+	// Blocks and logs are counted as the geo readers count them. 500 an hour: the map shows at most
+	// 500 points and a list 50.
+	{id: rollupDimAddr, keep: 500, value: `remote_addr`, where: `COALESCE(remote_addr, '') <> ''`,
 		blocks: `COUNT(*) FILTER (WHERE lower(action) = 'block')`, logs: `COUNT(*) FILTER (WHERE lower(action) IN ('monitor','log'))`},
 	{id: rollupDimAttackAddr, keep: 1000, value: `remote_addr`, where: `COALESCE(remote_addr, '') <> '' AND ` + rollupBadActions},
 	{id: rollupDimCategory, keep: 200, value: `cat`, where: rollupBadActions + ` AND COALESCE(cat, '') <> ''`,

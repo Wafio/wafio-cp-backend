@@ -298,7 +298,7 @@ var rawDims = []struct {
 }{
 	{1, 500, hourRawHead + `uri, count(*), 0::bigint, 0::bigint` + hourRawFrom + `AND uri <> '' GROUP BY 1, 2, 3`},
 	{2, 500, hourRawHead + `COALESCE(user_agent, '(none)'), count(*), 0::bigint, 0::bigint` + hourRawFrom + `GROUP BY 1, 2, 3`},
-	{3, 1000, hourRawHead + `remote_addr, count(*), count(CASE WHEN lower(action) = 'block' THEN 1 END), count(CASE WHEN lower(action) IN ('monitor','log') THEN 1 END)` +
+	{3, 500, hourRawHead + `remote_addr, count(*), count(CASE WHEN lower(action) = 'block' THEN 1 END), count(CASE WHEN lower(action) IN ('monitor','log') THEN 1 END)` +
 		hourRawFrom + `AND remote_addr <> '' GROUP BY 1, 2, 3`},
 	{4, 1000, hourRawHead + `remote_addr, count(*), 0::bigint, 0::bigint` + hourRawFrom + `AND remote_addr <> ''` + hourBad + `GROUP BY 1, 2, 3`},
 	{5, 200, `SELECT agent_id::text, COALESCE(app_id::text, '` + nilApp + `'), cat, count(*), 0::bigint, 0::bigint

@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -122,6 +123,11 @@ func (f *readerFixture) seedBoundaries(agent string, app string, hour time.Time)
 func (f *readerFixture) fill(units int) {
 	f.t.Helper()
 	wr := f.repo.WAFRollup
+	// In the first two minutes of an hour the first pass would start at the hour of now, after the
+	// settled instant, and fill nothing.
+	f.exec(`INSERT INTO waf_rollup_state (covered_from, minute_mark, hour_mark)
+		SELECT h, h, h FROM (SELECT date_bin('1 hour', now() - interval '2 minutes', TIMESTAMPTZ 'epoch') AS h) s
+		ON CONFLICT (id) DO NOTHING`)
 	settled, err := wr.RollupSettled(f.ctx)
 	if err != nil {
 		f.t.Fatal(err)
@@ -793,8 +799,24 @@ func TestDBRollupDistinctAddressesCountOnceAcrossAgents(t *testing.T) {
 	}
 	// .1 to .4 and .7 from the live agents, and the empty address; not .5, .6, .8, .9 or the NULL one.
 	check("a day", 24*time.Hour, 6)
-	// .1 only through the last minutes, since both of its seen rows are older than the window.
+	// .1 only through the last minutes: its one seen row, from the first agent, is older than the window.
 	check("six hours", 6*time.Hour, 5)
 	f.exec(`UPDATE agents SET deleted_at = now() WHERE id = $1`, a1)
 	check("one agent deleted", 24*time.Hour, 3)
+}
+
+// Every upsert of a seen row moves an indexed column, so no update is a HOT update and dead rows
+// pile up with the traffic. The migration has autovacuum visit the table at 1 % of its rows, which
+// keeps its pages all-visible, and the count of distinct addresses reads the index alone.
+func TestDBRollupSeenTableVacuumsEarly(t *testing.T) {
+	f := newReaderFixture(t)
+	var options []string
+	if err := f.repo.DB.QueryRow(f.ctx, `SELECT reloptions FROM pg_class WHERE oid = 'waf_rollup_addr_seen'::regclass`).Scan(&options); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(options)
+	want := []string{"autovacuum_vacuum_insert_scale_factor=0.01", "autovacuum_vacuum_scale_factor=0.01"}
+	if !slices.Equal(options, want) {
+		t.Fatalf("the seen table has the options %v, want %v", options, want)
+	}
 }
