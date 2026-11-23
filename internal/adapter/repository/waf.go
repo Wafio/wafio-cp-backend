@@ -709,9 +709,9 @@ const wsHandshakePredicate = `match_source = 'ws:handshake'`
 // match on method = 'WEBSOCKET' only) inside the message KPIs.
 func wsSummaryFilters() string {
 	return `
-		    COUNT(*) FILTER (WHERE ` + wsScopePredicate + ` AND ` + wsHandshakePredicate + ` IS DISTINCT FROM TRUE AND action = 'block') AS ws_blocked,
-		    COUNT(*) FILTER (WHERE ` + wsScopePredicate + ` AND ` + wsHandshakePredicate + ` IS DISTINCT FROM TRUE AND action = 'log')   AS ws_logged,
-		    COUNT(*) FILTER (WHERE ` + wsHandshakePredicate + ` AND action = 'block') AS ws_handshake_rejected`
+		    ` + wafCountWSBlocked + ` AS ws_blocked,
+		    ` + wafCountWSLogged + ` AS ws_logged,
+		    ` + wafCountWSHandshakeRejected + ` AS ws_handshake_rejected`
 }
 
 // SummarizeApp returns request counters for the given app over the last
@@ -722,17 +722,17 @@ func (r *WAFRepo) SummarizeApp(ctx context.Context, projectID, appID string, sin
 	}
 	row := r.pool.QueryRow(ctx, `
 		SELECT
-		    COUNT(*)                                             AS requests,
-		    COUNT(*) FILTER (WHERE action = 'block')             AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')             AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')           AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'log')               AS logs,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error')    AS errors,
-		    COUNT(*) FILTER (WHERE action = 'challenge')         AS challenges,
+		    `+wafCountRequests+` AS requests,
+		    `+wafCountBlocks+` AS blocks,
+		    `+wafCountAllows+` AS allows,
+		    `+wafCountMonitors+` AS monitors,
+		    `+wafCountLogs+` AS logs,
+		    `+wafCountErrors+` AS errors,
+		    `+wafCountChallenges+` AS challenges,
 		    COALESCE(AVG(latency_us)::INT, 0)                    AS avg_lat,
 		    COUNT(DISTINCT remote_addr)                          AS uniq_ip,
-		    COUNT(*) FILTER (WHERE analyze_method IN ('semantic','rule_based','hybrid')) AS sem_triggers,
-		    COUNT(*) FILTER (WHERE analyze_method NOT IN ('semantic','rule_based','hybrid') AND analyze_method IS NOT NULL) AS other_triggers,
+		    `+wafCountSemantic+` AS sem_triggers,
+		    `+wafCountOther+` AS other_triggers,
 		    `+wsSummaryFilters()+`
 		FROM waf_decisions d
 		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
@@ -769,13 +769,13 @@ func (r *WAFRepo) TimelineForApp(ctx context.Context, projectID, appID string, s
 	rows, err := r.pool.Query(ctx, `
 		SELECT
 		    to_timestamp(floor(extract(epoch FROM event_time) / $3) * $3) AS bucket_start,
-		    COUNT(*)                                          AS reqs,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges
+		    `+wafCountRequests+` AS reqs,
+		    `+wafCountBlocks+` AS blocks,
+		    `+wafCountAllows+` AS allows,
+		    `+wafCountMonitors+` AS monitors,
+		    `+wafCountErrors+` AS errors,
+		    `+wafCountLogs+` AS logs,
+		    `+wafCountChallenges+` AS challenges
 		FROM waf_decisions d
 		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
 		WHERE d.app_id = $1 AND a.project_id = $4
@@ -943,19 +943,19 @@ func (r *WAFRepo) SummarizeProject(ctx context.Context, projectID, agentID strin
 		      ` + agentClause + `
 		)
 		SELECT
-		    COUNT(*)                                          AS requests,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges,
+		    ` + wafCountRequests + ` AS requests,
+		    ` + wafCountBlocks + ` AS blocks,
+		    ` + wafCountAllows + ` AS allows,
+		    ` + wafCountMonitors + ` AS monitors,
+		    ` + wafCountLogs + ` AS logs,
+		    ` + wafCountErrors + ` AS errors,
+		    ` + wafCountChallenges + ` AS challenges,
 		    COALESCE(AVG(latency_us)::INT, 0)                 AS avg_lat,
 		    COUNT(DISTINCT remote_addr)                       AS uniq_ip,
 		    COUNT(DISTINCT host)                              AS uniq_host,
 		    COUNT(DISTINCT agent_id)                          AS uniq_agents,
-		    COUNT(*) FILTER (WHERE analyze_method IN ('semantic','rule_based','hybrid')) AS sem_triggers,
-		    COUNT(*) FILTER (WHERE analyze_method NOT IN ('semantic','rule_based','hybrid') AND analyze_method IS NOT NULL) AS other_triggers,
+		    ` + wafCountSemantic + ` AS sem_triggers,
+		    ` + wafCountOther + ` AS other_triggers,
 		    ` + wsSummaryFilters() + `
 		FROM scoped`
 	row := r.pool.QueryRow(ctx, q, args...)
@@ -1001,13 +1001,13 @@ func (r *WAFRepo) SummarizeProjectPrev(ctx context.Context, projectID, agentID s
 		      ` + agentClause + `
 		)
 		SELECT
-		    COUNT(*)                                          AS requests,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges,
+		    ` + wafCountRequests + ` AS requests,
+		    ` + wafCountBlocks + ` AS blocks,
+		    ` + wafCountAllows + ` AS allows,
+		    ` + wafCountMonitors + ` AS monitors,
+		    ` + wafCountLogs + ` AS logs,
+		    ` + wafCountErrors + ` AS errors,
+		    ` + wafCountChallenges + ` AS challenges,
 		    COALESCE(AVG(latency_us)::INT, 0)                 AS avg_lat,
 		    COUNT(DISTINCT remote_addr)                       AS uniq_ip,
 		    COUNT(DISTINCT host)                              AS uniq_host,
@@ -1241,13 +1241,13 @@ func (r *WAFRepo) TimelineForProject(ctx context.Context, projectID, agentID str
 	rows, err := r.pool.Query(ctx, fmt.Sprintf(`
 		SELECT
 		    to_timestamp(floor(extract(epoch FROM d.recorded_at) / $3) * $3) AS bucket_start,
-		    COUNT(*)                                          AS reqs,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges
+		    `+wafCountRequests+` AS reqs,
+		    `+wafCountBlocks+` AS blocks,
+		    `+wafCountAllows+` AS allows,
+		    `+wafCountMonitors+` AS monitors,
+		    `+wafCountErrors+` AS errors,
+		    `+wafCountLogs+` AS logs,
+		    `+wafCountChallenges+` AS challenges
 		FROM waf_decisions d
 		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
 		WHERE a.project_id = $1

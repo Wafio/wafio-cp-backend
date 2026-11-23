@@ -98,6 +98,9 @@ type Storage struct {
 	// Mail sends the size alert to system administrators while a mail
 	// server is in force (nil = no email).
 	Mail StorageMailSource
+	// Rollup, when set, is trimmed by every retention pass to the
+	// decisions the retention of waf_decisions keeps.
+	Rollup *WAFRollup
 	// DatabaseHost is database.host: free disk space is read only for a
 	// database on this host.
 	DatabaseHost string
@@ -776,6 +779,47 @@ func (s *Storage) retentionPass(ctx context.Context) {
 				slog.Info("data retention: rows deleted", "table", t.Name, "rows", n, "days", keep)
 			}
 		}
+	}
+	s.trimRollups(ctx)
+}
+
+// WAFKeep returns how many days of waf_decisions the retention keeps, in
+// every mode (the policy's own value when nothing is saved), and the start of
+// the oldest chunk of a hypertable. The rollups follow the same cutoff, so
+// they never outlive the decisions they were made from.
+func (s *Storage) WAFKeep(ctx context.Context) (int, *time.Time, error) {
+	t, _ := domain.RetentionTableByName("waf_decisions")
+	ts, err := s.Store.TimescaleInfo(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	st, err := s.Store.TableStats(ctx, t, false)
+	if err != nil {
+		return 0, nil, err
+	}
+	rec, err := s.loadRetention(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	var oldest *time.Time
+	if len(st.Chunks) > 0 {
+		oldest = &st.Chunks[0].Start
+	}
+	return s.tableView(t, ts, st, rec.Tables, s.now()).RetentionDays, oldest, nil
+}
+
+// trimRollups is the rollup part of a retention pass; it needs a readable
+// retention, as the tables' own passes do.
+func (s *Storage) trimRollups(ctx context.Context) {
+	if s.Rollup == nil {
+		return
+	}
+	days, oldest, err := s.WAFKeep(ctx)
+	if err == nil {
+		err = s.Rollup.Cleanup(ctx, days, oldest)
+	}
+	if err != nil {
+		slog.Warn("data retention: rollups not trimmed", "err", err)
 	}
 }
 

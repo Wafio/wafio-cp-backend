@@ -89,13 +89,14 @@ step "script tests" script_tests
 step "race" env -u TEST_DB_URL go test -race -timeout 30m ./...
 step "race (shared)" shared_race
 step "govulncheck" go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-# The agent server has many tests that need no database and run in the steps above; only its
-# database tests (the TestDB prefix) run here.
-# The second run does not wait for the first: a failure of one is no reason to hide the other.
+# The agent server and the application layer have many tests that need no database and run in the
+# steps above; only their database tests (the TestDB prefix) run here.
+# Each run does not wait for the one before: a failure of one is no reason to hide the others.
 database_integration() {
   local rc=0
   go test -count=1 -race -p 1 ./internal/adapter/... ./internal/domain/... || rc=1
   go test -count=1 -race -p 1 -run '^TestDB' ./internal/agentserver/... || rc=1
+  go test -count=1 -race -p 1 -run '^TestDB' ./internal/application/... || rc=1
   return $rc
 }
 
