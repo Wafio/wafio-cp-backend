@@ -2,15 +2,16 @@ package repository
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// Readers of the rollups of an app: whole buckets in the middle of a window, waf_decisions at its
-// two ends. The state row and the rows are read in one repeatable-read transaction, so a fill that
-// commits meanwhile cannot count a decision twice or not at all.
+// Readers of the rollups of an app or a project: whole buckets in the middle of a window,
+// waf_decisions at its two ends. The state row and the rows are read in one repeatable-read
+// transaction, so a fill that commits meanwhile cannot count a decision twice or not at all.
 
 // windowCut splits a window: rollup buckets in [lo, hi), decisions in [first, lo) and [hi, last).
 // With no whole bucket in the window, lo and hi are its end and the decisions are all of it. seen
@@ -64,22 +65,95 @@ func (r *WAFRepo) readWindow(ctx context.Context, grain, mark string, exclusiveS
 	return read(tx, c)
 }
 
-// The parameters of the reader statements: $1 to $4 are first, lo, hi and last of the cut, $5 the
-// project and $6 the app.
-
-// appRows are the decisions of the app in [$1, lo) and [hi, $4), of the project's agents that are
-// not deleted. lo and hi name the parameters that bound the ranges in the middle.
-func appRows(lo, hi string) string {
-	scope := func(from, to string) string {
-		return `SELECT d.* FROM waf_decisions d JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-			WHERE d.app_id = $6 AND a.project_id = $5 AND d.recorded_at >= ` + from + ` AND d.recorded_at < ` + to
-	}
-	return `(` + scope("$1", lo) + ` UNION ALL ` + scope(hi, "$4") + `) d`
+// readScope names the decisions a reader counts: those of the agents of one project that are not
+// deleted, narrowed by what the scope adds. The parameters of the reader statements are $1 to $4,
+// the first, lo, hi and last of the cut, $5 the project, then the arguments of the scope, then those
+// of the reader. An app reader adds its app. A project reader adds an agent and a host, NULL for
+// all, and goes through the apps that its minute rows name (withApps).
+type readScope struct {
+	project     string
+	args        []any
+	raw, rollup string // the narrowing on decisions (d) and on rollup rows, both joined to agents (a)
+	allApps     bool
 }
 
-// appMinuteRows are the minute rows of the buckets [$2, $3) of the app and project of appRows.
-const appMinuteRows = `waf_rollup_minute m JOIN agents a ON a.id = m.agent_id AND a.deleted_at IS NULL
-		WHERE m.app_key = $6 AND a.project_id = $5 AND m.bucket >= $2 AND m.bucket < $3`
+func appScope(projectID, appID string) readScope {
+	return readScope{project: projectID, args: []any{appID}, raw: `d.app_id = $6`, rollup: `app_key = $6`}
+}
+
+// agentAndHost narrows a project reader to one agent and one host of the project; NULL leaves it out.
+const agentAndHost = `($6::uuid IS NULL OR a.id = $6::uuid) AND ($7::uuid IS NULL OR a.host_id = $7::uuid)`
+
+// projectScope is every app of the project, and the unmapped traffic. An empty agent or host is all.
+func projectScope(projectID, agentID string, hostIDs []string) readScope {
+	var agent, host any
+	if agentID != "" {
+		agent = agentID
+	}
+	if len(hostIDs) > 0 && hostIDs[0] != "" {
+		host = hostIDs[0]
+	}
+	return readScope{project: projectID, args: []any{agent, host}, raw: agentAndHost, rollup: agentAndHost, allApps: true}
+}
+
+// params are the parameters of a statement over a cut: the cut, the scope, then the reader's own.
+func (s readScope) params(c windowCut, own ...any) []any {
+	return append(append([]any{c.first, c.lo, c.hi, c.last, s.project}, s.args...), own...)
+}
+
+// param is the placeholder of the reader's i-th own parameter.
+func (s readScope) param(i int) string { return "$" + strconv.Itoa(6+len(s.args)+i) }
+
+// rows are the decisions of the scope in [$1, lo) and [hi, $4). lo and hi name the parameters that
+// bound the ranges in the middle.
+func (s readScope) rows(lo, hi string) string {
+	one := func(from, to string) string {
+		return `SELECT d.* FROM waf_decisions d JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
+			WHERE a.project_id = $5 AND ` + s.raw + ` AND d.recorded_at >= ` + from + ` AND d.recorded_at < ` + to
+	}
+	return `(` + one("$1", lo) + ` UNION ALL ` + one(hi, "$4") + `) d`
+}
+
+// minuteRows are the minute rows of the buckets [$2, $3) of the scope.
+func (s readScope) minuteRows() string {
+	return `waf_rollup_minute m JOIN agents a ON a.id = m.agent_id AND a.deleted_at IS NULL
+		WHERE a.project_id = $5 AND ` + s.rollup + ` AND m.bucket >= $2 AND m.bucket < $3`
+}
+
+// hourRows are the hour rows of one dimension of the scope; the reader adds the range of the buckets.
+func (s readScope) hourRows(dim string) string {
+	return `waf_rollup_hour h JOIN agents a ON a.id = h.agent_id AND a.deleted_at IS NULL
+		WHERE a.project_id = $5 AND ` + s.rollup + ` AND h.dim = ` + dim
+}
+
+// apps are the apps that have minute rows in [lo, hi) of the cut for the scope, the one with the most
+// requests first.
+func (s readScope) apps(ctx context.Context, tx pgx.Tx, c windowCut) ([]string, error) {
+	var keys []string
+	// PostgreSQL wants a type for every parameter, and this statement has no use for $1 and $4: they
+	// are cast in a condition that always holds.
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(array_agg(k.app_key ORDER BY k.requests DESC, k.app_key), '{}') FROM (
+		    SELECT m.app_key::text, sum(m.requests) AS requests FROM `+s.minuteRows()+` GROUP BY 1) k
+		WHERE $1::timestamptz <= $4::timestamptz`, s.params(c)...).Scan(&keys)
+	return keys, err
+}
+
+// withApps names the apps of a project reader in its hour and seen reads. The primary keys of those
+// rows lead with the agent and the app, so a range over a month of all the apps of a project is a
+// scan of everything an agent holds unless each app is named. An app reader has its app already.
+func (s readScope) withApps(ctx context.Context, tx pgx.Tx, c windowCut) (readScope, error) {
+	if !s.allApps {
+		return s, nil
+	}
+	keys, err := s.apps(ctx, tx, c)
+	if err != nil {
+		return s, err
+	}
+	s.args = append(slices.Clone(s.args), keys)
+	s.rollup += ` AND app_key = ANY(` + "$" + strconv.Itoa(5+len(s.args)) + `::text[]::uuid[])`
+	return s, nil
+}
 
 // dbNow is the database clock, which the marks of the rollups follow.
 func (r *WAFRepo) dbNow(ctx context.Context) (time.Time, error) {
@@ -109,6 +183,7 @@ func (r *WAFRepo) lastMinutes(ctx context.Context, minutes int) (from, to time.T
 // to a coarser grain if one needs it.
 func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, from, to time.Time) (*AppWAFSummary, error) {
 	var s AppWAFSummary
+	scope := appScope(projectID, appID)
 	err := r.readWindow(ctx, "1 minute", "minute_mark", true, true, from, to, func(tx pgx.Tx, c windowCut) error {
 		// Raw decisions for the addresses: the ends, or all of the window when the seen rows cannot answer.
 		rawLo, rawHi := c.lo, c.hi
@@ -120,7 +195,7 @@ func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, fro
 			return `$11::boolean AND ` + alias + `.app_key = $6 AND ` + alias + `.last_seen > $9::timestamptz AND ` + alias + `.last_seen >= $10::timestamptz
 			    AND ` + alias + `.agent_id = ANY (ARRAY(SELECT a.id FROM agents a WHERE a.project_id = $5 AND a.deleted_at IS NULL))`
 		}
-		raw := `SELECT DISTINCT md5(d.remote_addr)::uuid AS addr_key FROM ` + appRows("$7", "$8") + ` WHERE d.remote_addr IS NOT NULL`
+		raw := `SELECT DISTINCT md5(d.remote_addr)::uuid AS addr_key FROM ` + scope.rows("$7", "$8") + ` WHERE d.remote_addr IS NOT NULL`
 		return tx.QueryRow(ctx, `
 			SELECT `+counterList(len(rollupCounters)-1, func(col, _ string) string { return `COALESCE(sum(` + col + `), 0)::bigint` })+`,
 			       COALESCE((sum(latency_sum)::numeric / NULLIF(sum(requests), 0))::int, 0),
@@ -134,10 +209,10 @@ func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, fro
 			       )
 			FROM (
 			    SELECT `+counterList(len(rollupCounters), func(col, _ string) string { return "m." + col })+`
-			    FROM `+appMinuteRows+`
+			    FROM `+scope.minuteRows()+`
 			    UNION ALL
 			    SELECT `+counterList(len(rollupCounters), func(_, agg string) string { return agg })+`
-			    FROM `+appRows("$2", "$3")+`
+			    FROM `+scope.rows("$2", "$3")+`
 			) p`, c.first, c.lo, c.hi, c.last, projectID, appID, rawLo, rawHi, from, c.coveredFrom, c.seen).
 			Scan(&s.Requests, &s.Blocks, &s.Allows, &s.Monitors, &s.Logs, &s.Errors, &s.Challenges,
 				&s.SemanticTriggers, &s.OtherTriggers, &s.WSMessagesBlocked, &s.WSMessagesLogged, &s.WSHandshakeRejected,
@@ -155,23 +230,29 @@ func (r *WAFRepo) summarizeApp(ctx context.Context, projectID, appID string, fro
 // timelineApp counts the decisions of an app recorded after from and up to to in buckets of
 // bucketSeconds. Buckets of whole minutes add minute rows; any other size reads every decision.
 func (r *WAFRepo) timelineApp(ctx context.Context, projectID, appID string, from, to time.Time, bucketSeconds int) ([]WAFTimelineBucket, error) {
+	return r.timeline(ctx, appScope(projectID, appID), from, to, bucketSeconds)
+}
+
+// timeline is timelineApp for any scope.
+func (r *WAFRepo) timeline(ctx context.Context, s readScope, from, to time.Time, bucketSeconds int) ([]WAFTimelineBucket, error) {
 	const columns = 7
 	out := []WAFTimelineBucket{}
 	err := r.readWindow(ctx, "1 minute", "minute_mark", true, bucketSeconds%60 == 0, from, to, func(tx pgx.Tx, c windowCut) error {
+		width := s.param(0) + "::bigint"
 		rows, err := tx.Query(ctx, `
 			SELECT bucket_start, `+counterList(columns, func(col, _ string) string { return `COALESCE(sum(` + col + `), 0)::bigint` })+`
 			FROM (
-			    SELECT to_timestamp(floor(extract(epoch FROM m.bucket) / $7::bigint) * $7::bigint) AS bucket_start,
+			    SELECT to_timestamp(floor(extract(epoch FROM m.bucket) / `+width+`) * `+width+`) AS bucket_start,
 			           `+counterList(columns, func(col, _ string) string { return "m." + col })+`
-			    FROM `+appMinuteRows+`
+			    FROM `+s.minuteRows()+`
 			    UNION ALL
-			    SELECT to_timestamp(floor(extract(epoch FROM d.recorded_at) / $7::bigint) * $7::bigint),
+			    SELECT to_timestamp(floor(extract(epoch FROM d.recorded_at) / `+width+`) * `+width+`),
 			           `+counterList(columns, func(_, agg string) string { return agg })+`
-			    FROM `+appRows("$2", "$3")+`
+			    FROM `+s.rows("$2", "$3")+`
 			    GROUP BY 1
 			) p
 			GROUP BY bucket_start
-			ORDER BY bucket_start`, c.first, c.lo, c.hi, c.last, projectID, appID, bucketSeconds)
+			ORDER BY bucket_start`, s.params(c, bucketSeconds)...)
 		if err != nil {
 			return err
 		}
@@ -199,6 +280,11 @@ type topRow struct {
 // to. A count is a lower bound where hour rows are read: a value outside the largest of an hour is
 // missing from it. The text of a value is read for the returned rows only, in the last hour that had its key.
 func (r *WAFRepo) topApp(ctx context.Context, projectID, appID string, dim rollupDim, from, to time.Time, exclusiveStart bool, limit int) ([]topRow, error) {
+	return r.top(ctx, appScope(projectID, appID), dim, from, to, exclusiveStart, limit)
+}
+
+// top is topApp for any scope.
+func (r *WAFRepo) top(ctx context.Context, scope readScope, dim rollupDim, from, to time.Time, exclusiveStart bool, limit int) ([]topRow, error) {
 	// Only addresses have blocks and logs, and summing zeros over a month of rows costs a third of the time.
 	blocks, logs := dim.blocks, dim.logs
 	hourSums := `sum(h.total)::bigint AS total, sum(h.blocks)::bigint AS blocks, sum(h.logs)::bigint AS logs`
@@ -209,17 +295,20 @@ func (r *WAFRepo) topApp(ctx context.Context, projectID, appID string, dim rollu
 	id := strconv.Itoa(dim.id)
 	out := []topRow{}
 	err := r.readWindow(ctx, "1 hour", "hour_mark", exclusiveStart, true, from, to, func(tx pgx.Tx, c windowCut) error {
+		s, err := scope.withApps(ctx, tx, c)
+		if err != nil {
+			return err
+		}
 		rows, err := tx.Query(ctx, `
 			WITH fresh AS (
 			    SELECT md5(`+dim.value+`)::uuid AS key, min(left(`+dim.value+`, 1024) COLLATE "C") AS value,
 			           COUNT(*) AS total, `+blocks+` AS blocks, `+logs+` AS logs
-			    FROM `+appRows("$2", "$3")+dim.expand+`
+			    FROM `+s.rows("$2", "$3")+dim.expand+`
 			    WHERE `+dim.where+`
 			    GROUP BY 1
 			), hours AS (
 			    SELECT h.key, `+hourSums+`, max(h.bucket) AS bucket
-			    FROM waf_rollup_hour h JOIN agents a ON a.id = h.agent_id AND a.deleted_at IS NULL
-			    WHERE h.app_key = $6 AND a.project_id = $5 AND h.dim = `+id+` AND h.bucket >= $2 AND h.bucket < $3
+			    FROM `+s.hourRows(id)+` AND h.bucket >= $2 AND h.bucket < $3
 			    GROUP BY h.key
 			), top AS (
 			    SELECT COALESCE(hours.key, fresh.key) AS key, COALESCE(hours.total, 0) + COALESCE(fresh.total, 0) AS total,
@@ -227,14 +316,12 @@ func (r *WAFRepo) topApp(ctx context.Context, projectID, appID string, dim rollu
 			           fresh.value, hours.bucket
 			    FROM hours FULL JOIN fresh ON fresh.key = hours.key
 			    ORDER BY 2 DESC, 1
-			    LIMIT $7
+			    LIMIT `+s.param(0)+`
 			)
-			SELECT COALESCE(t.value, (SELECT h.value FROM waf_rollup_hour h JOIN agents a ON a.id = h.agent_id AND a.deleted_at IS NULL
-			                          WHERE a.project_id = $5 AND h.app_key = $6 AND h.dim = `+id+` AND h.bucket = t.bucket AND h.key = t.key
-			                          LIMIT 1), ''),
+			SELECT COALESCE(t.value, (SELECT h.value FROM `+s.hourRows(id)+` AND h.bucket = t.bucket AND h.key = t.key LIMIT 1), ''),
 			       t.total, t.blocks, t.logs
 			FROM top t
-			ORDER BY t.total DESC, 1`, c.first, c.lo, c.hi, c.last, projectID, appID, limit)
+			ORDER BY t.total DESC, 1`, s.params(c, limit)...)
 		if err != nil {
 			return err
 		}
@@ -267,9 +354,14 @@ func (r *WAFRepo) topRowsApp(ctx context.Context, projectID, appID string, dim r
 	if err != nil {
 		return nil, err
 	}
+	return topCounts(top), nil
+}
+
+// topCounts are the rows of a list as the endpoints return them.
+func topCounts(top []topRow) []WAFTopRow {
 	out := make([]WAFTopRow, len(top))
 	for i, t := range top {
 		out[i] = WAFTopRow{Label: t.label, Count: t.total}
 	}
-	return out, nil
+	return out
 }

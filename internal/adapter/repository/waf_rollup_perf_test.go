@@ -13,11 +13,17 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// perfKeepDays is the retention the rollups are filled for. The loader starts at the beginning of the
+// UTC day 30 days back, so the set holds up to 31 days. With a retention of 30 days the first day stays
+// outside the rollups, and the previous window of a 30 day Overview summary, which ends 30 days back,
+// reads it from the decisions: 1.16 M of them, which took 1.9 s with the distinct hosts. An install that
+// drops whole chunks has up to such a day left below its retention cutoff.
+const perfKeepDays = 31
+
 const (
 	perfProject      = "00000000-0000-4000-8000-0000000000a2"
 	perfApp          = "00000000-0000-4000-8000-0000000000b1"
 	perfSecondAgent  = "00000000-0000-4000-8000-0000000000a4"
-	perfKeepDays     = 30
 	perfLimit        = time.Second
 	perfMinutesAHour = 60
 	// perfMonth and perfWeek are the windows of the tab in minutes. A doubled window past a month is not
@@ -96,8 +102,8 @@ func perfNewest(ctx context.Context, t *testing.T, repo *Repository) time.Time {
 	return newest
 }
 
-// perfWidget is one read of the Monitoring tab. tab says whether the tab sends it for a window of that
-// many minutes; nil means always.
+// perfWidget is one read of a page of the dashboard. tab says whether the page sends it for a window of
+// that many minutes; nil means always.
 type perfWidget struct {
 	name string
 	tab  func(minutes int) bool
@@ -157,6 +163,52 @@ func perfWidgets(repo *Repository) []perfWidget {
 	}
 }
 
+// perfOverviewWidgets are the readers the project Overview sends for a window: what ProjectOverview.Compute
+// reads from the decisions, with the timeline bucket it picks for the window, and the methods the page asks
+// for next to it.
+func perfOverviewWidgets(repo *Repository) []perfWidget {
+	return []perfWidget{
+		{"summary and previous", nil, func(ctx context.Context, m int) (int, error) {
+			cur, prev, err := repo.WAF.SummarizeProjectBoth(ctx, perfProject, "", m, "")
+			if err != nil {
+				return 0, err
+			}
+			return int(cur.UniqueIPs + prev.Requests), nil
+		}},
+		{"timeline", nil, func(ctx context.Context, m int) (int, error) {
+			bucket := 3600
+			if m > perfWeek {
+				bucket = 86400
+			}
+			b, err := repo.WAF.TimelineForProject(ctx, perfProject, "", m, bucket, "")
+			return len(b), err
+		}},
+		{"top categories", nil, func(ctx context.Context, m int) (int, error) {
+			r, err := repo.WAF.TopCategoriesForProject(ctx, perfProject, "", m, 5, "")
+			return len(r), err
+		}},
+		{"top addresses, countries", nil, func(ctx context.Context, m int) (int, error) {
+			r, err := repo.WAF.TopIPsForProject(ctx, perfProject, "", m, 50, true, "")
+			return len(r), err
+		}},
+		{"methods", nil, func(ctx context.Context, m int) (int, error) {
+			now := time.Now()
+			r, err := repo.WAF.DecisionsByMethod(ctx, perfProject, now.Add(-time.Duration(m)*time.Minute).Unix(), now.Unix())
+			return len(r), err
+		}},
+	}
+}
+
+// perfSet is the reads of one page: the widgets it sends, and how many of the first are summaries,
+// the heaviest of the page, that are timed again with one agent.
+type perfSet struct {
+	name      string
+	widgets   func(*Repository) []perfWidget
+	summaries int
+}
+
+var perfSets = []perfSet{{"Monitoring", perfWidgets, 2}, {"Overview", perfOverviewWidgets, 1}}
+
 // perfOnTab are the widgets the tab sends for a window of that many minutes.
 func perfOnTab(widgets []perfWidget, minutes int) []perfWidget {
 	var out []perfWidget
@@ -201,6 +253,22 @@ func TestRollupPerfTabSet(t *testing.T) {
 			if on[name] {
 				t.Errorf("%s: %s is not on the tab", c.window, name)
 			}
+		}
+	}
+}
+
+// TestRollupPerfOverviewSet pins the widgets the timing asserts for the Overview to what ProjectOverview.Compute
+// and the page send: the summary pair, the timeline, the categories, the attacker addresses that give
+// the countries, and the methods, at every window.
+func TestRollupPerfOverviewSet(t *testing.T) {
+	for _, minutes := range []int{perfMonth, perfWeek} {
+		var names []string
+		for _, w := range perfOnTab(perfOverviewWidgets(nil), minutes) {
+			names = append(names, w.name)
+		}
+		want := []string{"summary and previous", "timeline", "top categories", "top addresses, countries", "methods"}
+		if !slices.Equal(names, want) {
+			t.Errorf("%d minutes: the Overview sends %v, want %v", minutes, names, want)
 		}
 	}
 }
@@ -260,36 +328,44 @@ func perfAtOnce(ctx context.Context, t *testing.T, widgets []perfWidget, window 
 // perfCold reads the widgets at once for a window on a new pool with the server's defaults: the first
 // load after 30 idle minutes, when the pool has closed its connections. Each backend it opens for the
 // requests past min_conns reads the chunk catalog on its first statement. onTab leaves out what the
-// tab does not send.
-func perfCold(ctx context.Context, t *testing.T, dsn, window string, minutes int, onTab bool) map[string]time.Duration {
+// page does not send.
+func perfCold(ctx context.Context, t *testing.T, dsn string, set perfSet, window string, minutes int, onTab bool) map[string]time.Duration {
 	t.Helper()
 	repo, err := NewWithPool(ctx, dsn, PoolOptions{MaxConns: perfMaxConns, MinConns: perfMinConns, StatementTimeout: 15 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer repo.Close()
-	widgets := perfWidgets(repo)
+	widgets := set.widgets(repo)
 	if onTab {
 		widgets = perfOnTab(widgets, minutes)
 	}
 	return perfRound(ctx, t, widgets, window+" on a new pool", minutes)
 }
 
-// perfMeasure reads the widgets of the Monitoring tab at 30 and at 7 days: the first load on a new pool,
-// each widget alone, and the widgets at once, worst of three rounds, then ten times in a row on one
-// connection. It fails when a read takes a second or more alone, or when one that the tab sends does with
-// the others the tab sends. The widgets the tab does not send are read at once as well, for the log only.
-// phase says when, for the log.
+// perfMeasure times the reads of each page, perfMeasureSet for the Monitoring tab and the Overview.
 func perfMeasure(ctx context.Context, t *testing.T, dsn string, repo *Repository, phase string) {
 	t.Helper()
-	widgets := perfWidgets(repo)
+	for _, set := range perfSets {
+		perfMeasureSet(ctx, t, dsn, repo, phase+", "+set.name, set)
+	}
+}
+
+// perfMeasureSet reads the widgets of a page at 30 and at 7 days: the first load on a new pool,
+// each widget alone, and the widgets at once, worst of three rounds, then ten times in a row on one
+// connection. It fails when a read takes a second or more alone, or when one that the page sends does with
+// the others the page sends. The widgets the page does not send are read at once as well, for the log only.
+// phase says when, for the log.
+func perfMeasureSet(ctx context.Context, t *testing.T, dsn string, repo *Repository, phase string, set perfSet) {
+	t.Helper()
+	widgets := set.widgets(repo)
 	windows := []struct {
 		name    string
 		minutes int
 	}{{"30d", perfMonth}, {"7d", perfWeek}}
 	for _, window := range windows {
-		onTab := perfCold(ctx, t, dsn, window.name, window.minutes, true)
-		everything := perfCold(ctx, t, dsn, window.name, window.minutes, false)
+		onTab := perfCold(ctx, t, dsn, set, window.name, window.minutes, true)
+		everything := perfCold(ctx, t, dsn, set, window.name, window.minutes, false)
 		for _, w := range widgets {
 			t.Logf("%s, %s, %-26s first load on a new pool, the tab's reads at once %s, all at once %s", phase, window.name, w.name, perfMS(onTab, w), perfMS(everything, w))
 			if took, ok := onTab[w.name]; ok && took >= perfLimit {
@@ -318,7 +394,7 @@ func perfMeasure(ctx context.Context, t *testing.T, dsn string, repo *Repository
 		t.Fatal(err)
 	}
 	defer one.Close()
-	for _, w := range perfWidgets(one) {
+	for _, w := range set.widgets(one) {
 		var slowest time.Duration
 		for run := 0; run < 10; run++ {
 			begin := time.Now()
@@ -343,7 +419,7 @@ func perfMeasure(ctx context.Context, t *testing.T, dsn string, repo *Repository
 			t.Errorf("the second agent is still deleted: %v", err)
 		}
 	}()
-	for _, w := range perfWidgets(one)[:2] {
+	for _, w := range set.widgets(one)[:set.summaries] {
 		for _, window := range windows {
 			var slowest time.Duration
 			for run := 0; run < 10; run++ {
@@ -438,11 +514,12 @@ func perfTail(ctx context.Context, t *testing.T, repo *Repository, hour time.Tim
 	return n
 }
 
-// perfDuringVacuum reads the widgets at 30 days at once while autovacuum works on the seen table, the
-// case perfQuiet keeps out of the other rounds, and logs how long that vacuum ran. Whatever dead rows
-// the hour before left, it updates an indexed column of perfHotRows addresses perfDeadRows/perfHotRows
-// times, as the fill's upserts do, which passes the table's threshold, and then waits for the vacuum.
-// The reads the tab sends go first and must stay under a second; all of them follow, for the log only.
+// perfDuringVacuum reads the widgets of each page at 30 days at once while autovacuum works on the seen
+// table, the case perfQuiet keeps out of the other rounds, and logs how long that vacuum ran. Whatever
+// dead rows the hour before left, it updates an indexed column of perfHotRows addresses
+// perfDeadRows/perfHotRows times, as the fill's upserts do, which passes the table's threshold, and then
+// waits for the vacuum. For each page the reads it sends go first and must stay under a second; all of
+// them follow, for the log only.
 func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 	t.Helper()
 	running := func() bool {
@@ -467,25 +544,26 @@ func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 		}
 	}
 	begin := time.Now()
-	widgets := perfWidgets(repo)
-	onTab := perfRound(ctx, t, perfOnTab(widgets, perfMonth), "30d during a vacuum", perfMonth)
-	runningAfterTab := running()
-	everything := perfRound(ctx, t, widgets, "30d during a vacuum", perfMonth)
-	runningAfterAll := running()
+	for _, set := range perfSets {
+		widgets := set.widgets(repo)
+		onTab := perfRound(ctx, t, perfOnTab(widgets, perfMonth), "30d during a vacuum, "+set.name, perfMonth)
+		runningAfterTab := running()
+		everything := perfRound(ctx, t, widgets, "30d during a vacuum, "+set.name, perfMonth)
+		t.Logf("%s: the vacuum was still running after the page's reads: %v, after all of them: %v", set.name, runningAfterTab, running())
+		for _, w := range widgets {
+			t.Logf("during a vacuum, 30d, %s, %-26s the page's reads at once %s, all at once %s", set.name, w.name, perfMS(onTab, w), perfMS(everything, w))
+			if took, ok := onTab[w.name]; ok && took >= perfLimit {
+				t.Errorf("during a vacuum: %s, %s at 30d took %v with the other reads of the page, over %v", set.name, w.name, took, perfLimit)
+			}
+		}
+	}
 	for running() {
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Logf("autovacuum of the seen table ran for about %v; it was still running after the tab's reads: %v, after all of them: %v",
-		time.Since(begin).Round(100*time.Millisecond), runningAfterTab, runningAfterAll)
-	for _, w := range widgets {
-		t.Logf("during a vacuum, 30d, %-26s the tab's reads at once %s, all at once %s", w.name, perfMS(onTab, w), perfMS(everything, w))
-		if took, ok := onTab[w.name]; ok && took >= perfLimit {
-			t.Errorf("during a vacuum: %s at 30d took %v with the other reads of the tab, over %v", w.name, took, perfLimit)
-		}
-	}
+	t.Logf("autovacuum of the seen table ran for about %v", time.Since(begin).Round(100*time.Millisecond))
 }
 
-// TestRollupAppReadersPerf times the readers behind the widgets of the app Monitoring tab on a
+// TestRollupAppReadersPerf times the readers behind the widgets of the app Monitoring tab and the project Overview on a
 // database loaded with testdata/rollup_perf.sql (TimescaleDB, 33 M decisions of one app over 30
 // days, from two agents, and a tenth of that for a second app). It runs only with WAFIO_PERF_DSN
 // set, and the database must be migrated with the real migrations, loaded, and have no state row:
@@ -493,13 +571,13 @@ func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 //	WAFIO_PERF_DSN=postgres://user:pass@host:5432/wafio_perf?sslmode=disable go test -run TestRollupAppReadersPerf -timeout 60m -v ./internal/adapter/repository/
 //
 // It works as the job does, and times the longest raw part the readers can meet, whatever the time
-// of the run. The state row starts at the hour three hours back (H), the rollups are filled back 30
-// days (a few hundred backfill units, timed) and forward to H plus 59 minutes, and the decisions
+// of the run. The state row starts at the hour three hours back (H), the rollups are filled back to the
+// retention of perfKeepDays (a few hundred backfill units, timed) and forward to H plus 59 minutes, and the decisions
 // after H plus 62 minutes are removed. A job in the first two minutes of an hour has filled the hours
 // up to the one before the last, so there a top list or the map reads that whole hour and a bit more
 // raw, 62 minutes and about 47,000 decisions of the app, and a summary reads the last three minutes.
-// TestRollupSteadyHourPerf adds the next hour from H plus 59 minutes. Each widget is read as
-// perfMeasure says. Each run needs a fresh clone of the migrated and loaded database: the state row of
+// TestRollupSteadyHourPerf adds the next hour from H plus 59 minutes. Each widget of the Monitoring tab and
+// the Overview is read as perfMeasure says. Each run needs a fresh clone of the migrated and loaded database: the state row of
 // an earlier run stops it.
 func TestRollupAppReadersPerf(t *testing.T) {
 	ctx, dsn, repo := perfRepo(t)

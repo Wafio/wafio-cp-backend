@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS waf_rollup_addr_seen_last_seen
 CREATE INDEX IF NOT EXISTS waf_rollup_addr_seen_expiry ON waf_rollup_addr_seen (last_seen);
 
 -- The largest values of one agent, app, dimension and hour. dim: 1 uri, 2 user_agent, 3 addr,
--- 4 attack_addr, 5 category, 6 method. key is the md5 of the full value, value is cut to 1024
+-- 4 attack_addr, 5 category, 6 method, 7 host. key is the md5 of the full value, value is cut to 1024
 -- characters. blocks and logs are filled for addr only. The primary key carries the counts, so a
 -- list over a month reads the index alone and not the values; vacuum early, so that most of it
 -- stays index-only as hours are added.

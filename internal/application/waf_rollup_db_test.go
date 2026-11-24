@@ -289,7 +289,7 @@ const (
 	hourBad     = ` AND action IN ('block','monitor','log','challenge') `
 )
 
-// The six dimensions as raw groups: value, count, blocks, logs, with the filters and the value of
+// The dimensions as raw groups: value, count, blocks, logs, with the filters and the value of
 // each as the rollup is meant to apply them.
 var rawDims = []struct {
 	dim  int
@@ -305,6 +305,7 @@ var rawDims = []struct {
 		FROM waf_decisions, unnest(categories) AS cat WHERE agent_id::text = ANY($1::text[]) AND recorded_at >= $2 AND recorded_at < $3 ` +
 		hourBad + `AND cat <> '' GROUP BY 1, 2, 3`},
 	{6, 50, hourRawHead + `COALESCE(method, 'GET'), count(*), 0::bigint, 0::bigint` + hourRawFrom + `GROUP BY 1, 2, 3`},
+	{7, 200, hourRawHead + `host, count(*), 0::bigint, 0::bigint` + hourRawFrom + `AND host IS NOT NULL GROUP BY 1, 2, 3`},
 }
 
 // expectedTop merges the groups of each agent and app that have one md5 key (the key is what the
@@ -388,13 +389,13 @@ func (f *rollupFixture) hourRows(dim int, hour time.Time) map[string]hourRow {
 
 // seedHour gives agent in app one hour of 1100 clients with 1 to 5 requests each: more distinct
 // URIs, user agents and addresses than the rollup keeps, many ties, 215 categories, 61 methods,
-// NULL and empty values.
+// 210 hosts, NULL and empty values.
 func (f *rollupFixture) seedHour(agent string, app any, clients int, hour time.Time) {
 	f.t.Helper()
 	f.exec(`
 		INSERT INTO waf_decisions (agent_id, app_id, host, method, uri, remote_addr, user_agent, action, categories,
 		                           analyze_method, latency_us, event_time, recorded_at)
-		SELECT $1::uuid, $2::uuid, 'h',
+		SELECT $1::uuid, $2::uuid, 'h' || (k % 210),
 		       CASE WHEN k % 61 = 0 THEN NULL ELSE 'M' || (k % 60) END,
 		       CASE WHEN k % 29 = 0 THEN '' WHEN k % 31 = 0 THEN NULL ELSE '/u/' || k END,
 		       CASE WHEN k % 37 = 0 THEN '' WHEN k % 41 = 0 THEN NULL ELSE '10.' || (k / 256) || '.' || (k % 256) END,

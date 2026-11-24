@@ -56,6 +56,7 @@ const (
 	rollupDimAttackAddr
 	rollupDimCategory
 	rollupDimMethod
+	rollupDimHost
 )
 
 const rollupBadActions = `action IN ('block','monitor','log','challenge')`
@@ -84,6 +85,8 @@ var rollupDims = []rollupDim{
 	{id: rollupDimCategory, keep: 200, value: `cat`, where: rollupBadActions + ` AND COALESCE(cat, '') <> ''`,
 		expand: ` CROSS JOIN LATERAL unnest(COALESCE(d.categories, '{}'::text[])) AS u(cat)`},
 	{id: rollupDimMethod, keep: 50, value: `COALESCE(method, 'GET')`, where: `true`},
+	// A NULL host is not a host, the empty one is, as COUNT(DISTINCT host) has it.
+	{id: rollupDimHost, keep: 200, value: `host`, where: `host IS NOT NULL`},
 }
 
 // sql ranks the values of the hour [$1, $2) per agent and app, largest first, and inserts the first
