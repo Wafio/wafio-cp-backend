@@ -19,6 +19,8 @@ Before the server starts, `Config.Validate` (`internal/config/validate.go`) chec
 
 After it has connected to the database, the server takes a shared advisory lock on the encryption key on a connection of its own and holds it until it exits, and it compares the id of `totp.enc_key` with the id the database holds (it stores its own on the first start). It refuses to start while `wafio rekey --apply` runs or when the ids differ, and it stops when a lock that was lost is taken again and the id is no longer its own; see `wafio rekey`.
 
+While it runs, the server also fills the dashboard rollups of the WAF decisions once a minute, under a database advisory lock so that of several servers on one database one works, and trims them with the telemetry retention (README, "Dashboard rollups"). It needs no flag or key and does not touch ingest.
+
 Security: authn=not-applicable-local-process; privilege=no-root-needed; secrets=read-from-config-or-env-never-from-argv; audit=startup-log; note=jwt.secret-placeholder-refused-at-boot
 
 ## command: wafio migrate

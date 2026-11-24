@@ -15,6 +15,7 @@ type Repository struct {
 	EBPF             *EBPFRepo
 	App              *AppRepo
 	WAF              *WAFRepo
+	WAFRollup        *WAFRollupRepo
 	Host             *HostRepo
 	Audit            *AuditRepo
 	AgentGRPC        *AgentGRPCRepo
@@ -116,6 +117,7 @@ func FromPool(pool *pgxpool.Pool) *Repository {
 		EBPF:             &EBPFRepo{pool: pool, eventCache: newTraceEventCache(), projects: projects},
 		App:              &AppRepo{pool: pool},
 		WAF:              &WAFRepo{pool: pool},
+		WAFRollup:        &WAFRollupRepo{pool: pool},
 		Host:             host,
 		Audit:            &AuditRepo{pool: pool},
 		AgentGRPC:        agentGRPC,

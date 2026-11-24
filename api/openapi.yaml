@@ -3061,7 +3061,7 @@ paths:
     get:
       operationId: DashboardHandler_ByMethod
       summary: Decisions per HTTP method
-      description: Counts decisions by HTTP method, most frequent first. A decision without a method counts as GET. Reads decisions of the project's agents from waf_decisions by event time. Times are Unix seconds; the default window is the last 24 hours.
+      description: 'Counts decisions by HTTP method, most frequent first. A decision without a method counts as GET, in the same row as the decisions that say GET. Reads decisions of the project''s agents from waf_decisions by the time the control plane recorded them. Times are Unix seconds; the default window is the last 24 hours. Counts are approximate for the part of the window read from hourly rollups, which keep only the 50 busiest methods of each hour, so a method is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - WAF analytics
       parameters:
@@ -3487,7 +3487,7 @@ paths:
     get:
       operationId: DashboardHandler_GeoLocations
       summary: Client locations for the geo map
-      description: Returns the busiest client addresses with country, city, coordinates and per-action counts, enriched from the GeoIP database when the server has one. total_allow, total_log and total_block cover all decisions in the window, not only the listed locations. Reads decisions of the project's agents from waf_decisions by event time. Times are Unix seconds; the default window is the last 24 hours.
+      description: Returns the busiest client addresses with country, city, coordinates and per-action counts, enriched from the GeoIP database when the server has one. total_allow, total_log and total_block cover all decisions in the window, not only the listed locations. Reads decisions of the project's agents from waf_decisions by the time the control plane recorded them. Times are Unix seconds; the default window is the last 24 hours.
       tags:
         - WAF analytics
       parameters:
@@ -10143,7 +10143,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppSummary
       summary: Request counters of an application
-      description: Returns decision counters (blocks, allows, logs, challenges, errors, WebSocket counts, detector breakdown) for the application over the last N minutes.
+      description: 'Returns decision counters (blocks, allows, logs, challenges, errors, WebSocket counts, detector breakdown) for the application over the last N minutes. The counters and the distinct client addresses are exact: they are read from per-minute and per-address rollups for the whole minutes of the window and from the decisions for its ends.'
       tags:
         - Applications
         - WAF analytics
@@ -10155,10 +10155,11 @@ paths:
         - name: minutes
           in: query
           required: false
-          description: Window length in minutes. Values below 1 fall back to 60; there is no upper bound.
+          description: Window length in minutes, 1 to 43200 (30 days). Values below 1 fall back to 60, larger ones are capped at 43200.
           schema:
             type: integer
             minimum: 1
+            maximum: 43200
             default: 60
       responses:
         '200':
@@ -10212,7 +10213,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppTimeline
       summary: Decision counts over time for an application
-      description: 'Returns request counts per time bucket for the timeline chart. At most 200 buckets: a bucket_seconds that would give more is raised.'
+      description: 'Returns request counts per time bucket for the timeline chart. Decisions are placed by the time the control plane recorded them. At most 200 buckets: a bucket_seconds that would give more is raised to the next whole number of minutes.'
       tags:
         - Applications
         - WAF analytics
@@ -10233,7 +10234,7 @@ paths:
         - name: bucket_seconds
           in: query
           required: false
-          description: 'Bucket width in seconds. Default: window divided into about 60 buckets; raised so there are at most 200.'
+          description: 'Bucket width in seconds. Default: window divided into about 60 buckets; raised, to a whole number of minutes, so there are at most 200. A width that is a whole number of minutes is read from per-minute rollups for the part of the window they cover.'
           schema:
             type: integer
             minimum: 1
@@ -10291,7 +10292,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppTop
       summary: Top-N list of an application
-      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents.'
+      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour, so a value is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly. A value longer than 1024 characters is shown cut to 1024; two values that differ only after that point are listed as separate rows with the same text.'
       tags:
         - Applications
         - WAF analytics
@@ -10403,7 +10404,7 @@ paths:
     get:
       operationId: DashboardHandler_AppGeoLocations
       summary: Client locations of an application
-      description: Returns the busiest client IPs of the application with their GeoIP location and allow, log and block counts, for the map view. Location fields are empty when no GeoIP database is loaded. Time filters are Unix seconds on the event time.
+      description: 'Returns the busiest client IPs of the application with their GeoIP location and allow, log and block counts, for the map view. Location fields are empty when no GeoIP database is loaded. Time filters are Unix seconds on the time the control plane recorded the decision. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest addresses of each hour, so an address is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - Applications
         - WAF analytics
@@ -10700,7 +10701,7 @@ paths:
     get:
       summary: Get the Overview page data in one response
       operationId: WAFAgentHandler_ProjectOverview
-      description: Aggregates WAF traffic (summary with previous-window comparison, timeline, top IPs, categories and countries), WAF agents, host fleet status, firewall counters and events, runtime-security stats and events, and the host list. Parts are queried in parallel; a failed part is reported in widgets[key].state = unavailable and the rest is still returned. Answers are cached 20 seconds per (project, filters, window) and refreshed in the background, so generated_at can be up to about 20 seconds old. host_id restricts the host parts and the WAF parts to agents of that host; waf_agent_id restricts the WAF parts to one WAF agent. Both must be canonical lower-case UUIDs of this project.
+      description: 'Aggregates WAF traffic (summary with previous-window comparison, timeline, top IPs, categories and countries), WAF agents, host fleet status, firewall counters and events, runtime-security stats and events, and the host list. Parts are queried in parallel; a failed part is reported in widgets[key].state = unavailable and the rest is still returned. Answers are cached 20 seconds per (project, filters, window) and refreshed in the background, so generated_at can be up to about 20 seconds old. host_id restricts the host parts and the WAF parts to agents of that host; waf_agent_id restricts the WAF parts to one WAF agent. Both must be canonical lower-case UUIDs of this project. The counters of the summaries and the timeline are exact, and the distinct client addresses are exact for the current window and 0 for the previous one. The top lists and the countries are approximate for the part of the window read from hourly rollups, which keep only the busiest addresses and categories of each hour, so a value is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - Projects
       parameters:
@@ -11076,7 +11077,7 @@ paths:
     get:
       operationId: WAFAgentHandler_ProjectSummary
       summary: Project WAF traffic summary
-      description: 'Returns the header KPIs of the project''s WAF traffic in the last N minutes: requests by action, block rate, average decision time, distinct clients and hosts, active agents, detections by method and WebSocket counts. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project.'
+      description: 'Returns the header KPIs of the project''s WAF traffic in the last N minutes: requests by action, block rate, average decision time, distinct clients and hosts, active agents, detections by method and WebSocket counts. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project. The counters and the distinct client addresses are exact; the distinct hosts are counted from the busiest hosts of each hour.'
       tags:
         - WAF analytics
       parameters:
@@ -11249,7 +11250,7 @@ paths:
     get:
       operationId: WAFAgentHandler_ProjectTimeline
       summary: Project requests over time
-      description: 'Returns decision counts per time bucket for the timeline chart, oldest first. Requests = blocks + allows + monitors + logs + challenges + errors. At most 200 buckets: a smaller bucket_seconds is raised to window/200. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project.'
+      description: 'Returns decision counts per time bucket for the timeline chart, oldest first. Requests = blocks + allows + monitors + logs + challenges + errors. At most 200 buckets: a smaller bucket_seconds is raised to window/200. Counts decisions by the time the control plane stored them. A bucket that is a whole number of minutes is read from per-minute rollups for the part of the window they cover. Optional agent_id limits the result to one WAF agent of the project.'
       tags:
         - WAF analytics
       parameters:
@@ -11320,7 +11321,7 @@ paths:
     get:
       operationId: WAFAgentHandler_ProjectTop
       summary: Top-N list of project WAF traffic
-      description: Returns the most frequent client addresses, URIs, attack categories or Host headers in the window. For ips, only block, monitor, log and challenge decisions count unless scope=all, so the list shows attackers. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project.
+      description: 'Returns the most frequent client addresses, URIs, attack categories or Host headers in the window. For ips, only block, monitor, log and challenge decisions count unless scope=all, so the list shows attackers. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project. For ips and categories the counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour, so a value is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly. For ips and categories, a value longer than 1024 characters is shown cut to 1024.'
       tags:
         - WAF analytics
       parameters:
@@ -13373,7 +13374,7 @@ paths:
     put:
       operationId: StorageHandler_UpdateRetention
       summary: Set telemetry retention per table
-      description: 'Sets the retention in days of one or more tables (null resets a table to its default) and applies it at once: TimescaleDB policies are replaced in the same transaction, a shortened policy also drops its expired chunks right away, and control-plane modes run a pass immediately. Returns the new status, or {ok: true} when the save succeeded but the status could not be read. Recorded as admin.retention_updated in the system audit log with old and new days per table. The route exists only when the storage service started with the control plane.'
+      description: 'Sets the retention in days of one or more tables (null resets a table to its default) and applies it at once: TimescaleDB policies are replaced in the same transaction, a shortened policy also drops its expired chunks right away, and control-plane modes run a pass immediately. The save also starts a retention pass that trims the dashboard rollups of waf_decisions (counters per minute, client addresses, busiest values per hour), so a shortening takes effect for them within moments; in the first hour after an upgrade it takes effect when that hour ends. Returns the new status, or {ok: true} when the save succeeded but the status could not be read. Recorded as admin.retention_updated in the system audit log with old and new days per table. The route exists only when the storage service started with the control plane.'
       tags:
         - Admin
       requestBody:
@@ -27903,7 +27904,7 @@ components:
           description: Distinct client IPs.
         unique_hosts:
           type: integer
-          description: Distinct request hosts.
+          description: Distinct request hosts. Counted from hourly rollups for most of the window, which keep only the 200 busiest hosts of each hour, so a host that is never among them is not counted.
         agents_active:
           type: integer
           description: WAF agents that reported decisions.
@@ -31558,11 +31559,11 @@ components:
           description: Average decision time in microseconds.
         unique_ips:
           type: integer
-          description: Distinct client addresses.
+          description: Distinct client addresses. 0 in the summary of the previous window.
           format: int64
         unique_hosts:
           type: integer
-          description: Distinct Host headers.
+          description: Distinct Host headers. Counted from hourly rollups for most of the window, which keep only the 200 busiest hosts of each hour, so a host that is never among them is not counted.
           format: int64
         agents_active:
           type: integer

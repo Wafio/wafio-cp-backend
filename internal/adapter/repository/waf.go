@@ -699,62 +699,30 @@ const wsScopePredicate = `(method = 'WEBSOCKET' OR match_source LIKE 'ws:%')`
 // the message KPIs can exclude them without touching wsScopePredicate.
 const wsHandshakePredicate = `match_source = 'ws:handshake'`
 
-// wsSummaryFilters returns the three WS FILTER clauses shared by the app- and
-// project-level summary queries.
-//
-// ws_messages_blocked / ws_messages_logged are FRAMES-only KPIs:
-// handshake-phase decisions are excluded (they are counted once, separately,
-// in ws_handshake_rejected) so a rejected upgrade never double-reports.
-// IS DISTINCT FROM (not <>) keeps rows with NULL match_source (frames that
-// match on method = 'WEBSOCKET' only) inside the message KPIs.
-func wsSummaryFilters() string {
-	return `
-		    COUNT(*) FILTER (WHERE ` + wsScopePredicate + ` AND ` + wsHandshakePredicate + ` IS DISTINCT FROM TRUE AND action = 'block') AS ws_blocked,
-		    COUNT(*) FILTER (WHERE ` + wsScopePredicate + ` AND ` + wsHandshakePredicate + ` IS DISTINCT FROM TRUE AND action = 'log')   AS ws_logged,
-		    COUNT(*) FILTER (WHERE ` + wsHandshakePredicate + ` AND action = 'block') AS ws_handshake_rejected`
-}
-
 // SummarizeApp returns request counters for the given app over the last
 // `sinceMinutes` minutes. Used by the app-level WAF dashboard tab.
 func (r *WAFRepo) SummarizeApp(ctx context.Context, projectID, appID string, sinceMinutes int) (*AppWAFSummary, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
 	}
-	row := r.pool.QueryRow(ctx, `
-		SELECT
-		    COUNT(*)                                             AS requests,
-		    COUNT(*) FILTER (WHERE action = 'block')             AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')             AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')           AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'log')               AS logs,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error')    AS errors,
-		    COUNT(*) FILTER (WHERE action = 'challenge')         AS challenges,
-		    COALESCE(AVG(latency_us)::INT, 0)                    AS avg_lat,
-		    COUNT(DISTINCT remote_addr)                          AS uniq_ip,
-		    COUNT(*) FILTER (WHERE analyze_method IN ('semantic','rule_based','hybrid')) AS sem_triggers,
-		    COUNT(*) FILTER (WHERE analyze_method NOT IN ('semantic','rule_based','hybrid') AND analyze_method IS NOT NULL) AS other_triggers,
-		    `+wsSummaryFilters()+`
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE d.app_id = $1 AND a.project_id = $3
-		  AND d.recorded_at > NOW() - make_interval(mins => $2::INT)`,
-		appID, sinceMinutes, projectID)
-
-	s := &AppWAFSummary{Window: fmt.Sprintf("%dm", sinceMinutes)}
-	if err := row.Scan(&s.Requests, &s.Blocks, &s.Allows, &s.Monitors, &s.Logs, &s.Errors, &s.Challenges, &s.AvgLatency, &s.UniqueIPs,
-		&s.SemanticTriggers, &s.OtherTriggers,
-		&s.WSMessagesBlocked, &s.WSMessagesLogged, &s.WSHandshakeRejected); err != nil {
+	from, to, err := r.lastMinutes(ctx, sinceMinutes)
+	if err != nil {
 		return nil, err
 	}
-	if s.Requests > 0 {
-		s.BlockRate = float64(s.Blocks) / float64(s.Requests)
+	s, err := r.summarizeApp(ctx, projectID, appID, from, to)
+	if err != nil {
+		return nil, err
 	}
+	s.Window = fmt.Sprintf("%dm", sinceMinutes)
 	return s, nil
 }
 
 // ── App-scoped aggregates (used by the per-app Overview dashboard) ───────
 
-// TimelineForApp returns request/block buckets over time for a single app.
+// TimelineForApp returns request/block buckets over time for a single app. The window and the
+// buckets are on recorded_at, as the rollups are. Minute rows make a bucket of whole minutes: the
+// default when minutes is a multiple of 60 (the dashboard's ranges are) and the width the 200 bucket
+// cap picks. Any other bucket reads every decision.
 func (r *WAFRepo) TimelineForApp(ctx context.Context, projectID, appID string, sinceMinutes, bucketSeconds int) ([]WAFTimelineBucket, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
@@ -764,128 +732,40 @@ func (r *WAFRepo) TimelineForApp(ctx context.Context, projectID, appID string, s
 	}
 	totalSec := sinceMinutes * 60
 	if totalSec/bucketSeconds > 200 {
-		bucketSeconds = max(totalSec/200, 1)
+		bucketSeconds = (max(totalSec/200, 1) + 59) / 60 * 60
 	}
-	rows, err := r.pool.Query(ctx, `
-		SELECT
-		    to_timestamp(floor(extract(epoch FROM event_time) / $3) * $3) AS bucket_start,
-		    COUNT(*)                                          AS reqs,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE d.app_id = $1 AND a.project_id = $4
-		  AND d.recorded_at > NOW() - make_interval(mins => $2::INT)
-		GROUP BY bucket_start
-		ORDER BY bucket_start`, appID, sinceMinutes, bucketSeconds, projectID)
+	from, to, err := r.lastMinutes(ctx, sinceMinutes)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []WAFTimelineBucket{}
-	for rows.Next() {
-		var b WAFTimelineBucket
-		if err := rows.Scan(&b.BucketStart, &b.Requests, &b.Blocks, &b.Allows, &b.Monitors, &b.Errors, &b.Logs, &b.Challenges); err != nil {
-			return nil, err
-		}
-		out = append(out, b)
-	}
-	return out, rows.Err()
+	return r.timelineApp(ctx, projectID, appID, from, to, bucketSeconds)
 }
 
-// TopIPsForApp returns the top client IPs by decision count for a single app.
+// TopIPsForApp returns the top client IPs by decision count for a single app. The counts are
+// approximate for the part of the window read from hourly rollups.
 func (r *WAFRepo) TopIPsForApp(ctx context.Context, projectID, appID string, sinceMinutes, limit int, onlyBadActors bool) ([]WAFTopRow, error) {
-	if sinceMinutes <= 0 {
-		sinceMinutes = 60
-	}
-	if limit <= 0 || limit > 50 {
-		limit = 10
-	}
-	actionClause := ""
+	dim := rollupDims[rollupDimAddr-1]
 	if onlyBadActors {
-		actionClause = "AND d.action IN ('block','monitor','log','challenge')"
+		dim = rollupDims[rollupDimAttackAddr-1]
 	}
-	q := fmt.Sprintf(`
-		SELECT d.remote_addr, COUNT(*) AS c
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE d.app_id = $1 AND a.project_id = $4
-		  AND d.recorded_at > NOW() - make_interval(mins => $2::INT)
-		  AND COALESCE(d.remote_addr,'') <> ''
-		  %s
-		GROUP BY d.remote_addr
-		ORDER BY c DESC
-		LIMIT $3`, actionClause)
-	return r.scanTopRows(ctx, q, appID, sinceMinutes, limit, projectID)
+	return r.topRowsApp(ctx, projectID, appID, dim, sinceMinutes, limit)
 }
 
 // TopURIsForApp returns the most frequently-hit URIs for a single app.
 func (r *WAFRepo) TopURIsForApp(ctx context.Context, projectID, appID string, sinceMinutes, limit int) ([]WAFTopRow, error) {
-	if sinceMinutes <= 0 {
-		sinceMinutes = 60
-	}
-	if limit <= 0 || limit > 50 {
-		limit = 10
-	}
-	return r.scanTopRows(ctx, `
-		SELECT d.uri, COUNT(*) AS c
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE d.app_id = $1 AND a.project_id = $4
-		  AND d.recorded_at > NOW() - make_interval(mins => $2::INT)
-		  AND COALESCE(d.uri,'') <> ''
-		GROUP BY d.uri
-		ORDER BY c DESC
-		LIMIT $3`, appID, sinceMinutes, limit, projectID)
+	return r.topRowsApp(ctx, projectID, appID, rollupDims[rollupDimURI-1], sinceMinutes, limit)
 }
 
 // TopCategoriesForApp returns the most frequently-matched attack categories
 // for a single app. Only decisions of the project's own agents count.
 func (r *WAFRepo) TopCategoriesForApp(ctx context.Context, projectID, appID string, sinceMinutes, limit int) ([]WAFTopRow, error) {
-	if sinceMinutes <= 0 {
-		sinceMinutes = 60
-	}
-	if limit <= 0 || limit > 50 {
-		limit = 10
-	}
-	return r.scanTopRows(ctx, `
-		SELECT cat, COUNT(*) AS c
-		FROM (
-		    SELECT UNNEST(COALESCE(d.categories,'{}'::text[])) AS cat
-		    FROM waf_decisions d
-		    JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		    WHERE d.app_id = $1 AND a.project_id = $4
-		      AND d.recorded_at > NOW() - make_interval(mins => $2::INT)
-		      AND d.action IN ('block','monitor','log','challenge')
-		) expanded
-		WHERE COALESCE(cat,'') <> ''
-		GROUP BY cat
-		ORDER BY c DESC
-		LIMIT $3`, appID, sinceMinutes, limit, projectID)
+	return r.topRowsApp(ctx, projectID, appID, rollupDims[rollupDimCategory-1], sinceMinutes, limit)
 }
 
 // TopUserAgentsForApp returns the most frequent User-Agent strings for a
 // single app. Only decisions of the project's own agents count.
 func (r *WAFRepo) TopUserAgentsForApp(ctx context.Context, projectID, appID string, sinceMinutes, limit int) ([]WAFTopRow, error) {
-	if sinceMinutes <= 0 {
-		sinceMinutes = 60
-	}
-	if limit <= 0 || limit > 50 {
-		limit = 10
-	}
-	return r.scanTopRows(ctx, `
-		SELECT COALESCE(d.user_agent,'(none)') AS ua, COUNT(*) AS c
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE d.app_id = $1 AND a.project_id = $4
-		  AND d.recorded_at > NOW() - make_interval(mins => $2::INT)
-		GROUP BY ua
-		ORDER BY c DESC
-		LIMIT $3`, appID, sinceMinutes, limit, projectID)
+	return r.topRowsApp(ctx, projectID, appID, rollupDims[rollupDimUserAgent-1], sinceMinutes, limit)
 }
 
 // GetAppConfigForProject is GetAppConfig for an app of projectID only; an
@@ -917,122 +797,55 @@ func (r *WAFRepo) GetAppConfigForProject(ctx context.Context, projectID, appID s
 type ProjectWAFSummary = domain.ProjectWAFSummary
 
 // SummarizeProject returns header KPIs for all WAF traffic captured by any
-// agent registered to this project in the last `sinceMinutes` minutes.
+// agent registered to this project in the last `sinceMinutes` minutes. The counters are
+// exact. The distinct hosts come from the hour rows, which keep the busiest hosts of each hour.
 func (r *WAFRepo) SummarizeProject(ctx context.Context, projectID, agentID string, sinceMinutes int, hostIDs ...string) (*ProjectWAFSummary, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
 	}
-	agentClause := ""
-	args := []any{projectID, sinceMinutes, wafWindowEnd(ctx)}
-	if agentID != "" {
-		agentClause = fmt.Sprintf(" AND a.id = $%d::uuid", len(args)+1)
-		args = append(args, agentID)
-	}
-	if len(hostIDs) > 0 && hostIDs[0] != "" {
-		agentClause += fmt.Sprintf(" AND a.host_id = $%d::uuid", len(args)+1)
-		args = append(args, hostIDs[0])
-	}
-	q := `
-		WITH scoped AS (
-		    SELECT d.*
-		    FROM waf_decisions d
-		    JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		    WHERE a.project_id = $1
-		      AND d.recorded_at > $3::timestamptz - make_interval(mins => $2::INT)
-		      AND d.recorded_at <= $3::timestamptz
-		      ` + agentClause + `
-		)
-		SELECT
-		    COUNT(*)                                          AS requests,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges,
-		    COALESCE(AVG(latency_us)::INT, 0)                 AS avg_lat,
-		    COUNT(DISTINCT remote_addr)                       AS uniq_ip,
-		    COUNT(DISTINCT host)                              AS uniq_host,
-		    COUNT(DISTINCT agent_id)                          AS uniq_agents,
-		    COUNT(*) FILTER (WHERE analyze_method IN ('semantic','rule_based','hybrid')) AS sem_triggers,
-		    COUNT(*) FILTER (WHERE analyze_method NOT IN ('semantic','rule_based','hybrid') AND analyze_method IS NOT NULL) AS other_triggers,
-		    ` + wsSummaryFilters() + `
-		FROM scoped`
-	row := r.pool.QueryRow(ctx, q, args...)
-
-	s := &ProjectWAFSummary{Window: fmt.Sprintf("%dm", sinceMinutes)}
-	if err := row.Scan(&s.Requests, &s.Blocks, &s.Allows, &s.Monitors, &s.Logs, &s.Errors, &s.Challenges,
-		&s.AvgLatencyUS, &s.UniqueIPs, &s.UniqueHosts, &s.AgentsActive,
-		&s.SemanticTriggers, &s.OtherTriggers,
-		&s.WSMessagesBlocked, &s.WSMessagesLogged, &s.WSHandshakeRejected); err != nil {
+	to, err := r.windowEnd(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if s.Requests > 0 {
-		s.BlockRate = float64(s.Blocks) / float64(s.Requests)
+	s, err := r.summarizeProject(ctx, projectScope(projectID, agentID, hostIDs), to.Add(-time.Duration(sinceMinutes)*time.Minute), to, true)
+	if err != nil {
+		return nil, err
 	}
+	s.Window = fmt.Sprintf("%dm", sinceMinutes)
 	return s, nil
 }
 
 // SummarizeProjectPrev returns WAF KPIs for the *previous* window of the same duration,
-// i.e. from (now - 2×minutes) to (now - minutes). Used for trend delta computation.
+// i.e. from (now - 2×minutes) to (now - minutes). Used for trend delta computation. The
+// distinct addresses and the counters that only the current window reports are 0.
 func (r *WAFRepo) SummarizeProjectPrev(ctx context.Context, projectID, agentID string, sinceMinutes int, hostIDs ...string) (*ProjectWAFSummary, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
 	}
-	// PostgreSQL fallback.
-	agentClause := ""
-	args := []any{projectID, sinceMinutes, wafWindowEnd(ctx)}
-	if agentID != "" {
-		agentClause = fmt.Sprintf(" AND a.id = $%d::uuid", len(args)+1)
-		args = append(args, agentID)
-	}
-	if len(hostIDs) > 0 && hostIDs[0] != "" {
-		agentClause += fmt.Sprintf(" AND a.host_id = $%d::uuid", len(args)+1)
-		args = append(args, hostIDs[0])
-	}
-	q := `
-		WITH scoped AS (
-		    SELECT d.*
-		    FROM waf_decisions d
-		    JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		    WHERE a.project_id = $1
-		      AND d.recorded_at > $3::timestamptz - make_interval(mins => ($2::INT * 2))
-		      AND d.recorded_at <= $3::timestamptz - make_interval(mins => $2::INT)
-		      ` + agentClause + `
-		)
-		SELECT
-		    COUNT(*)                                          AS requests,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges,
-		    COALESCE(AVG(latency_us)::INT, 0)                 AS avg_lat,
-		    COUNT(DISTINCT remote_addr)                       AS uniq_ip,
-		    COUNT(DISTINCT host)                              AS uniq_host,
-		    COUNT(DISTINCT agent_id)                          AS uniq_agents,
-		    0::bigint AS sem_triggers, 0::bigint AS other_triggers,
-		    0::bigint AS ws_blocked, 0::bigint AS ws_logged, 0::bigint AS ws_handshake_rejected
-		FROM scoped`
-	row := r.pool.QueryRow(ctx, q, args...)
-	s := &ProjectWAFSummary{Window: fmt.Sprintf("prev%dm", sinceMinutes)}
-	if err := row.Scan(&s.Requests, &s.Blocks, &s.Allows, &s.Monitors, &s.Logs, &s.Errors, &s.Challenges,
-		&s.AvgLatencyUS, &s.UniqueIPs, &s.UniqueHosts, &s.AgentsActive,
-		&s.SemanticTriggers, &s.OtherTriggers,
-		&s.WSMessagesBlocked, &s.WSMessagesLogged, &s.WSHandshakeRejected); err != nil {
+	window := time.Duration(sinceMinutes) * time.Minute
+	end, err := r.windowEnd(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if s.Requests > 0 {
-		s.BlockRate = float64(s.Blocks) / float64(s.Requests)
+	to := end.Add(-window)
+	s, err := r.summarizeProject(ctx, projectScope(projectID, agentID, hostIDs), to.Add(-window), to, false)
+	if err != nil {
+		return nil, err
 	}
+	s.Window = fmt.Sprintf("prev%dm", sinceMinutes)
+	s.SemanticTriggers, s.OtherTriggers = 0, 0
+	s.WSMessagesBlocked, s.WSMessagesLogged, s.WSHandshakeRejected = 0, 0, 0
 	return s, nil
 }
 
 // SummarizeProjectBoth returns current and previous summaries; a previous-window
 // error preserves the available current summary and returns the error.
 func (r *WAFRepo) SummarizeProjectBoth(ctx context.Context, projectID, agentID string, sinceMinutes int, hostIDs ...string) (*ProjectWAFSummary, *ProjectWAFSummary, error) {
-	ctx = WithWAFWindowEnd(ctx, wafWindowEnd(ctx))
+	end, err := r.windowEnd(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	ctx = WithWAFWindowEnd(ctx, end)
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
 	}
@@ -1065,7 +878,8 @@ func (r *WAFRepo) SummarizeProjectBoth(ctx context.Context, projectID, agentID s
 type WAFTopRow = dashboard.CountRow
 
 // TopIPsForProject returns the top client IPs by decision count in the window.
-// Only counts blocks + monitors by default so the list surfaces attackers.
+// Only counts blocks + monitors by default so the list surfaces attackers. The counts are
+// approximate for the part of the window read from hourly rollups.
 func (r *WAFRepo) TopIPsForProject(ctx context.Context, projectID, agentID string, sinceMinutes, limit int, onlyBadActors bool, hostIDs ...string) ([]WAFTopRow, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
@@ -1073,33 +887,11 @@ func (r *WAFRepo) TopIPsForProject(ctx context.Context, projectID, agentID strin
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
-	actionClause := ""
+	dim := rollupDims[rollupDimAddr-1]
 	if onlyBadActors {
-		actionClause = "AND d.action IN ('block','monitor','log','challenge')"
+		dim = rollupDims[rollupDimAttackAddr-1]
 	}
-	args := []any{projectID, sinceMinutes, limit, wafWindowEnd(ctx)}
-	agentClause := ""
-	if agentID != "" {
-		agentClause = fmt.Sprintf(" AND a.id = $%d::uuid", len(args)+1)
-		args = append(args, agentID)
-	}
-	if len(hostIDs) > 0 && hostIDs[0] != "" {
-		agentClause += fmt.Sprintf(" AND a.host_id = $%d::uuid", len(args)+1)
-		args = append(args, hostIDs[0])
-	}
-	q := fmt.Sprintf(`
-		SELECT d.remote_addr, COUNT(*) AS c
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE a.project_id = $1
-		  AND d.recorded_at > $4::timestamptz - make_interval(mins => $2::INT)
- AND d.recorded_at <= $4::timestamptz
-		  AND COALESCE(d.remote_addr,'') <> ''
-		  %s%s
-		GROUP BY d.remote_addr
-		ORDER BY c DESC
-		LIMIT $3`, actionClause, agentClause)
-	return r.scanTopRows(ctx, q, args...)
+	return r.topRowsProject(ctx, projectScope(projectID, agentID, hostIDs), dim, sinceMinutes, limit)
 }
 
 // TopURIsForProject returns the most frequently-hit URIs in the window.
@@ -1130,7 +922,8 @@ func (r *WAFRepo) TopURIsForProject(ctx context.Context, projectID, agentID stri
 }
 
 // TopCategoriesForProject returns the most frequently-matched attack categories.
-// Categories are stored as a TEXT[] per decision; we UNNEST to count.
+// Categories are stored as a TEXT[] per decision, one hour row counts each. The counts are
+// approximate for the part of the window read from hourly rollups.
 func (r *WAFRepo) TopCategoriesForProject(ctx context.Context, projectID, agentID string, sinceMinutes, limit int, hostIDs ...string) ([]WAFTopRow, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
@@ -1138,32 +931,7 @@ func (r *WAFRepo) TopCategoriesForProject(ctx context.Context, projectID, agentI
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
-	args := []any{projectID, sinceMinutes, limit, wafWindowEnd(ctx)}
-	agentClause := ""
-	if agentID != "" {
-		agentClause = fmt.Sprintf(" AND a.id = $%d::uuid", len(args)+1)
-		args = append(args, agentID)
-	}
-	if len(hostIDs) > 0 && hostIDs[0] != "" {
-		agentClause += fmt.Sprintf(" AND a.host_id = $%d::uuid", len(args)+1)
-		args = append(args, hostIDs[0])
-	}
-	return r.scanTopRows(ctx, fmt.Sprintf(`
-		SELECT cat, COUNT(*) AS c
-		FROM (
-		    SELECT UNNEST(COALESCE(d.categories,'{}'::text[])) AS cat
-		    FROM waf_decisions d
-		    JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		    WHERE a.project_id = $1
-		      AND d.recorded_at > $4::timestamptz - make_interval(mins => $2::INT)
- AND d.recorded_at <= $4::timestamptz
-		      AND d.action IN ('block','monitor','log','challenge')
-		      %s
-		) expanded
-		WHERE COALESCE(cat,'') <> ''
-		GROUP BY cat
-		ORDER BY c DESC
-		LIMIT $3`, agentClause), args...)
+	return r.topRowsProject(ctx, projectScope(projectID, agentID, hostIDs), rollupDims[rollupDimCategory-1], sinceMinutes, limit)
 }
 
 // TopHostsForProject returns the most-requested Host headers in the window.
@@ -1215,7 +983,8 @@ func (r *WAFRepo) scanTopRows(ctx context.Context, q string, args ...any) ([]WAF
 type WAFTimelineBucket = domain.WAFTimelineBucket
 
 // TimelineForProject returns one bucket every `bucketSeconds` over the window,
-// capped at 200 buckets to keep payloads small and charts readable.
+// capped at 200 buckets to keep payloads small and charts readable. A bucket of whole minutes
+// adds minute rows; any other width reads every decision.
 func (r *WAFRepo) TimelineForProject(ctx context.Context, projectID, agentID string, sinceMinutes, bucketSeconds int, hostIDs ...string) ([]WAFTimelineBucket, error) {
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
@@ -1228,47 +997,11 @@ func (r *WAFRepo) TimelineForProject(ctx context.Context, projectID, agentID str
 	if totalSec/bucketSeconds > 200 {
 		bucketSeconds = max(totalSec/200, 1)
 	}
-	agentClause := ""
-	args := []any{projectID, sinceMinutes, bucketSeconds, wafWindowEnd(ctx)}
-	if agentID != "" {
-		agentClause = fmt.Sprintf(" AND a.id = $%d::uuid", len(args)+1)
-		args = append(args, agentID)
-	}
-	if len(hostIDs) > 0 && hostIDs[0] != "" {
-		agentClause += fmt.Sprintf(" AND a.host_id = $%d::uuid", len(args)+1)
-		args = append(args, hostIDs[0])
-	}
-	rows, err := r.pool.Query(ctx, fmt.Sprintf(`
-		SELECT
-		    to_timestamp(floor(extract(epoch FROM d.recorded_at) / $3) * $3) AS bucket_start,
-		    COUNT(*)                                          AS reqs,
-		    COUNT(*) FILTER (WHERE action = 'block')          AS blocks,
-		    COUNT(*) FILTER (WHERE action = 'allow')          AS allows,
-		    COUNT(*) FILTER (WHERE action = 'monitor')        AS monitors,
-		    COUNT(*) FILTER (WHERE action = 'upstream_error') AS errors,
-		    COUNT(*) FILTER (WHERE action = 'log')            AS logs,
-		    COUNT(*) FILTER (WHERE action = 'challenge')      AS challenges
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE a.project_id = $1
-		  AND d.recorded_at > $4::timestamptz - make_interval(mins => $2::INT)
- AND d.recorded_at <= $4::timestamptz
-		  %s
-		GROUP BY bucket_start
-		ORDER BY bucket_start`, agentClause), args...)
+	to, err := r.windowEnd(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []WAFTimelineBucket{}
-	for rows.Next() {
-		var b WAFTimelineBucket
-		if err := rows.Scan(&b.BucketStart, &b.Requests, &b.Blocks, &b.Allows, &b.Monitors, &b.Errors, &b.Logs, &b.Challenges); err != nil {
-			return nil, err
-		}
-		out = append(out, b)
-	}
-	return out, rows.Err()
+	return r.timeline(ctx, projectScope(projectID, agentID, hostIDs), to.Add(-time.Duration(sinceMinutes)*time.Minute), to, bucketSeconds)
 }
 
 // ListDecisionsForProject returns the most recent decisions across every app
@@ -1502,31 +1235,22 @@ func (r *WAFRepo) DecisionsByCategory(
 	return out, rows.Err()
 }
 
-// DecisionsByMethod returns count per HTTP method.
+// DecisionsByMethod returns count per HTTP method, GET for a decision without one, over the
+// decisions recorded from fromTS to toTS. The 50 busiest methods of each hour are kept, so the counts
+// are approximate for the part of the window read from hourly rollups.
 func (r *WAFRepo) DecisionsByMethod(
 	ctx context.Context, projectID string, fromTS, toTS int64,
 ) ([]dashboardBucket, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT COALESCE(d.method,'GET'), COUNT(*)
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE a.project_id = $1
-		  AND d.event_time BETWEEN to_timestamp($2) AND to_timestamp($3)
-		GROUP BY d.method
-		ORDER BY COUNT(*) DESC`, projectID, fromTS, toTS)
+	dim := rollupDims[rollupDimMethod-1]
+	top, err := r.top(ctx, projectScope(projectID, "", nil), dim, time.Unix(fromTS, 0), time.Unix(toTS, 0), false, dim.keep)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []dashboardBucket{}
-	for rows.Next() {
-		var b dashboardBucket
-		if err := rows.Scan(&b.Key, &b.Count); err != nil {
-			return nil, err
-		}
-		out = append(out, b)
+	out := make([]dashboardBucket, len(top))
+	for i, t := range top {
+		out[i] = dashboardBucket{Key: t.label, Count: int(t.total)}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // DecisionsByAnalyzeMethod returns the count per analyze_method. The rule_based and hybrid rows of an
@@ -1813,42 +1537,26 @@ type WAFGeoIPRow struct {
 	Block      int
 }
 
-// DecisionsGeoAggregatesForApp returns the most active IPs before GeoIP enrichment.
+// DecisionsGeoAggregatesForApp returns the most active IPs before GeoIP enrichment, over the
+// decisions recorded from fromTS to toTS. The counts are approximate for the part of the window read
+// from hourly rollups.
 func (r *WAFRepo) DecisionsGeoAggregatesForApp(
 	ctx context.Context, projectID, appID string, fromTS, toTS int64, limit int,
 ) ([]WAFGeoIPRow, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT d.remote_addr,
-		       COUNT(*) AS total,
-		       COUNT(*) FILTER (WHERE lower(d.action) NOT IN ('block','monitor','log')) AS allow_count,
-		       COUNT(*) FILTER (WHERE lower(d.action) IN ('monitor','log')) AS log_count,
-		       COUNT(*) FILTER (WHERE lower(d.action) = 'block') AS block_count
-		FROM waf_decisions d
-		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
-		WHERE a.project_id = $1
-		  AND d.app_id = $2
-		  AND d.event_time BETWEEN to_timestamp($3) AND to_timestamp($4)
-		  AND COALESCE(d.remote_addr,'') <> ''
-		GROUP BY d.remote_addr
-		ORDER BY total DESC, d.remote_addr
-		LIMIT $5`, projectID, appID, fromTS, toTS, limit)
+	top, err := r.topApp(ctx, projectID, appID, rollupDims[rollupDimAddr-1], time.Unix(fromTS, 0), time.Unix(toTS, 0), false, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := make([]WAFGeoIPRow, 0, limit)
-	for rows.Next() {
-		var row WAFGeoIPRow
-		if err := rows.Scan(&row.RemoteAddr, &row.Count, &row.Allow, &row.Log, &row.Block); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
+	out := make([]WAFGeoIPRow, len(top))
+	for i, t := range top {
+		out[i] = WAFGeoIPRow{RemoteAddr: t.label, Count: int(t.total), Allow: int(t.total - t.blocks - t.logs), Log: int(t.logs), Block: int(t.blocks)}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // DecisionsGeoAggregates returns per-IP action counts in dashboard vocabulary
-// for the window. The handler then does the geo-enrichment pass.
+// for the decisions recorded in the window, the column the hypertable is
+// partitioned on. The handler then does the geo-enrichment pass.
 func (r *WAFRepo) DecisionsGeoAggregates(
 	ctx context.Context, projectID string, fromTS, toTS int64,
 ) ([]WAFGeoAggRow, error) {
@@ -1857,7 +1565,7 @@ func (r *WAFRepo) DecisionsGeoAggregates(
 		FROM waf_decisions d
 		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
 		WHERE a.project_id = $1
-		  AND d.event_time BETWEEN to_timestamp($2) AND to_timestamp($3)
+		  AND d.recorded_at BETWEEN to_timestamp($2) AND to_timestamp($3)
 		  AND COALESCE(d.remote_addr,'') <> ''
 		GROUP BY d.remote_addr, d.action`, projectID, fromTS, toTS)
 	if err != nil {

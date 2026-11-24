@@ -478,7 +478,7 @@ var wafDecisionMethodRe = regexp.MustCompile(`^[A-Z][A-Z0-9-]{0,15}$`)
 // for an app over the last N minutes (default 60).
 func (h *WAFAgentHandler) AppSummary(c *fiber.Ctx) error {
 	appID := c.Params("appId")
-	since := c.QueryInt("minutes", 60)
+	since := clampMinutes(c.QueryInt("minutes", 60))
 	summary, err := h.Repo.WAF.SummarizeApp(c.UserContext(), c.Params("id"), appID, since)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{

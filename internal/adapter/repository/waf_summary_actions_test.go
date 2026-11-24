@@ -44,7 +44,7 @@ func TestDBWAFSummaryBucketsCoverEveryAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if _, err := pool.Exec(ctx, `CREATE TABLE agents(id uuid PRIMARY KEY, project_id uuid, host_id uuid, deleted_at timestamptz);`+nulTestDDL); err != nil {
+	if _, err := pool.Exec(ctx, `CREATE TABLE agents(id uuid PRIMARY KEY, project_id uuid, host_id uuid, deleted_at timestamptz);`+nulTestDDL+readMigration(t, "000126_waf_rollups.up.sql")); err != nil {
 		t.Fatal(err)
 	}
 	project, app, agent := uuid.NewString(), uuid.NewString(), uuid.NewString()

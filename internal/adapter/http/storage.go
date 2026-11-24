@@ -11,7 +11,8 @@ import (
 
 // newStorage returns the data retention / database size service:
 // the WithStorage override, else one on repo whose loop it
-// starts on ctx. Nil without a database (handler tests without one).
+// starts on ctx, with the WAF rollup job beside it. Nil without a
+// database (handler tests without one).
 func newStorage(ctx context.Context, cfg *config.Config, repo *repository.Repository, mail *application.MailSettings, opts []AppOption) *application.Storage {
 	if s := resolveOptions(opts).storage; s != nil {
 		return s
@@ -26,6 +27,10 @@ func newStorage(ctx context.Context, cfg *config.Config, repo *repository.Reposi
 	}
 	if mail != nil {
 		s.Mail = mail
+	}
+	if repo.WAFRollup != nil {
+		s.Rollup = &application.WAFRollup{Store: repo.WAFRollup, Keep: s.WAFKeep}
+		go s.Rollup.Run(ctx)
 	}
 	go s.Run(ctx)
 	return s

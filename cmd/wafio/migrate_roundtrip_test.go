@@ -80,6 +80,12 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	if err := ensurePerChunkIndexes(ctx, dsn, top); err != nil {
 		t.Fatalf("per-chunk indexes rerun: %v", err)
 	}
+	// 000126 adds four rollup tables; the empty database after down shows that its down drops them.
+	var rollupTables int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
+		WHERE table_schema = 'public' AND table_name LIKE 'waf\_rollup\_%'`).Scan(&rollupTables); err != nil || rollupTables != 4 {
+		t.Fatalf("rollup tables after up: %d, want 4 (err %v)", rollupTables, err)
+	}
 	if err := m.Down(); err != nil {
 		v, d, _ := m.Version()
 		t.Fatalf("down to zero failed at version %d (dirty %v): %v", v, d, err)
