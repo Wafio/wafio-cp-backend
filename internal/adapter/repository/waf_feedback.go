@@ -132,7 +132,17 @@ func (r *WAFRepo) FeedbackSummary(ctx context.Context, projectID, appID string, 
 	if appID != "" {
 		app = &appID
 	}
-	rows, err := r.pool.Query(ctx, feedbackSummarySQL, projectID, from, to, app)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// shortcut: no parallel workers, so that the page's other reads keep their cores: the 30 day summary
+	// of an app alone takes 1.3 s, not 0.7 s, upgrade to flagged counts in the rollups for a faster panel.
+	if _, err := tx.Exec(ctx, `SET LOCAL max_parallel_workers_per_gather = 0`); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, feedbackSummarySQL, projectID, from, to, app)
 	if err != nil {
 		return nil, err
 	}
