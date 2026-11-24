@@ -234,7 +234,7 @@ func expiryMail(c domain.ExpiryCandidate, now time.Time, baseURL string) (subjec
 		b.WriteString("Upload a new certificate for this application before that date. Visitors get a certificate error once it has expired.\n")
 	}
 	if baseURL != "" {
-		b.WriteString("\nOpen the application:\n" + baseURL + "/projects/" + c.ProjectID + "/apps/" + c.AppID + "\n")
+		b.WriteString("\nOpen the application:\n" + baseURL + "/projects/" + c.ProjectID + "/apps/" + c.AppID + "?tab=https\n")
 	}
 	b.WriteString("\nThis email is sent once for each warning level of a certificate.\n")
 	return subject, b.String()

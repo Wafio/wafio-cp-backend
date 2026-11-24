@@ -542,7 +542,7 @@ func TestDBCertificateKeyThatDoesNotOpenKeepsTheStoredCertificate(t *testing.T) 
 		t.Fatalf("refusal audit: %v", rows[0].meta)
 	}
 	st := f.waitStatus(app, func(s *repository.TLSStatus) bool { return s.State == "failed" })
-	if !strings.Contains(st.Error, certKeyUnreadable) || len(s.installs()) != 0 {
+	if domain.CertificateFailureCode(st.Error) != certKeyUnreadable || len(s.installs()) != 0 {
 		t.Fatalf("status %+v, %d installs", st, len(s.installs()))
 	}
 	if st.LeafSHA256 != serving.leaf || len(st.Names) != 1 || st.ChainPEM != string(serving.chain) || st.NotAfter == nil {

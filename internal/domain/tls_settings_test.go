@@ -9,39 +9,43 @@ import (
 	"testing"
 )
 
+// tlsLabel63 is the longest label a host name may have.
+var tlsLabel63 = strings.Repeat("a", 63)
+
+// tlsNormalizeCases are settings that Normalize accepts, with the form it stores.
+var tlsNormalizeCases = []struct {
+	name string
+	in   TLSSettings
+	want TLSSettings
+}{
+	{"defaults of a proxy application",
+		TLSSettings{Mode: "proxy"},
+		TLSSettings{Mode: "proxy", Hosts: []string{}, Listen: "0.0.0.0:443"}},
+	{"gateway with an upload",
+		TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"shop.example.com"}},
+		TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"shop.example.com"}, Listen: "0.0.0.0:443"}},
+	{"names are trimmed, lower-cased and kept once",
+		TLSSettings{Mode: "gateway", Source: "acme", Hosts: []string{" Shop.Example.COM ", "www.example.com", "shop.example.com"}},
+		TLSSettings{Mode: "gateway", Source: "acme", Hosts: []string{"shop.example.com", "www.example.com"}, Listen: "0.0.0.0:443"}},
+	{"ipv6 listeners",
+		TLSSettings{Mode: "proxy", Listen: "[2001:0db8::0001]:8443", RedirectListen: " [::]:80 "},
+		TLSSettings{Mode: "proxy", Hosts: []string{}, Listen: "[2001:db8::1]:8443", RedirectListen: "[::]:80"}},
+	{"redirect listener",
+		TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"a.example.com"}, Listen: "10.0.0.5:443", RedirectListen: "10.0.0.5:80"},
+		TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"a.example.com"}, Listen: "10.0.0.5:443", RedirectListen: "10.0.0.5:80"}},
+	{"labels of 63 bytes and a name of 253",
+		TLSSettings{Mode: "proxy", Hosts: []string{tlsLabel63 + ".example.com", strings.Repeat(tlsLabel63+".", 3) + strings.Repeat("b", 58) + ".de"}},
+		TLSSettings{Mode: "proxy", Hosts: []string{tlsLabel63 + ".example.com", strings.Repeat(tlsLabel63+".", 3) + strings.Repeat("b", 58) + ".de"}, Listen: "0.0.0.0:443"}},
+	{"a source is kept in proxy mode",
+		TLSSettings{Mode: "proxy", Source: "uploaded", Hosts: []string{"a.example.com"}},
+		TLSSettings{Mode: "proxy", Source: "uploaded", Hosts: []string{"a.example.com"}, Listen: "0.0.0.0:443"}},
+	{"digits and hyphens",
+		TLSSettings{Mode: "proxy", Hosts: []string{"123.my-shop-2.example.com", "xn--mnchen-3ya.de"}},
+		TLSSettings{Mode: "proxy", Hosts: []string{"123.my-shop-2.example.com", "xn--mnchen-3ya.de"}, Listen: "0.0.0.0:443"}},
+}
+
 func TestTLSSettingsNormalize(t *testing.T) {
-	long := strings.Repeat("a", 63)
-	tests := []struct {
-		name string
-		in   TLSSettings
-		want TLSSettings
-	}{
-		{"defaults of a proxy application",
-			TLSSettings{Mode: "proxy"},
-			TLSSettings{Mode: "proxy", Hosts: []string{}, Listen: "0.0.0.0:443"}},
-		{"gateway with an upload",
-			TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"shop.example.com"}},
-			TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"shop.example.com"}, Listen: "0.0.0.0:443"}},
-		{"names are trimmed, lower-cased and kept once",
-			TLSSettings{Mode: "gateway", Source: "acme", Hosts: []string{" Shop.Example.COM ", "www.example.com", "shop.example.com"}},
-			TLSSettings{Mode: "gateway", Source: "acme", Hosts: []string{"shop.example.com", "www.example.com"}, Listen: "0.0.0.0:443"}},
-		{"ipv6 listeners",
-			TLSSettings{Mode: "proxy", Listen: "[2001:0db8::0001]:8443", RedirectListen: " [::]:80 "},
-			TLSSettings{Mode: "proxy", Hosts: []string{}, Listen: "[2001:db8::1]:8443", RedirectListen: "[::]:80"}},
-		{"redirect listener",
-			TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"a.example.com"}, Listen: "10.0.0.5:443", RedirectListen: "10.0.0.5:80"},
-			TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"a.example.com"}, Listen: "10.0.0.5:443", RedirectListen: "10.0.0.5:80"}},
-		{"labels of 63 bytes and a name of 253",
-			TLSSettings{Mode: "proxy", Hosts: []string{long + ".example.com", strings.Repeat(long+".", 3) + strings.Repeat("b", 58) + ".de"}},
-			TLSSettings{Mode: "proxy", Hosts: []string{long + ".example.com", strings.Repeat(long+".", 3) + strings.Repeat("b", 58) + ".de"}, Listen: "0.0.0.0:443"}},
-		{"a source is kept in proxy mode",
-			TLSSettings{Mode: "proxy", Source: "uploaded", Hosts: []string{"a.example.com"}},
-			TLSSettings{Mode: "proxy", Source: "uploaded", Hosts: []string{"a.example.com"}, Listen: "0.0.0.0:443"}},
-		{"digits and hyphens",
-			TLSSettings{Mode: "proxy", Hosts: []string{"123.my-shop-2.example.com", "xn--mnchen-3ya.de"}},
-			TLSSettings{Mode: "proxy", Hosts: []string{"123.my-shop-2.example.com", "xn--mnchen-3ya.de"}, Listen: "0.0.0.0:443"}},
-	}
-	for _, tt := range tests {
+	for _, tt := range tlsNormalizeCases {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.in
 			if err := got.Normalize(); err != nil {
@@ -58,63 +62,70 @@ func TestTLSSettingsNormalize(t *testing.T) {
 	}
 }
 
+func tlsHosts(h ...string) []string { return h }
+
+var tlsTooManyHosts = func() []string {
+	out := make([]string, TLSMaxHosts+1)
+	for i := range out {
+		out[i] = fmt.Sprintf("h%d.example.com", i)
+	}
+	return out
+}()
+
+func tlsGateway(mod func(*TLSSettings)) TLSSettings {
+	s := TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"a.example.com"}}
+	mod(&s)
+	return s
+}
+
+// tlsRefusedCases are settings that Normalize refuses, with the field it names.
+var tlsRefusedCases = []struct {
+	name  string
+	in    TLSSettings
+	field string
+}{
+	{"no mode", TLSSettings{}, "mode"},
+	{"unknown mode", TLSSettings{Mode: "tls"}, "mode"},
+	{"unknown source", TLSSettings{Mode: "proxy", Source: "manual"}, "source"},
+	{"gateway without a source", tlsGateway(func(s *TLSSettings) { s.Source = "" }), "source"},
+	{"gateway without hosts", tlsGateway(func(s *TLSSettings) { s.Hosts = nil }), "hosts"},
+	{"gateway with blank hosts", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts(" ") }), "hosts"},
+	{"too many hosts", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsTooManyHosts }), "hosts"},
+	{"wildcard", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("*.example.com") }), "hosts"},
+	{"ip literal", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("203.0.113.7") }), "hosts"},
+	{"ipv6 literal", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("2001:db8::1") }), "hosts"},
+	{"bracketed ipv6", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("[2001:db8::1]") }), "hosts"},
+	{"port", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a.example.com:443") }), "hosts"},
+	{"trailing dot", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a.example.com.") }), "hosts"},
+	{"no dot", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("localhost") }), "hosts"},
+	{"empty label", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a..example.com") }), "hosts"},
+	{"leading dot", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts(".example.com") }), "hosts"},
+	{"label of 64 bytes", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts(strings.Repeat("a", 64) + ".example.com") }), "hosts"},
+	{"name of 254 bytes", tlsGateway(func(s *TLSSettings) {
+		s.Hosts = tlsHosts(strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("b", 59) + ".de")
+	}), "hosts"},
+	{"leading hyphen", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("-a.example.com") }), "hosts"},
+	{"trailing hyphen", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a-.example.com") }), "hosts"},
+	{"underscore", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a_b.example.com") }), "hosts"},
+	{"unicode", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("münchen.de") }), "hosts"},
+	{"space inside", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a b.example.com") }), "hosts"},
+	{"url", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("https://a.example.com") }), "hosts"},
+	{"path", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a.example.com/x") }), "hosts"},
+	{"newline", tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts("a.example.com\nb.example.com") }), "hosts"},
+	{"listen without a port", tlsGateway(func(s *TLSSettings) { s.Listen = "0.0.0.0" }), "listen"},
+	{"listen with a name", tlsGateway(func(s *TLSSettings) { s.Listen = "localhost:443" }), "listen"},
+	{"listen without a host", tlsGateway(func(s *TLSSettings) { s.Listen = ":443" }), "listen"},
+	{"listen port 0", tlsGateway(func(s *TLSSettings) { s.Listen = "0.0.0.0:0" }), "listen"},
+	{"listen port 65536", tlsGateway(func(s *TLSSettings) { s.Listen = "0.0.0.0:65536" }), "listen"},
+	{"unbracketed ipv6", tlsGateway(func(s *TLSSettings) { s.Listen = "::1:443" }), "listen"},
+	{"listen with a zone", tlsGateway(func(s *TLSSettings) { s.Listen = "[fe80::1%eth0]:443" }), "listen"},
+	{"redirect equals listen", tlsGateway(func(s *TLSSettings) { s.RedirectListen = "0.0.0.0:443" }), "redirect_listen"},
+	{"redirect equals a spelled-out listen", tlsGateway(func(s *TLSSettings) { s.Listen = "[::1]:443"; s.RedirectListen = "[0:0:0:0:0:0:0:1]:443" }), "redirect_listen"},
+	{"redirect without a port", tlsGateway(func(s *TLSSettings) { s.RedirectListen = "0.0.0.0" }), "redirect_listen"},
+}
+
 func TestTLSSettingsNormalizeRefuses(t *testing.T) {
-	hosts := func(h ...string) []string { return h }
-	tooMany := make([]string, TLSMaxHosts+1)
-	for i := range tooMany {
-		tooMany[i] = fmt.Sprintf("h%d.example.com", i)
-	}
-	atLimit := tooMany[:TLSMaxHosts]
-	gw := func(mod func(*TLSSettings)) TLSSettings {
-		s := TLSSettings{Mode: "gateway", Source: "uploaded", Hosts: []string{"a.example.com"}}
-		mod(&s)
-		return s
-	}
-	tests := []struct {
-		name  string
-		in    TLSSettings
-		field string
-	}{
-		{"no mode", TLSSettings{}, "mode"},
-		{"unknown mode", TLSSettings{Mode: "tls"}, "mode"},
-		{"unknown source", TLSSettings{Mode: "proxy", Source: "manual"}, "source"},
-		{"gateway without a source", gw(func(s *TLSSettings) { s.Source = "" }), "source"},
-		{"gateway without hosts", gw(func(s *TLSSettings) { s.Hosts = nil }), "hosts"},
-		{"gateway with blank hosts", gw(func(s *TLSSettings) { s.Hosts = hosts(" ") }), "hosts"},
-		{"too many hosts", gw(func(s *TLSSettings) { s.Hosts = tooMany }), "hosts"},
-		{"wildcard", gw(func(s *TLSSettings) { s.Hosts = hosts("*.example.com") }), "hosts"},
-		{"ip literal", gw(func(s *TLSSettings) { s.Hosts = hosts("203.0.113.7") }), "hosts"},
-		{"ipv6 literal", gw(func(s *TLSSettings) { s.Hosts = hosts("2001:db8::1") }), "hosts"},
-		{"bracketed ipv6", gw(func(s *TLSSettings) { s.Hosts = hosts("[2001:db8::1]") }), "hosts"},
-		{"port", gw(func(s *TLSSettings) { s.Hosts = hosts("a.example.com:443") }), "hosts"},
-		{"trailing dot", gw(func(s *TLSSettings) { s.Hosts = hosts("a.example.com.") }), "hosts"},
-		{"no dot", gw(func(s *TLSSettings) { s.Hosts = hosts("localhost") }), "hosts"},
-		{"empty label", gw(func(s *TLSSettings) { s.Hosts = hosts("a..example.com") }), "hosts"},
-		{"leading dot", gw(func(s *TLSSettings) { s.Hosts = hosts(".example.com") }), "hosts"},
-		{"label of 64 bytes", gw(func(s *TLSSettings) { s.Hosts = hosts(strings.Repeat("a", 64) + ".example.com") }), "hosts"},
-		{"name of 254 bytes", gw(func(s *TLSSettings) {
-			s.Hosts = hosts(strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("b", 59) + ".de")
-		}), "hosts"},
-		{"leading hyphen", gw(func(s *TLSSettings) { s.Hosts = hosts("-a.example.com") }), "hosts"},
-		{"trailing hyphen", gw(func(s *TLSSettings) { s.Hosts = hosts("a-.example.com") }), "hosts"},
-		{"underscore", gw(func(s *TLSSettings) { s.Hosts = hosts("a_b.example.com") }), "hosts"},
-		{"unicode", gw(func(s *TLSSettings) { s.Hosts = hosts("münchen.de") }), "hosts"},
-		{"space inside", gw(func(s *TLSSettings) { s.Hosts = hosts("a b.example.com") }), "hosts"},
-		{"url", gw(func(s *TLSSettings) { s.Hosts = hosts("https://a.example.com") }), "hosts"},
-		{"path", gw(func(s *TLSSettings) { s.Hosts = hosts("a.example.com/x") }), "hosts"},
-		{"newline", gw(func(s *TLSSettings) { s.Hosts = hosts("a.example.com\nb.example.com") }), "hosts"},
-		{"listen without a port", gw(func(s *TLSSettings) { s.Listen = "0.0.0.0" }), "listen"},
-		{"listen with a name", gw(func(s *TLSSettings) { s.Listen = "localhost:443" }), "listen"},
-		{"listen without a host", gw(func(s *TLSSettings) { s.Listen = ":443" }), "listen"},
-		{"listen port 0", gw(func(s *TLSSettings) { s.Listen = "0.0.0.0:0" }), "listen"},
-		{"listen port 65536", gw(func(s *TLSSettings) { s.Listen = "0.0.0.0:65536" }), "listen"},
-		{"unbracketed ipv6", gw(func(s *TLSSettings) { s.Listen = "::1:443" }), "listen"},
-		{"listen with a zone", gw(func(s *TLSSettings) { s.Listen = "[fe80::1%eth0]:443" }), "listen"},
-		{"redirect equals listen", gw(func(s *TLSSettings) { s.RedirectListen = "0.0.0.0:443" }), "redirect_listen"},
-		{"redirect equals a spelled-out listen", gw(func(s *TLSSettings) { s.Listen = "[::1]:443"; s.RedirectListen = "[0:0:0:0:0:0:0:1]:443" }), "redirect_listen"},
-		{"redirect without a port", gw(func(s *TLSSettings) { s.RedirectListen = "0.0.0.0" }), "redirect_listen"},
-	}
-	for _, tt := range tests {
+	for _, tt := range tlsRefusedCases {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.in
 			err := s.Normalize()
@@ -127,7 +138,7 @@ func TestTLSSettingsNormalizeRefuses(t *testing.T) {
 			}
 		})
 	}
-	s := TLSSettings{Mode: "proxy", Hosts: atLimit}
+	s := TLSSettings{Mode: "proxy", Hosts: tlsTooManyHosts[:TLSMaxHosts]}
 	if err := s.Normalize(); err != nil {
 		t.Errorf("%d hosts: %v", TLSMaxHosts, err)
 	}
