@@ -87,3 +87,25 @@ func TestWAFAgentKeyDirectoryIsCredential(t *testing.T) {
 		t.Errorf("path out of the key directory: filename=%q severity=%d, want cleaned and below CRITICAL", ev.Filename, ev.Severity)
 	}
 }
+
+// The response cache of the WAF agent writes and reads thousands of files under
+// /var/cache/wafio-waf/. They are ordinary files: the normal tier, no matter
+// who opens them, so ingest stores nothing for them.
+func TestWAFAgentCacheDirectoryIsOrdinary(t *testing.T) {
+	for _, file := range []string{
+		"/var/cache/wafio-waf/0b6f3c1e/ab/abcdef0123456789",
+		"/var/cache/wafio-waf/0b6f3c1e/tmp/fill.0123456789ab",
+	} {
+		if tier := filePathTier(file); tier != tierNormal {
+			t.Errorf("filePathTier(%q) = %d, want the normal tier", file, tier)
+		}
+		for _, comm := range []string{"wafio-waf-agent", "tokio-rt-worker", "cat", "sh"} {
+			for _, flags := range []int64{0, 1, 1 | 64 | 512} {
+				ev, stored := openStored(TraceEventPayload{Comm: comm, Filename: file, Flags: flags, UID: 1000})
+				if stored || ev.Severity != 0 {
+					t.Errorf("%s opens %s with flags %#o: stored=%v severity=%d, want INFO and not stored", comm, file, flags, stored, ev.Severity)
+				}
+			}
+		}
+	}
+}

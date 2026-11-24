@@ -3,10 +3,11 @@
 // Bidirectional gRPC stream shared by two agent types:
 //
 //   WAF agent (cmd/wafio-waf-agent):
-//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation and
-//               CertificateInstall ack), CertificateStatus
+//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation,
+//               CertificateInstall and CachePurge ack), CertificateStatus,
+//               EdgeStatus
 //     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping,
-//                 CertificateInstall
+//                 CertificateInstall, CachePurge
 //
 //   eBPF/host agent (cmd/wafio-host-agent):
 //     → sends : Hello, Heartbeat, CommandAck{id="ebpf:telemetry"} (telemetry)
@@ -41,9 +42,10 @@ message AgentMessage {
     Hello            hello     = 1; // both agents — first message on connect
     Heartbeat        heartbeat = 2; // both agents — liveness + host info
     WAFDecisionEvent decision  = 3; // WAF agent only
-    CommandAck       ack       = 4; // WAF agent: KeyRotation and CertificateInstall ack
+    CommandAck       ack       = 4; // WAF agent: KeyRotation, CertificateInstall and CachePurge ack
                                     // eBPF agent: telemetry (id="ebpf:telemetry")
     CertificateStatus certificate_status = 5; // WAF agent only, with feature "tls_certificates"
+    EdgeStatus        edge_status        = 6; // WAF agent only, with an "edge_*" feature
   }
 }
 
@@ -79,7 +81,13 @@ message Hello {
   // custom_rule_field_paths); the server ignores them, and every agent gets
   // the same bundle. "tls_certificates": the WAF agent serves an app over TLS
   // from the bundle's settings, accepts CertificateInstall and sends
-  // CertificateStatus. Unknown names are ignored.
+  // CertificateStatus. "edge_redirects", "edge_compression" and
+  // "edge_static_files": the WAF agent applies that part of an app's edge
+  // settings from the bundle and reports it in EdgeStatus. "edge_cache": the
+  // same for the response cache, and the agent also accepts CachePurge. Every
+  // build that has the cache sends "edge_cache", also when its cache directory
+  // is unusable (EdgeStatus says so); a missing name reads as an agent that is
+  // too old. Unknown names are ignored.
   repeated string features = 8;
 }
 
@@ -268,6 +276,84 @@ message CertificateStatus {
   int64  unix_time         = 10;
 }
 
+// EdgeStatus is sent by a WAF agent that sends one of the "edge_*" Hello
+// features. It goes to each app in the bundle that has an edge part on, and
+// also to every app when the cache directory is unusable, whether that app's
+// cache is on or off, so the dashboard can warn before an admin turns the
+// cache on. It is sent once after each applied bundle, and again from time to
+// time with fresh counters. A control plane that does not handle it, and a
+// reader built before this message, skip it as an unknown kind. It never
+// carries file content or a visitor's request. The server treats every field
+// as untrusted input; docs/agent-protocol.md lists its checks.
+message EdgeStatus {
+  string app_id = 1;
+  // The generation of the bundle these states answer.
+  int64 generation = 2;
+  // One entry for each part of the app's edge settings that the bundle turns
+  // on, plus one "cache" entry (refused, cache_dir_unusable, running_previous
+  // false) when the cache directory is unusable, even if the cache is off.
+  repeated EdgeFeatureState features = 3;
+  // Unset when the app has no cache part.
+  EdgeCacheCounters cache = 4;
+  // Unset when the app has no compression part.
+  EdgeCompressionCounters compression = 5;
+  // When the agent built this status. The server records its own receive time.
+  int64 unix_time = 6;
+}
+
+// EdgeFeatureState is the outcome of applying one part of an app's edge
+// settings.
+message EdgeFeatureState {
+  // "redirects", "compression", "static_files" or "cache".
+  string feature          = 1;
+  // "applied" (the part runs as the bundle says) or "refused" (the agent
+  // could not apply it).
+  string state            = 2;
+  // For "refused": "invalid", "root_missing", "root_not_directory",
+  // "root_unreadable", "root_forbidden", "cache_dir_unusable",
+  // "disk_too_small" or "memory_too_small". Empty for "applied".
+  string code             = 3;
+  // For "refused": a path or numbers, at most 256 bytes, no control character,
+  // never file content. Empty for "applied".
+  string detail           = 4;
+  // For "refused": true when the agent keeps running the part of the bundle it
+  // applied before, false when the part is off.
+  bool   running_previous = 5;
+}
+
+// EdgeCacheCounters count the response cache of one app over the last hour,
+// kept by the agent in one-minute buckets (the agent sends the sum of the
+// buckets still inside the hour, not a total since start), and report three
+// gauges of the moment.
+message EdgeCacheCounters {
+  uint64 requests            = 1;
+  uint64 hits_memory         = 2;
+  uint64 hits_disk           = 3;
+  uint64 misses              = 4;
+  uint64 bypass              = 5;
+  uint64 stale               = 6;
+  uint64 stored              = 7;
+  uint64 skipped_no_lifetime = 8;
+  uint64 skipped_private     = 9;
+  uint64 skipped_too_large   = 10;
+  uint64 skipped_streamed    = 11;
+  uint64 skipped_disk_full   = 12;
+  uint64 evictions           = 13;
+  uint64 corrupt             = 14;
+  // Gauges, not counted over the hour.
+  uint64 disk_bytes          = 15;
+  uint64 memory_bytes        = 16;
+  uint64 objects             = 17;
+}
+
+// EdgeCompressionCounters count the compressed answers of one app over the
+// last hour, as EdgeCacheCounters do.
+message EdgeCompressionCounters {
+  uint64 responses         = 1;
+  uint64 skipped_streamed  = 2;
+  uint64 bytes_saved       = 3;
+}
+
 // ─── server → agent ─────────────────────────────────────────────────────────
 
 // ServerMessage is the union of all messages the server can push.
@@ -280,6 +366,7 @@ message ServerMessage {
     Ping                ping                 = 4; // both agents — liveness probe
     FetchSecurityData   fetch_security_data  = 5; // both agents — refresh local security data
     CertificateInstall  certificate_install  = 7; // WAF agent with feature "tls_certificates" only
+    CachePurge          cache_purge          = 8; // WAF agent with feature "edge_cache" only
   }
 
   // field 6 (self_update) removed — control-plane push updates never had a
@@ -360,6 +447,30 @@ message CertificateInstall {
   bytes  key_pem        = 5 [debug_redact = true];
   // Lower-case hex SHA-256 of the DER of the leaf in chain_pem.
   string leaf_sha256    = 6;
+}
+
+// CachePurge asks the WAF agent to remove stored answers of one app from its
+// response cache. The server sends it only to a stream whose Hello holds
+// "edge_cache", for an app that is assigned to that agent. A purge for an
+// agent that is offline waits and is sent again after the next connect. The
+// agent answers with CommandAck{command_id, ok, error}, where error is one of
+// "" (done), "not_in_bundle" (the app is not in the agent's bundle),
+// "cache_off" (the app has no cache), "invalid" (scope or url not accepted) or
+// "busy" (try again later).
+message CachePurge {
+  string command_id = 1;
+  string app_id     = 2; // canonical lower-case UUID
+  // "url" (one stored target, with every encoding and Vary variant),
+  // "prefix" (every answer whose target path starts with url) or "app"
+  // (everything the app has stored).
+  string scope      = 3;
+  // For "url" and "prefix": a path that starts with "/" (every scheme and
+  // host of the app) or an absolute http:// or https:// URL (that host only:
+  // lower case, default port removed). "url" is compared byte for byte with
+  // the stored request target, query included; "prefix" compares the path
+  // only. Another spelling of the same target (/p?, /p%2F) is a separate
+  // copy that only "prefix" or "app" removes. Empty for "app".
+  string url        = 4;
 }
 
 // Ping is sent by the server to both agents as a liveness probe.

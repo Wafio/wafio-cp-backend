@@ -9,8 +9,8 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-// olderSchema returns the descriptor of msg as a reader built before the
-// certificate messages has it: the current file without the oneof member
+// olderSchema returns the descriptor of msg as a reader built before one of
+// its oneof members existed has it: the current file without the member
 // numbered drop.
 func olderSchema(t *testing.T, msg protoreflect.Name, drop int32) protoreflect.MessageDescriptor {
 	t.Helper()
