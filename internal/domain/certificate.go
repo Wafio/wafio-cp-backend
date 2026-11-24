@@ -349,7 +349,7 @@ func chainTrusted(certs []*x509.Certificate, now time.Time, roots *x509.CertPool
 func CertificateNames(leaf *x509.Certificate) []string {
 	names := make([]string, 0, len(leaf.DNSNames))
 	for _, n := range leaf.DNSNames {
-		if n = strings.ToLower(printable(n, 253)); n != "" && !slices.Contains(names, n) {
+		if n = lowerASCII(printable(n, 253)); n != "" && !slices.Contains(names, n) {
 			names = append(names, n)
 		}
 	}
@@ -359,9 +359,9 @@ func CertificateNames(leaf *x509.Certificate) []string {
 // CertificateCoversHost reports whether a certificate with these DNS names serves host, as a client
 // decides it: a name matches exactly, or a leading *. matches exactly one label.
 func CertificateCoversHost(names []string, host string) bool {
-	host = strings.ToLower(host)
+	host = lowerASCII(host)
 	for _, n := range names {
-		n = strings.ToLower(n)
+		n = lowerASCII(n)
 		if n == host {
 			return true
 		}

@@ -9340,7 +9340,7 @@ paths:
     get:
       operationId: AppTLSHandler_Get
       summary: Get how an application is served over TLS
-      description: 'Returns the TLS settings of the application (mode proxy or gateway, hosts, listen, redirect_listen and source), its current uploaded certificate, the ACME request, the last status its WAF agent reported, and warnings. A certificate is described by its names, issuer, dates, days_left, SHA-256 of the leaf, key type and trusted flag. No answer of the TLS operations carries a private key, and none ever will: the key is sealed at upload and only sent to the agent. certificate is null while the application has none, acme is null until a certificate was requested, and status is null until the agent reported since the settings last changed. agent_supported is whether the WAF agent that serves the application said in its Hello that it serves TLS certificates (null: no agent serves the application, or it never said), and agent_host_bound is whether its credential is bound to its host, which an uploaded key needs (null: no agent serves the application). listen is the HTTPS address the agent binds, 0.0.0.0:443 until another one is saved. warnings lists not_trusted (the uploaded chain does not verify to the system roots, which is fine for a private CA), and expires_soon (an uploaded certificate with 30 days or fewer left, an ACME certificate with 14 or fewer, which for ACME means that the renewal is late; days_left is 0 or less once the certificate expired).'
+      description: 'Returns the TLS settings of the application (mode proxy or gateway, hosts, listen, redirect_listen and source), its current uploaded certificate, the ACME request, the last status its WAF agent reported, and warnings. A certificate is described by its names, issuer, dates, days_left, SHA-256 of the leaf, key type and trusted flag. No answer of the TLS operations carries a private key, and none ever will: the key is sealed at upload and only sent to the agent. certificate is null while the application has none, acme is null until a certificate was requested, and status is null until the agent reported since the settings last changed. agent_supported is whether the WAF agent that serves the application said in its Hello that it serves TLS certificates (null: no agent serves the application, or it never said), and agent_host_bound is whether its credential is bound to its host, which an uploaded key needs (null: no agent serves the application). listen is the HTTPS address the agent binds, 0.0.0.0:443 until another one is saved. warnings lists not_trusted (the uploaded chain does not verify to the system roots, which is fine for a private CA), and expires_soon (an uploaded certificate with 30 days or fewer left, an ACME certificate with 14 or fewer, which for ACME means that the renewal is late; days_left is 0 during the last day and negative once the certificate expired).'
       tags:
         - Applications
         - WAF agents
@@ -9384,6 +9384,7 @@ paths:
                   certificate_id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
                   leaf_sha256: 9b0c2b1f5d6a4f0b8a6c1e3d7f2a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
                   error: ''
+                  error_code: ''
                   next_attempt_at: null
                   request_id: ''
                   received_at: '2026-11-20T09:31:00Z'
@@ -19229,7 +19230,7 @@ components:
           format: date-time
         days_left:
           type: integer
-          description: Whole days until not_after; 0 or less once it expired.
+          description: Whole days until not_after, rounded down; 0 during the last day, negative once it expired.
         leaf_sha256:
           type: string
           description: Lower-case hex SHA-256 of the DER of the leaf.
@@ -19331,7 +19332,7 @@ components:
             - gateway
         hosts:
           type: array
-          description: 1 to 100 lower-case DNS names (at least one dot, no wildcard, IP address, port or trailing dot). A name is trimmed and lower-cased, and a repeat is dropped. A proxy application may have none.
+          description: 1 to 100 lower-case DNS names (at least one dot, no wildcard, IP address, port or trailing dot). A name is trimmed, its ASCII letters are lower-cased, and a repeat is dropped. A name with any other character than letters, digits, hyphens and dots is refused, so write an international name in its xn-- form. A proxy application may have none.
           maxItems: 100
           items:
             type: string
@@ -19467,6 +19468,19 @@ components:
           type: string
           maxLength: 1024
           description: For failed, cleaned of control characters. Escape it when you show it.
+        error_code:
+          type: string
+          description: 'Why an uploaded certificate failed, when error is exactly one of the control plane''s own phrases for it: the agent refused the certificate (bad_pem, too_large, key_mismatch, leaf_mismatch, unsupported_key, write_failed, invalid_ack for an answer that is no code) or the stored key cannot be read (key_unreadable). Empty for every other error, for any other state and for the acme source. An agent can send a phrase as its error text and is then read the same way, for its own application only.'
+          enum:
+            - ''
+            - bad_pem
+            - too_large
+            - key_mismatch
+            - leaf_mismatch
+            - unsupported_key
+            - write_failed
+            - invalid_ack
+            - key_unreadable
         next_attempt_at:
           type:
             - string
@@ -19501,6 +19515,7 @@ components:
         - certificate_id
         - leaf_sha256
         - error
+        - error_code
         - next_attempt_at
         - request_id
         - received_at
@@ -19531,6 +19546,7 @@ components:
             type: string
         days_left:
           type: integer
+          description: Whole days until not_after, rounded down; 0 during the last day, negative once it expired.
         not_after:
           type: string
           format: date-time

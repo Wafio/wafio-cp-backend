@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -200,7 +201,7 @@ func TestKeyThatDoesNotOpenMarksTheAppFailed(t *testing.T) {
 				t.Fatalf("refusal audit: %v, want code %s cause %s", rows[0].MetadataJSON, certKeyUnreadable, tc.cause)
 			}
 			failed := f.store.reportsOf("failed")
-			if len(failed) != 1 || !strings.Contains(failed[0].Error, certKeyUnreadable) || failed[0].AppID != certTestApp ||
+			if len(failed) != 1 || domain.CertificateFailureCode(failed[0].Error) != certKeyUnreadable || failed[0].AppID != certTestApp ||
 				failed[0].CertificateID != certTestCert || failed[0].Source != domain.TLSSourceUploaded {
 				t.Fatalf("failed status: %+v", failed)
 			}
@@ -239,6 +240,17 @@ func TestInstallAckIsHeardFromTheSendingStreamOnly(t *testing.T) {
 	f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: id, Ok: false, Error: "bad_pem"})
 	if n := len(f.audit.of(repository.AuditAgentCertificateRefused)); n != 1 {
 		t.Fatalf("%d refusals audited, want 1", n)
+	}
+}
+
+// The agent server stores the text of a code and the API reads it back from the domain list, so
+// every code the server can store must be one that list knows.
+func TestEveryStoredCertificateFailureCodeReadsBack(t *testing.T) {
+	codes := append(slices.DeleteFunc(slices.Clone(certAckCodes), func(c string) bool { return c == certAckNotInBundle }), certAckInvalid, certKeyUnreadable)
+	for _, code := range codes {
+		if got := domain.CertificateFailureCode(domain.CertificateFailureText(code)); got != code {
+			t.Errorf("code %q is read back as %q", code, got)
+		}
 	}
 }
 
@@ -286,7 +298,7 @@ func TestInstallAckCodes(t *testing.T) {
 				}
 				return
 			}
-			if len(failed) != 1 || !strings.Contains(failed[0].Error, tc.code) || failed[0].CertificateID != certTestCert ||
+			if len(failed) != 1 || domain.CertificateFailureCode(failed[0].Error) != tc.code || failed[0].CertificateID != certTestCert ||
 				strings.Contains(failed[0].Error, "BEGIN") || strings.Contains(failed[0].Error, "/var/lib") {
 				t.Fatalf("failed status: %+v", failed)
 			}
@@ -886,7 +898,7 @@ func TestKeyThatDoesNotOpenIsRecordedByTheWorkerInOrder(t *testing.T) {
 	f.store.delivery.KeyCiphertext = "not sealed"
 	f.handleStatus(t, handleOf(true, &sentLog{}), missingStatus())
 	failed := f.store.reportsOf("failed")
-	if len(failed) != 1 || !strings.Contains(failed[0].Error, certKeyUnreadable) {
+	if len(failed) != 1 || domain.CertificateFailureCode(failed[0].Error) != certKeyUnreadable {
 		t.Fatalf("failed statuses: %+v", failed)
 	}
 	reports := f.store.seenReports()

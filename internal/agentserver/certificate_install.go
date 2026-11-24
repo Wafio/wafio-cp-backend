@@ -74,7 +74,7 @@ const (
 	certAckNotInBundle = "not_in_bundle"
 	certAckInvalid     = "invalid_ack"
 	// certKeyUnreadable is not an agent's code: the control plane could not open the stored key.
-	certKeyUnreadable = "key_unreadable"
+	certKeyUnreadable = domain.CertFailureKeyUnreadable
 )
 
 var certAckCodes = []string{"bad_pem", "too_large", "key_mismatch", "leaf_mismatch", "unsupported_key", certAckNotInBundle, "write_failed"}
@@ -375,7 +375,7 @@ func (s *Server) certificateKeyUnreadable(h *streamHandle, d repository.Certific
 	s.auditCertificate(repository.AuditAgentCertificateRefused, h, p, certKeyUnreadable, "cause", reason)
 	// Reading the same row again would fail the same way until the certificate is uploaded again.
 	h.blockCertificate(p.certificateID, generation, s.now())
-	s.failCertificate(h, p, "the stored key cannot be read ("+certKeyUnreadable+"); upload the certificate again")
+	s.failCertificate(h, p, domain.CertificateFailureText(certKeyUnreadable))
 }
 
 // failCertificate stores the state failed for the app, with a text that holds no agent-sent data.
@@ -514,6 +514,6 @@ func (s *Server) recordCertificateInstallAck(h *streamHandle, ack *agentv1.Comma
 	}
 	s.auditCertificate(repository.AuditAgentCertificateRefused, h, p, code)
 	if code != certAckNotInBundle {
-		s.failCertificate(h, p, "the agent refused the certificate ("+code+")")
+		s.failCertificate(h, p, domain.CertificateFailureText(code))
 	}
 }

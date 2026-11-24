@@ -111,7 +111,7 @@ func normalizeTLSHosts(in []string) ([]string, error) {
 	out := make([]string, 0, len(in))
 	seen := make(map[string]bool, len(in))
 	for _, h := range in {
-		h = strings.ToLower(strings.TrimSpace(h))
+		h = lowerASCII(strings.TrimSpace(h))
 		if seen[h] {
 			continue
 		}
@@ -125,6 +125,18 @@ func normalizeTLSHosts(in []string) ([]string, error) {
 		return nil, tlsErr("hosts", "at most %d hosts", TLSMaxHosts)
 	}
 	return out, nil
+}
+
+// lowerASCII lower-cases A to Z and nothing else. strings.ToLower also folds U+0130 to i and the
+// Kelvin sign to k, which would turn a name that is not ASCII into another name that is.
+func lowerASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // checkTLSHost returns why h is not a host name the agent serves, or "". The agent matches the

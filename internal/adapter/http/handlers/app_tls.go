@@ -93,6 +93,7 @@ type tlsStatusView struct {
 	CertificateID *string    `json:"certificate_id"`
 	LeafSHA256    string     `json:"leaf_sha256"`
 	Error         string     `json:"error"`
+	ErrorCode     string     `json:"error_code"`
 	NextAttemptAt *time.Time `json:"next_attempt_at"`
 	RequestID     string     `json:"request_id"`
 	ReceivedAt    time.Time  `json:"received_at"`
@@ -160,6 +161,9 @@ func statusView(s *repository.TLSStatus) *tlsStatusView {
 	}
 	if s.CertificateID != "" {
 		v.CertificateID = &s.CertificateID
+	}
+	if s.Source == domain.TLSSourceUploaded && s.State == "failed" {
+		v.ErrorCode = domain.CertificateFailureCode(s.Error)
 	}
 	return v
 }

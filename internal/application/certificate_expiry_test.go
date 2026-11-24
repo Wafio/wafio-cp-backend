@@ -511,7 +511,7 @@ func TestMailNamesWhatToDo(t *testing.T) {
 	for _, want := range []string{
 		"Project: Shop", "Application: storefront", "Hosts:\n  shop.example.com\n  www.shop.example.com\n",
 		"Expires: 2026-11-11 06:05 UTC (in 10 days)", "Upload a new certificate",
-		"https://dash.example.com/projects/11111111-1111-4111-8111-111111111111/apps/22222222-2222-4222-8222-222222222222",
+		"https://dash.example.com/projects/11111111-1111-4111-8111-111111111111/apps/22222222-2222-4222-8222-222222222222?tab=https\n",
 	} {
 		if !strings.Contains(m.body, want) {
 			t.Errorf("body lacks %q:\n%s", want, m.body)

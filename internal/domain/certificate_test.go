@@ -705,13 +705,16 @@ func TestCertificateTextIsSanitized(t *testing.T) {
 	}
 }
 
+var (
+	coversPatterns = []string{"example.com", "*.example.com", "shop.example.com", "*.shop.example.com", "*.com", "a.*.example.com", "*", "Shop.Example.COM"}
+	coversHosts    = []string{"example.com", "shop.example.com", "a.shop.example.com", "a.b.example.com", "www.example.com", "other.org", "xexample.com", ".example.com", "SHOP.example.com"}
+)
+
 // The stored names are matched without the certificate, so the match must agree with the client's.
 func TestCertificateCoversHostAgreesWithTheStandardLibrary(t *testing.T) {
-	patterns := []string{"example.com", "*.example.com", "shop.example.com", "*.shop.example.com", "*.com", "a.*.example.com", "*", "Shop.Example.COM"}
-	hosts := []string{"example.com", "shop.example.com", "a.shop.example.com", "a.b.example.com", "www.example.com", "other.org", "xexample.com", ".example.com", "SHOP.example.com"}
-	for _, p := range patterns {
+	for _, p := range coversPatterns {
 		leaf := certSpec{cn: "x", dns: []string{p}}.make(t)
-		for _, h := range hosts {
+		for _, h := range coversHosts {
 			want := leaf.cert.VerifyHostname(h) == nil
 			if got := CertificateCoversHost([]string{p}, h); got != want {
 				t.Errorf("name %q host %q: CertificateCoversHost = %v, VerifyHostname = %v", p, h, got, want)
@@ -723,6 +726,25 @@ func TestCertificateCoversHostAgreesWithTheStandardLibrary(t *testing.T) {
 	}
 	if !CertificateCoversHost([]string{"a.example.com", "*.example.org"}, "x.example.org") {
 		t.Error("a later name was not tried")
+	}
+}
+
+// strings.ToLower folds U+0130 to i and the Kelvin sign to k; a client folds ASCII only, so a host
+// or a name that is not ASCII matches nothing but itself.
+func TestCertificateCoversHostFoldsASCIIOnly(t *testing.T) {
+	for _, tc := range []struct{ ascii, other string }{
+		{"istanbul.example.com", "\u0130stanbul.example.com"},
+		{"kyoto.example.com", "\u212Ayoto.example.com"},
+	} {
+		if CertificateCoversHost([]string{tc.ascii}, tc.other) || CertificateCoversHost([]string{tc.other}, tc.ascii) {
+			t.Errorf("%q and %q are taken for one name", tc.ascii, tc.other)
+		}
+		if !CertificateCoversHost([]string{tc.other}, tc.other) {
+			t.Errorf("%q does not cover itself", tc.other)
+		}
+	}
+	if !CertificateCoversHost([]string{"Shop.Example.COM"}, "SHOP.example.com") {
+		t.Error("ASCII letters are no longer folded")
 	}
 }
 
