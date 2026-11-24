@@ -1042,22 +1042,26 @@ func (x *CertificateStatus) GetUnixTime() int64 {
 }
 
 // EdgeStatus is sent by a WAF agent that sends one of the "edge_*" Hello
-// features. It goes to each app in the bundle that has an edge part on, and
-// also to every app when the cache directory is unusable, whether that app's
-// cache is on or off, so the dashboard can warn before an admin turns the
-// cache on. It is sent once after each applied bundle, and again from time to
-// time with fresh counters. A control plane that does not handle it, and a
-// reader built before this message, skip it as an unknown kind. It never
-// carries file content or a visitor's request. The server treats every field
-// as untrusted input; docs/agent-protocol.md lists its checks.
+// features. After each applied bundle and when the stream comes up it goes to
+// every app in the bundle: an app with no edge part on gets one with no
+// features and no counters, so the dashboard learns which generation the
+// agent runs after a part is turned off. The refresh from time to time, with
+// fresh counters, covers only the apps that have an edge part on. When the
+// cache directory is unusable, the status of every app also says so, whether
+// that app's cache is on or off, so the dashboard can warn before an admin
+// turns the cache on. A control plane that does not handle it, and a reader
+// built before this message, skip it as an unknown kind. It never carries
+// file content or a visitor's request. The server treats every field as
+// untrusted input; docs/agent-protocol.md lists its checks.
 type EdgeStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	// The generation of the bundle these states answer.
 	Generation int64 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
 	// One entry for each part of the app's edge settings that the bundle turns
-	// on, plus one "cache" entry (refused, cache_dir_unusable, running_previous
-	// false) when the cache directory is unusable, even if the cache is off.
+	// on (none for an app with no part on), plus one "cache" entry (refused,
+	// cache_dir_unusable, running_previous false) when the cache directory is
+	// unusable, even if the cache is off.
 	Features []*EdgeFeatureState `protobuf:"bytes,3,rep,name=features,proto3" json:"features,omitempty"`
 	// Unset when the app has no cache part.
 	Cache *EdgeCacheCounters `protobuf:"bytes,4,opt,name=cache,proto3" json:"cache,omitempty"`
@@ -1952,10 +1956,15 @@ type CachePurge struct {
 	Scope string `protobuf:"bytes,3,opt,name=scope,proto3" json:"scope,omitempty"`
 	// For "url" and "prefix": a path that starts with "/" (every scheme and
 	// host of the app) or an absolute http:// or https:// URL (that host only:
-	// lower case, default port removed). "url" is compared byte for byte with
-	// the stored request target, query included; "prefix" compares the path
-	// only. Another spelling of the same target (/p?, /p%2F) is a separate
-	// copy that only "prefix" or "app" removes. Empty for "app".
+	// lower case, default port removed). The control plane sends everything
+	// after the host as the admin typed it, so the agent reads it the way it
+	// reads the request target of a request before it makes the key of a
+	// stored copy: the path is decoded, "." and ".." segments are resolved and
+	// it is escaped again with upper-case hex (/a%2db and /a%2Db name one
+	// copy), and the query is kept byte for byte, with " < > written %22 %3C
+	// %3E as in the key (?a=1&b=2 and ?b=2&a=1 are two copies). "url" is then
+	// compared with the whole stored target, query included; "prefix" compares
+	// the path only. Empty for "app".
 	Url           string `protobuf:"bytes,4,opt,name=url,proto3" json:"url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

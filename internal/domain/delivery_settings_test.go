@@ -302,6 +302,11 @@ func TestNormalizePurge(t *testing.T) {
 		{"a path", "url", "/products/42", "/products/42", ""},
 		{"a path with a query, byte for byte", "url", "/p?b=2&a=1", "/p?b=2&a=1", ""},
 		{"an encoded path stays encoded", "url", "/a%2Fb/%e2%82%ac", "/a%2Fb/%e2%82%ac", ""},
+		// The agent reads the address like a request target before it compares, so the control plane
+		// sends the escape in lower case, the dot segment and the repeated slash as typed.
+		{"a lower-case escape stays as typed", "url", "/a%2db", "/a%2db", ""},
+		{"a dot segment and a repeated slash stay as typed", "url", "/a/./b//c", "/a/./b//c", ""},
+		{"a lower-case escape in a prefix stays as typed", "prefix", "https://Shop.example.com/a%2d", "https://shop.example.com/a%2d", ""},
 		{"an address", "url", "https://shop.example.com/products/42", "https://shop.example.com/products/42", ""},
 		{"scheme and host go to lower case, the path keeps its case", "url", "HTTPS://Shop.Example.COM/Products/42?Q=1", "https://shop.example.com/Products/42?Q=1", ""},
 		{"the default port is removed", "url", "http://shop.example.com:80/x", "http://shop.example.com/x", ""},

@@ -71,6 +71,11 @@ type bundleAppLite struct {
 	Compression json.RawMessage `json:"compression,omitempty"`
 	StaticFiles json.RawMessage `json:"static_files,omitempty"`
 	Cache       json.RawMessage `json:"cache,omitempty"`
+	// SessionCookies are the cookie names, besides the agent's own, that mark a visitor as signed in.
+	// They are the list saved with the cache and are sent while compression or the cache is on, the
+	// cache being off included, because compression asks the same question (BREACH). An agent that
+	// does not know the key ignores it.
+	SessionCookies []string `json:"session_cookies,omitempty"`
 }
 
 // LoadBundle returns the bundle for a specific agent. Only apps assigned to
@@ -181,6 +186,7 @@ func (l *projectBundleLoader) build(ctx context.Context, projectID, agentID stri
 		if repository.DeliveryEnabled(a.Cache) {
 			app.Cache = json.RawMessage(a.Cache)
 		}
+		app.SessionCookies = repository.BundleSessionCookies(a.Compression, a.Cache)
 		if guiRules, err := l.repo.WafCustomRules.ListGUIRulesRaw(ctx, a.AppID); err == nil && len(guiRules) > 0 {
 			app.CustomGUIRules = guiRules
 		}

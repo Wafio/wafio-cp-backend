@@ -21,8 +21,9 @@ const (
 // NormalizePurge checks the scope and the address of a removal and returns the address as the agent
 // compares it: for scope app it is "", otherwise a path that starts with "/" (every scheme and host of
 // the application) or an absolute URL whose scheme and host are lower case and whose default port is
-// removed (that host only). Everything after the host is kept byte for byte, since the agent compares
-// it with the request target it stored. It returns a *DeliveryFieldError for scope or url.
+// removed (that host only). Everything after the host is kept as typed (a lower-case escape, a "."
+// segment): the agent reads it the way it reads a request target before it makes the key, so the
+// comparison with a stored copy is its own. It returns a *DeliveryFieldError for scope or url.
 func NormalizePurge(scope, url string) (string, error) {
 	switch scope {
 	case PurgeScopeApp:

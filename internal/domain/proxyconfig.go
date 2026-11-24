@@ -50,8 +50,10 @@ type ProxyConfig struct {
 	RejectInvalidPathEncoding bool `json:"reject_invalid_path_encoding"`
 
 	// StripPathPrefix is the path the application lives under, such as /shop: the upstream sees
-	// /cart for /shop/cart, and other paths unchanged. "" removes nothing. Inspection, rules, events
-	// and the cache keep the full path. CheckStripPathPrefix lists what is valid.
+	// /cart for /shop/cart. A path that is not the prefix and does not continue it with / (/shopping
+	// is not under /shop) is answered 404 by the agent and never reaches the application, a
+	// WebSocket handshake included. "" removes nothing. Inspection, rules, events and the cache keep
+	// the full path. CheckStripPathPrefix lists what is valid.
 	StripPathPrefix string `json:"strip_path_prefix,omitempty"`
 }
 

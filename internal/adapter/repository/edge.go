@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -214,6 +215,23 @@ func partOn(raw []byte) bool {
 // DeliveryEnabled says whether the stored object of a bundle row has its switch on.
 func DeliveryEnabled(raw []byte) bool { return partOn(raw) }
 
+// BundleSessionCookies returns the cookie names the bundle of an application carries as
+// session_cookies: the list saved with the cache, whether the cache is on or off, while compression or
+// the cache is on. Both ask whether a visitor is signed in (compression leaves HTML and JSON plain for
+// one), so the names must reach the agent when only compression is on. nil when there is nothing to send.
+func BundleSessionCookies(compression, cache []byte) []string {
+	if !partOn(compression) && !partOn(cache) {
+		return nil
+	}
+	var o struct {
+		SessionCookies []string `json:"session_cookies"`
+	}
+	if json.Unmarshal(cache, &o) != nil || len(o.SessionCookies) == 0 {
+		return nil
+	}
+	return o.SessionCookies
+}
+
 func decodeDelivery(comp, static, cache []byte) (AppDelivery, error) {
 	var d AppDelivery
 	for _, f := range []struct {
@@ -326,6 +344,10 @@ func (r *EdgeRepo) UpdateDelivery(ctx context.Context, projectID, appID string, 
 	}
 	if out.AgentID != "" {
 		changed := string(before) != string(raw) && (partOn(before) || partOn(raw))
+		if part == DeliveryCache && !changed {
+			// The names of a cache that is off still reach the agent while compression is on.
+			changed = !slices.Equal(BundleSessionCookies(comp, before), BundleSessionCookies(comp, raw))
+		}
 		if changed {
 			if out.Generation, err = bumpBundleGen(ctx, tx, appID); err != nil {
 				return DeliveryUpdate{}, err
