@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -278,6 +279,61 @@ func TestDBAppDeliverySaves(t *testing.T) {
 	})
 }
 
+// The names of the session cookies are saved with the cache, and compression needs them to tell a
+// signed-in visitor, so the bundle carries them as session_cookies while compression or the cache is on,
+// the cache being off included. A change of the names that nothing in the bundle shows is no new bundle.
+func TestDBSessionCookiesReachTheAgentWithTheCacheOff(t *testing.T) {
+	tf := newTLSFixture(t)
+	put := func(path string, body map[string]any) {
+		t.Helper()
+		wantStatus(t, path, tf.do(t, http.MethodPut, tf.deliveryURL(path), "owner", body), fiber.StatusOK, "")
+	}
+	cache := func(on bool, names ...string) map[string]any {
+		return map[string]any{"enabled": on, "session_cookies": names}
+	}
+	names := []any{"shop_sid", "jwt_login"}
+
+	// Both parts off: the names are stored and not sent, and the bundle stays as it was.
+	gen := tf.generation(t, tf.agentID)
+	put("/cache", cache(false, "shop_sid", "jwt_login"))
+	if tf.bundleApp(t)["session_cookies"] != nil || tf.generation(t, tf.agentID) != gen {
+		t.Fatal("names were sent, or the bundle changed, with compression and the cache both off")
+	}
+
+	// Compression on, cache off: the names are in the bundle and the cache object is not.
+	put("/compression", map[string]any{"enabled": true})
+	app := tf.bundleApp(t)
+	if !reflect.DeepEqual(app["session_cookies"], names) || app["cache"] != nil {
+		t.Fatalf("compression on: session_cookies %v, cache %v", app["session_cookies"], app["cache"])
+	}
+
+	// New names while the cache is off reach the agent; the same names again do not.
+	gen = tf.generation(t, tf.agentID)
+	put("/cache", cache(false, "shop_sid"))
+	if tf.generation(t, tf.agentID) <= gen || !reflect.DeepEqual(tf.bundleApp(t)["session_cookies"], []any{"shop_sid"}) {
+		t.Fatalf("new names with the cache off: generation %d was %d, bundle %v", tf.generation(t, tf.agentID), gen, tf.bundleApp(t)["session_cookies"])
+	}
+	gen = tf.generation(t, tf.agentID)
+	put("/cache", cache(false, "shop_sid"))
+	if tf.generation(t, tf.agentID) != gen {
+		t.Error("the same names saved again changed the bundle")
+	}
+
+	// Cache on, compression off: both are in the bundle.
+	put("/compression", map[string]any{"enabled": false})
+	put("/cache", cache(true, "shop_sid", "jwt_login"))
+	app = tf.bundleApp(t)
+	if !reflect.DeepEqual(app["session_cookies"], names) || app["cache"] == nil {
+		t.Fatalf("cache on: session_cookies %v, cache %v", app["session_cookies"], app["cache"])
+	}
+
+	// Both off again: the names leave the bundle with the last part.
+	put("/cache", cache(false, "shop_sid", "jwt_login"))
+	if tf.bundleApp(t)["session_cookies"] != nil {
+		t.Errorf("names stay in the bundle with both parts off: %v", tf.bundleApp(t)["session_cookies"])
+	}
+}
+
 // A part that the agent reported it lacks cannot be switched on or changed while on; defaults, turning
 // it off and the stored value again always pass, and so does an agent that never said.
 func TestDBAppDeliveryOldAgent(t *testing.T) {
@@ -446,7 +502,7 @@ func (tf *tlsFixture) purgeURL() string {
 
 func TestDBCachePurgeRoute(t *testing.T) {
 	tf := newTLSFixture(t)
-	body := map[string]any{"scope": "url", "url": "HTTPS://Shop.Example.com:443/products/42?a=1"}
+	body := map[string]any{"scope": "url", "url": "HTTPS://Shop.Example.com:443/products/./a%2d42?a=%e2"}
 
 	r := tf.do(t, http.MethodPost, tf.purgeURL(), "owner", body)
 	wantStatus(t, "the cache is off", r, fiber.StatusConflict, "CACHE_OFF")
@@ -455,7 +511,7 @@ func TestDBCachePurgeRoute(t *testing.T) {
 	wantStatus(t, "a viewer", tf.do(t, http.MethodPost, tf.purgeURL(), "viewer", body), fiber.StatusForbidden, "")
 	r = tf.do(t, http.MethodPost, tf.purgeURL(), "memberA", body)
 	wantStatus(t, "a member", r, fiber.StatusAccepted, "")
-	if r.body["scope"] != "url" || r.body["url"] != "https://shop.example.com/products/42?a=1" || r.body["state"] != "pending" ||
+	if r.body["scope"] != "url" || r.body["url"] != "https://shop.example.com/products/./a%2d42?a=%e2" || r.body["state"] != "pending" ||
 		r.body["error"] != "" || r.body["agent"] != "" || r.body["finished_at"] != nil || r.body["by"] == "" {
 		t.Errorf("answer: %s", r.raw)
 	}
