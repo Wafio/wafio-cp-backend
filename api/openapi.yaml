@@ -19332,7 +19332,7 @@ components:
             - gateway
         hosts:
           type: array
-          description: 1 to 100 lower-case DNS names (at least one dot, no wildcard, IP address, port or trailing dot). A name is trimmed and lower-cased, and a repeat is dropped. A proxy application may have none.
+          description: 1 to 100 lower-case DNS names (at least one dot, no wildcard, IP address, port or trailing dot). A name is trimmed, its ASCII letters are lower-cased, and a repeat is dropped. A name with any other character than letters, digits, hyphens and dots is refused, so write an international name in its xn-- form. A proxy application may have none.
           maxItems: 100
           items:
             type: string

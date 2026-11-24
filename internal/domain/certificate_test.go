@@ -729,6 +729,25 @@ func TestCertificateCoversHostAgreesWithTheStandardLibrary(t *testing.T) {
 	}
 }
 
+// strings.ToLower folds U+0130 to i and the Kelvin sign to k; a client folds ASCII only, so a host
+// or a name that is not ASCII matches nothing but itself.
+func TestCertificateCoversHostFoldsASCIIOnly(t *testing.T) {
+	for _, tc := range []struct{ ascii, other string }{
+		{"istanbul.example.com", "\u0130stanbul.example.com"},
+		{"kyoto.example.com", "\u212Ayoto.example.com"},
+	} {
+		if CertificateCoversHost([]string{tc.ascii}, tc.other) || CertificateCoversHost([]string{tc.other}, tc.ascii) {
+			t.Errorf("%q and %q are taken for one name", tc.ascii, tc.other)
+		}
+		if !CertificateCoversHost([]string{tc.other}, tc.other) {
+			t.Errorf("%q does not cover itself", tc.other)
+		}
+	}
+	if !CertificateCoversHost([]string{"Shop.Example.COM"}, "SHOP.example.com") {
+		t.Error("ASCII letters are no longer folded")
+	}
+}
+
 func TestCertificateKeyAAD(t *testing.T) {
 	if got := CertificateKeyAAD("p-1", "c-1"); got != "wafio-app-certificate:p-1:c-1" {
 		t.Errorf("aad = %q", got)

@@ -7,10 +7,11 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/testutil/jsonfixture"
 )
 
-// Hosts that Go and JavaScript fold or trim differently: U+0130 lower-cases to i in Go, U+FEFF is
-// no space to Go and U+0085 is one.
+// Hosts that Go and JavaScript fold or trim differently: strings.ToLower turns U+0130 into i and the
+// Kelvin sign into k, U+FEFF is no space to Go and U+0085 is one.
 var tlsOddHosts = []struct{ name, host string }{
 	{"dotted capital I (U+0130)", "\u0130stanbul.example.com"},
+	{"Kelvin sign (U+212A)", "\u212Ayoto.example.com"},
 	{"byte order mark before the name (U+FEFF)", "\ufeffshop.example.com"},
 	{"next line around the name (U+0085)", "\u0085shop.example.com\u0085"},
 }
@@ -47,6 +48,18 @@ func TestFrontendTLSChecksFixture(t *testing.T) {
 	for _, tc := range tlsRefusedCases {
 		add(tc.name, tc.in)
 	}
+	for _, h := range tlsDigitsLastLabelRefused {
+		add("last label of digits only, refused: "+h, TLSSettings{Mode: "proxy", Hosts: tlsHosts(h)})
+	}
+	for _, h := range tlsDigitsLastLabelAccepted {
+		add("last label with a letter, accepted: "+h, TLSSettings{Mode: "proxy", Hosts: tlsHosts(h)})
+	}
+	for _, l := range tlsOverlappingListeners {
+		add("listeners overlap, refused: "+l.listen+" and "+l.redirect, TLSSettings{Mode: "proxy", Listen: l.listen, RedirectListen: l.redirect})
+	}
+	for _, l := range tlsSeparateListeners {
+		add("listeners apart, accepted: "+l.listen+" and "+l.redirect, TLSSettings{Mode: "proxy", Listen: l.listen, RedirectListen: l.redirect})
+	}
 	for _, odd := range tlsOddHosts {
 		add(odd.name, tlsGateway(func(s *TLSSettings) { s.Hosts = tlsHosts(odd.host) }))
 	}
@@ -71,7 +84,7 @@ func TestFrontendTLSChecksFixture(t *testing.T) {
 		covers = append(covers, c)
 	}
 	for _, odd := range tlsOddHosts {
-		names := []string{"istanbul.example.com", "shop.example.com"}
+		names := []string{"istanbul.example.com", "kyoto.example.com", "shop.example.com"}
 		covers = append(covers, coversCase{names, odd.host, CertificateCoversHost(names, odd.host)})
 	}
 

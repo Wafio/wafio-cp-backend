@@ -983,6 +983,301 @@
       "message": "must be ip:port or [ipv6]:port with a port from 1 to 65535"
     },
     {
+      "name": "last label of digits only, refused: 10.1.1",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "10.1.1"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "field": "hosts",
+      "message": "\"10.1.1\" must not end with a label of digits only"
+    },
+    {
+      "name": "last label of digits only, refused: shop.123",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "shop.123"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "field": "hosts",
+      "message": "\"shop.123\" must not end with a label of digits only"
+    },
+    {
+      "name": "last label of digits only, refused: a.example.123",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "a.example.123"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "field": "hosts",
+      "message": "\"a.example.123\" must not end with a label of digits only"
+    },
+    {
+      "name": "last label of digits only, refused: a.b.0",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "a.b.0"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "field": "hosts",
+      "message": "\"a.b.0\" must not end with a label of digits only"
+    },
+    {
+      "name": "last label of digits only, refused: 1.2.3.04",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "1.2.3.04"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "field": "hosts",
+      "message": "\"1.2.3.04\" must not end with a label of digits only"
+    },
+    {
+      "name": "last label with a letter, accepted: 123.example.com",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "123.example.com"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [
+          "123.example.com"
+        ],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "",
+        "source": ""
+      }
+    },
+    {
+      "name": "last label with a letter, accepted: a.b1",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "a.b1"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [
+          "a.b1"
+        ],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "",
+        "source": ""
+      }
+    },
+    {
+      "name": "last label with a letter, accepted: shop.c0m",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "shop.c0m"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [
+          "shop.c0m"
+        ],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "",
+        "source": ""
+      }
+    },
+    {
+      "name": "last label with a letter, accepted: x.1a",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "x.1a"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [
+          "x.1a"
+        ],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "",
+        "source": ""
+      }
+    },
+    {
+      "name": "last label with a letter, accepted: 1a.2b",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "1a.2b"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [
+          "1a.2b"
+        ],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "",
+        "source": ""
+      }
+    },
+    {
+      "name": "last label with a letter, accepted: a-1.example.org",
+      "in": {
+        "mode": "proxy",
+        "hosts": [
+          "a-1.example.org"
+        ],
+        "listen": "",
+        "redirect_listen": "",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [
+          "a-1.example.org"
+        ],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "",
+        "source": ""
+      }
+    },
+    {
+      "name": "listeners overlap, refused: 0.0.0.0:443 and 10.0.0.1:443",
+      "in": {
+        "mode": "proxy",
+        "hosts": null,
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "10.0.0.1:443",
+        "source": ""
+      },
+      "field": "redirect_listen",
+      "message": "must not use the port of listen on an address that overlaps it"
+    },
+    {
+      "name": "listeners overlap, refused: 10.0.0.1:443 and 0.0.0.0:443",
+      "in": {
+        "mode": "proxy",
+        "hosts": null,
+        "listen": "10.0.0.1:443",
+        "redirect_listen": "0.0.0.0:443",
+        "source": ""
+      },
+      "field": "redirect_listen",
+      "message": "must not use the port of listen on an address that overlaps it"
+    },
+    {
+      "name": "listeners overlap, refused: [::]:443 and 10.0.0.1:443",
+      "in": {
+        "mode": "proxy",
+        "hosts": null,
+        "listen": "[::]:443",
+        "redirect_listen": "10.0.0.1:443",
+        "source": ""
+      },
+      "field": "redirect_listen",
+      "message": "must not use the port of listen on an address that overlaps it"
+    },
+    {
+      "name": "listeners overlap, refused: [::]:443 and 0.0.0.0:443",
+      "in": {
+        "mode": "proxy",
+        "hosts": null,
+        "listen": "[::]:443",
+        "redirect_listen": "0.0.0.0:443",
+        "source": ""
+      },
+      "field": "redirect_listen",
+      "message": "must not use the port of listen on an address that overlaps it"
+    },
+    {
+      "name": "listeners apart, accepted: 0.0.0.0:443 and 0.0.0.0:80",
+      "in": {
+        "mode": "proxy",
+        "hosts": null,
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "0.0.0.0:80",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "0.0.0.0:80",
+        "source": ""
+      }
+    },
+    {
+      "name": "listeners apart, accepted: 10.0.0.1:443 and 10.0.0.2:443",
+      "in": {
+        "mode": "proxy",
+        "hosts": null,
+        "listen": "10.0.0.1:443",
+        "redirect_listen": "10.0.0.2:443",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [],
+        "listen": "10.0.0.1:443",
+        "redirect_listen": "10.0.0.2:443",
+        "source": ""
+      }
+    },
+    {
+      "name": "listeners apart, accepted: 0.0.0.0:443 and [2001:db8::1]:443",
+      "in": {
+        "mode": "proxy",
+        "hosts": null,
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "[2001:db8::1]:443",
+        "source": ""
+      },
+      "result": {
+        "mode": "proxy",
+        "hosts": [],
+        "listen": "0.0.0.0:443",
+        "redirect_listen": "[2001:db8::1]:443",
+        "source": ""
+      }
+    },
+    {
       "name": "dotted capital I (U+0130)",
       "in": {
         "mode": "gateway",
@@ -993,15 +1288,22 @@
         "redirect_listen": "",
         "source": "uploaded"
       },
-      "result": {
+      "field": "hosts",
+      "message": "\"İstanbul.example.com\" must use only letters, digits, hyphens and dots (write an international name in its xn-- form)"
+    },
+    {
+      "name": "Kelvin sign (U+212A)",
+      "in": {
         "mode": "gateway",
         "hosts": [
-          "istanbul.example.com"
+          "Kyoto.example.com"
         ],
-        "listen": "0.0.0.0:443",
+        "listen": "",
         "redirect_listen": "",
         "source": "uploaded"
-      }
+      },
+      "field": "hosts",
+      "message": "\"Kyoto.example.com\" must use only letters, digits, hyphens and dots (write an international name in its xn-- form)"
     },
     {
       "name": "byte order mark before the name (U+FEFF)",
@@ -1568,14 +1870,25 @@
     {
       "names": [
         "istanbul.example.com",
+        "kyoto.example.com",
         "shop.example.com"
       ],
       "host": "İstanbul.example.com",
-      "covered": true
+      "covered": false
     },
     {
       "names": [
         "istanbul.example.com",
+        "kyoto.example.com",
+        "shop.example.com"
+      ],
+      "host": "Kyoto.example.com",
+      "covered": false
+    },
+    {
+      "names": [
+        "istanbul.example.com",
+        "kyoto.example.com",
         "shop.example.com"
       ],
       "host": "﻿shop.example.com",
@@ -1584,6 +1897,7 @@
     {
       "names": [
         "istanbul.example.com",
+        "kyoto.example.com",
         "shop.example.com"
       ],
       "host": "shop.example.com",

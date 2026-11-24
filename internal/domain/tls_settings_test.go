@@ -342,15 +342,21 @@ func TestCheckTLSPlacementOfAPlainListener(t *testing.T) {
 	}
 }
 
+// A browser reads a name that ends in digits as an address.
+var (
+	tlsDigitsLastLabelRefused  = []string{"10.1.1", "shop.123", "a.example.123", "a.b.0", "1.2.3.04"}
+	tlsDigitsLastLabelAccepted = []string{"123.example.com", "a.b1", "shop.c0m", "x.1a", "1a.2b", "a-1.example.org"}
+)
+
 func TestTLSHostWithADigitsOnlyLastLabelIsRefused(t *testing.T) {
-	for _, h := range []string{"10.1.1", "shop.123", "a.example.123", "a.b.0", "1.2.3.04"} {
+	for _, h := range tlsDigitsLastLabelRefused {
 		s := TLSSettings{Mode: "proxy", Hosts: []string{h}}
 		var fe *TLSFieldError
 		if err := s.Normalize(); !errors.As(err, &fe) || fe.Field != "hosts" {
 			t.Errorf("%q: %v", h, err)
 		}
 	}
-	for _, h := range []string{"123.example.com", "a.b1", "shop.c0m", "x.1a", "1a.2b", "a-1.example.org"} {
+	for _, h := range tlsDigitsLastLabelAccepted {
 		s := TLSSettings{Mode: "proxy", Hosts: []string{h}}
 		if err := s.Normalize(); err != nil {
 			t.Errorf("%q: %v", h, err)
@@ -358,24 +364,43 @@ func TestTLSHostWithADigitsOnlyLastLabelIsRefused(t *testing.T) {
 	}
 }
 
-func TestNormalizeRefusesOverlappingHTTPSAndRedirectListeners(t *testing.T) {
-	for _, tt := range []struct{ listen, redirect string }{
+// strings.ToLower folds U+0130 to i and the Kelvin sign to k, so a name that is not ASCII would be
+// stored as another name that is.
+func TestTLSHostIsLowerCasedInASCIIOnly(t *testing.T) {
+	for _, h := range []string{"\u0130stanbul.example.com", "\u212Ayoto.example.com"} {
+		s := TLSSettings{Mode: "proxy", Hosts: []string{h}}
+		var fe *TLSFieldError
+		if err := s.Normalize(); !errors.As(err, &fe) || fe.Field != "hosts" {
+			t.Errorf("%q: %v, hosts as stored: %q", h, err, s.Hosts)
+		}
+	}
+}
+
+type tlsListenerPair struct{ listen, redirect string }
+
+var (
+	tlsOverlappingListeners = []tlsListenerPair{
 		{"0.0.0.0:443", "10.0.0.1:443"},
 		{"10.0.0.1:443", "0.0.0.0:443"},
 		{"[::]:443", "10.0.0.1:443"},
 		{"[::]:443", "0.0.0.0:443"},
-	} {
+	}
+	tlsSeparateListeners = []tlsListenerPair{
+		{"0.0.0.0:443", "0.0.0.0:80"},
+		{"10.0.0.1:443", "10.0.0.2:443"},
+		{"0.0.0.0:443", "[2001:db8::1]:443"},
+	}
+)
+
+func TestNormalizeRefusesOverlappingHTTPSAndRedirectListeners(t *testing.T) {
+	for _, tt := range tlsOverlappingListeners {
 		s := TLSSettings{Mode: "proxy", Listen: tt.listen, RedirectListen: tt.redirect}
 		var fe *TLSFieldError
 		if err := s.Normalize(); !errors.As(err, &fe) || fe.Field != "redirect_listen" {
 			t.Errorf("%s and %s: %v", tt.listen, tt.redirect, err)
 		}
 	}
-	for _, tt := range []struct{ listen, redirect string }{
-		{"0.0.0.0:443", "0.0.0.0:80"},
-		{"10.0.0.1:443", "10.0.0.2:443"},
-		{"0.0.0.0:443", "[2001:db8::1]:443"},
-	} {
+	for _, tt := range tlsSeparateListeners {
 		s := TLSSettings{Mode: "proxy", Listen: tt.listen, RedirectListen: tt.redirect}
 		if err := s.Normalize(); err != nil {
 			t.Errorf("%s and %s: %v", tt.listen, tt.redirect, err)

@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -239,6 +240,17 @@ func TestInstallAckIsHeardFromTheSendingStreamOnly(t *testing.T) {
 	f.s.recordCertificateInstallAck(h, &agentv1.CommandAck{CommandId: id, Ok: false, Error: "bad_pem"})
 	if n := len(f.audit.of(repository.AuditAgentCertificateRefused)); n != 1 {
 		t.Fatalf("%d refusals audited, want 1", n)
+	}
+}
+
+// The agent server stores the text of a code and the API reads it back from the domain list, so
+// every code the server can store must be one that list knows.
+func TestEveryStoredCertificateFailureCodeReadsBack(t *testing.T) {
+	codes := append(slices.DeleteFunc(slices.Clone(certAckCodes), func(c string) bool { return c == certAckNotInBundle }), certAckInvalid, certKeyUnreadable)
+	for _, code := range codes {
+		if got := domain.CertificateFailureCode(domain.CertificateFailureText(code)); got != code {
+			t.Errorf("code %q is read back as %q", code, got)
+		}
 	}
 }
 
