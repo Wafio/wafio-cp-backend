@@ -1,7 +1,8 @@
 // Package jsonfixture compares a Go value with a JSON file kept in this
 // repository. The files under test/frontend-fixtures are copied into the
-// dashboard's tests (wafio-cp-frontend, tests/fixtures/backend), so a change
-// to the values here has to reach that copy.
+// tests of the repositories that read them (the dashboard's are in
+// wafio-cp-frontend, tests/fixtures/backend), so a change to the values here
+// has to reach those copies.
 package jsonfixture
 
 import (
@@ -33,6 +34,6 @@ func Check(t *testing.T, path string, v any) {
 		t.Fatalf("%v: create it with %s=1", err, UpdateEnv)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("%s no longer matches the Go values: rewrite it with %s=1 and copy it to wafio-cp-frontend tests/fixtures/backend/", path, UpdateEnv)
+		t.Fatalf("%s no longer matches the Go values: rewrite it with %s=1 and copy it to every repository that keeps a copy (wafio-cp-frontend tests/fixtures/backend/ for the dashboard)", path, UpdateEnv)
 	}
 }
