@@ -192,6 +192,13 @@ func (h *AppsHandler) Update(c *fiber.Ctx) error {
 		if err != nil {
 			return invalidInput(c, "INVALID_PROXY_CONFIG", err)
 		}
+		if err := requireRedirectsForPrefix(c.UserContext(), h.Repo, app.ProjectID, app.ID, app.ProxyConfig, body.ProxyConfig); err != nil {
+			if handled, answered := edgeRefused(c, err); handled {
+				return answered
+			}
+			apiErr := ResolveDBError(err, "app")
+			return c.Status(apiErr.HTTPStatus).JSON(fiber.Map{"error": apiErr.Message, "code": apiErr.Code})
+		}
 	}
 	patch := repository.AppPatch{ListenPort: body.ListenPort, ProxyConfig: body.ProxyConfig}
 	if body.Name != "" {

@@ -65,6 +65,12 @@ type bundleAppLite struct {
 	// terminates TLS for the hosts. It names an uploaded certificate by id and leaf and never carries
 	// key material, since the agent keeps the bundle in plain text.
 	TLS *repository.BundleTLS `json:"tls,omitempty"`
+	// Compression, StaticFiles and Cache are the stored delivery objects, present only while their
+	// enabled is true (migration 000127). An agent that does not know a key ignores it. The main host
+	// name is in tls and the path prefix in proxy_config.
+	Compression json.RawMessage `json:"compression,omitempty"`
+	StaticFiles json.RawMessage `json:"static_files,omitempty"`
+	Cache       json.RawMessage `json:"cache,omitempty"`
 }
 
 // LoadBundle returns the bundle for a specific agent. Only apps assigned to
@@ -166,6 +172,15 @@ func (l *projectBundleLoader) build(ctx context.Context, projectID, agentID stri
 			app.Maintenance = json.RawMessage(a.Maintenance)
 		}
 		app.TLS = a.TLS
+		if repository.DeliveryEnabled(a.Compression) {
+			app.Compression = json.RawMessage(a.Compression)
+		}
+		if repository.DeliveryEnabled(a.StaticFiles) {
+			app.StaticFiles = json.RawMessage(a.StaticFiles)
+		}
+		if repository.DeliveryEnabled(a.Cache) {
+			app.Cache = json.RawMessage(a.Cache)
+		}
 		if guiRules, err := l.repo.WafCustomRules.ListGUIRulesRaw(ctx, a.AppID); err == nil && len(guiRules) > 0 {
 			app.CustomGUIRules = guiRules
 		}

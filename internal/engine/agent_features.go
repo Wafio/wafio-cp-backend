@@ -58,3 +58,34 @@ func AgentTLSCertificates(features []string) *bool {
 	can := slices.Contains(features, FeatureTLSCertificates)
 	return &can
 }
+
+// The WAF agent names each part of the edge settings of an app that it applies from the bundle and
+// reports in EdgeStatus: the main host redirect and the path prefix, compression, files from a
+// folder, and the response cache. A build that has the cache sends FeatureEdgeCache whether or not
+// its cache directory is usable (EdgeStatus says so), so a missing name means an older agent.
+const (
+	FeatureEdgeRedirects   = "edge_redirects"
+	FeatureEdgeCompression = "edge_compression"
+	FeatureEdgeStaticFiles = "edge_static_files"
+	FeatureEdgeCache       = "edge_cache"
+)
+
+// EdgeFeatures says which parts of the edge settings a WAF agent reported in Hello.
+type EdgeFeatures struct {
+	Redirects, Compression, StaticFiles, Cache bool
+}
+
+// AgentEdgeFeatures reads the edge features of an agent that said Hello. As for TLS, an agent that
+// sent a list without a name is older than that part, so the answer is false; only an agent that
+// never connected stays unknown, and that is the stored NULL.
+func AgentEdgeFeatures(features []string) EdgeFeatures {
+	return EdgeFeatures{
+		Redirects:   slices.Contains(features, FeatureEdgeRedirects),
+		Compression: slices.Contains(features, FeatureEdgeCompression),
+		StaticFiles: slices.Contains(features, FeatureEdgeStaticFiles),
+		Cache:       slices.Contains(features, FeatureEdgeCache),
+	}
+}
+
+// Any says whether the agent sends EdgeStatus: it has at least one edge feature.
+func (e EdgeFeatures) Any() bool { return e.Redirects || e.Compression || e.StaticFiles || e.Cache }

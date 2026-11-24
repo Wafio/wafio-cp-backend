@@ -122,6 +122,12 @@ type Server struct {
 	certTimeout time.Duration
 	afterWipe   func(key []byte)
 
+	// edge replaces the edge repository (the reports, features and removals of the cache; tests
+	// only), purgeRetry the time a busy purge waits before it is sent again; nil or 0 means
+	// Repo.Edge and 10 seconds.
+	edge       edgeStore
+	purgeRetry time.Duration
+
 	// BlockWindow tracks active block events so operators can see and clear them.
 	BlockWindow *BlockWindowStore
 	unblockMu   sync.Mutex
@@ -281,6 +287,14 @@ type streamHandle struct {
 	// statusBudgets limits the statuses and chain parses per app (certificate_status.go).
 	statusMu      sync.Mutex
 	statusBudgets map[string]*appBudget
+	// edgeSeen limits the edge reports per app (edge_status.go).
+	edgeMu   sync.Mutex
+	edgeSeen map[string]edgeSeen
+	// purges are the cache purges sent on this stream that wait for their ack (cache_purge.go);
+	// purgesDropped is set when the stream ends, after which none is added.
+	purgeMu       sync.Mutex
+	purges        map[string]*purgeFlight
+	purgesDropped bool
 }
 
 func NewServer(repo *repository.Repository, loader BundleLoader, broker *DecisionBroker) *Server {
@@ -1360,6 +1374,7 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 	binding, bound := bindingFrom(ctx)
 	if ebpfAgentID == "" {
 		s.storeAgentFeatures(projectID, resolvedAgentID, hello.GetFeatures(), bound)
+		s.storeEdgeFeatures(projectID, resolvedAgentID, hello.GetFeatures())
 	}
 	handle := &streamHandle{
 		agentID:      resolvedAgentID,
@@ -1390,6 +1405,7 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 	// Deferred after unregisterStream, so that it runs before it: the worker is stopped and refuses
 	// requests by the time unregisterStream drops the installs of the stream.
 	defer handle.stopDeliveries()
+	defer handle.dropPurges()
 	s.announceTelemetryDemand(handle)
 
 	// Send initial bundle for WAF agents only. Host/eBPF agents don't need routing
@@ -1412,6 +1428,11 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 			// Bounded like every push: a stuck initial Send marks the stream
 			// stuck and the receive loop below ends it.
 			_ = s.sendBounded(handle, func() error { return handle.sendHostBundle("waf_config", initMsg) })
+			// Removals that waited for this agent go out after its first bundle, on their own goroutine so
+			// that the receive loop is not held up by the database.
+			if handle.mayReceivePurges() {
+				go s.sendPendingPurges(handle, "")
+			}
 		} else if berr != nil {
 			log.Printf("[agentserver] bundle load for project=%s failed: %v", projectID, berr)
 		}
@@ -1528,6 +1549,7 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 			handle.recordHostBundleAck(ack)
 			s.recordUnblockAck(handle, ack)
 			s.recordCertificateInstallAck(handle, ack)
+			s.recordCachePurgeAck(handle, ack)
 			// eBPF telemetry batches are sent as CommandAck with a special
 			// command_id so we can reuse the existing proto message without
 			// a schema change.
@@ -1583,6 +1605,10 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 		}
 		if cs := msg.GetCertificateStatus(); cs != nil {
 			s.handleCertificateStatus(handle, cs)
+			continue
+		}
+		if es := msg.GetEdgeStatus(); es != nil {
+			s.handleEdgeStatus(handle, es)
 			continue
 		}
 		// Unknown messages are tolerated for forward-compat.

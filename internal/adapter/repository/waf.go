@@ -43,6 +43,9 @@ type WAFBundleAppRow struct {
 	Maintenance []byte
 	// TLS is the TLS entry of the bundle, nil unless the application is in gateway mode (migration 000124).
 	TLS *BundleTLS
+	// Compression, StaticFiles and Cache are the stored delivery objects, raw JSON (migration 000127);
+	// the bundle carries one only while its enabled is true.
+	Compression, StaticFiles, Cache []byte
 }
 
 // ── Assignment ────────────────────────────────────────────────────────────
@@ -102,7 +105,8 @@ const (
 		       a.fcgi_keep_conn,
 		       COALESCE(a.maintenance, '{}'::jsonb),
 		       a.tls_mode, a.tls_hosts, a.tls_listen, a.tls_redirect_listen, a.tls_source,
-		       COALESCE(tc.id::text, ''), COALESCE(tc.leaf_sha256, ''), a.acme_request_id`
+		       COALESCE(tc.id::text, ''), COALESCE(tc.leaf_sha256, ''), a.acme_request_id,
+		       a.tls_canonical_host, a.compression, a.static_files, a.cache`
 	// bundleRowCertificate joins the current uploaded certificate of the application. It names the
 	// public columns id and leaf_sha256 only, and never the key (see TestOnlyTheDeliveryQuerySelectsTheKey).
 	bundleRowCertificate = `
@@ -118,7 +122,8 @@ func scanBundleRow(rows pgx.Row, row *WAFBundleAppRow) error {
 		&row.ProxyConfig,
 		&row.FCGIDocRoot, &row.FCGIIndex, &row.FCGIKeepConn, &row.Maintenance,
 		&tlsMode, &tls.Hosts, &tls.Listen, &tls.RedirectListen, &tls.Source,
-		&tls.CertificateID, &tls.LeafSHA256, &tls.ACMERequestID); err != nil {
+		&tls.CertificateID, &tls.LeafSHA256, &tls.ACMERequestID,
+		&tls.CanonicalHost, &row.Compression, &row.StaticFiles, &row.Cache); err != nil {
 		return err
 	}
 	row.TLS = tls.forBundle(tlsMode)

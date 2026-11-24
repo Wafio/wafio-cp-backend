@@ -118,6 +118,7 @@ type tlsStateView struct {
 	Listen         string              `json:"listen"`
 	RedirectListen string              `json:"redirect_listen"`
 	Source         string              `json:"source"`
+	CanonicalHost  string              `json:"canonical_host"`
 	Certificate    *tlsCertificateView `json:"certificate"`
 	ACME           *tlsACMEView        `json:"acme"`
 	Status         *tlsStatusView      `json:"status"`
@@ -203,7 +204,7 @@ func (r tlsRead) stateWarnings(now time.Time) []tlsWarning {
 func (r tlsRead) view(now time.Time) tlsStateView {
 	v := tlsStateView{
 		Mode: r.tls.Mode, Hosts: r.tls.Hosts, Listen: r.tls.Listen, RedirectListen: r.tls.RedirectListen, Source: r.tls.Source,
-		Status: statusView(r.status), Warnings: r.stateWarnings(now),
+		CanonicalHost: r.tls.CanonicalHost, Status: statusView(r.status), Warnings: r.stateWarnings(now),
 	}
 	if r.cert != nil {
 		v.Certificate = certificateView(*r.cert, now)
@@ -276,7 +277,7 @@ func tlsRefused(c *fiber.Ctx, err error) (handled bool, answered error) {
 		return true, tlsAnswer(c, fiber.StatusConflict, "CERTIFICATE_IN_USE",
 			"This certificate is serving traffic. Switch the application to ACME or to proxy mode first, or upload a replacement.", nil)
 	}
-	return false, nil
+	return edgeRefused(c, err)
 }
 
 func (h *AppTLSHandler) refused(c *fiber.Ctx, err error) error {
@@ -380,8 +381,8 @@ func (h *AppTLSHandler) Put(c *fiber.Ctx) error {
 	h.push(projectID, out.BundleBumped)
 	h.audit(c, repository.AuditAppTLSUpdated, projectID, appID, map[string]any{
 		"mode": out.Saved.Mode, "source": out.Saved.Source, "hosts": out.Saved.Hosts,
-		"listen": out.Saved.Listen, "redirect_listen": out.Saved.RedirectListen,
-		"previous_mode": out.Previous.Mode, "previous_source": out.Previous.Source,
+		"listen": out.Saved.Listen, "redirect_listen": out.Saved.RedirectListen, "canonical_host": out.Saved.CanonicalHost,
+		"previous_mode": out.Previous.Mode, "previous_source": out.Previous.Source, "previous_canonical_host": out.Previous.CanonicalHost,
 	})
 	return h.answerState(c, projectID, appID, dnsCandidates(out.Previous, out.Saved))
 }
