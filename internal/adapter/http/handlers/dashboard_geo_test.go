@@ -55,7 +55,7 @@ func TestAppGeoLocationsCapsBeforeEnrichment(t *testing.T) {
 		CREATE TABLE projects(id uuid PRIMARY KEY, user_id uuid, name text, code text, description text, created_at timestamptz, updated_at timestamptz);
 		CREATE TABLE agents(id uuid PRIMARY KEY, project_id uuid,deleted_at timestamptz);
 		CREATE TABLE waf_decisions(agent_id uuid, app_id uuid, remote_addr text, action text, event_time timestamptz, recorded_at timestamptz);
-		CREATE TABLE waf_rollup_state(covered_from timestamptz, minute_mark timestamptz, hour_mark timestamptz);
+		CREATE TABLE waf_rollup_state(covered_from timestamptz, minute_mark timestamptz, hour_mark timestamptz, kept_from timestamptz);
 		CREATE TABLE waf_rollup_hour(agent_id uuid, app_key uuid, dim smallint, bucket timestamptz, key uuid, value text, total bigint, blocks bigint, logs bigint);
 	`); err != nil {
 		t.Fatal(err)

@@ -53,6 +53,7 @@ func rawProjectArgs(project string, x projectFilter, w window) []any {
 // summary, then the distinct hosts and the agents that sent decisions.
 func (f *readerFixture) oracleProjectSummary(project string, x projectFilter, w window) []int64 {
 	f.t.Helper()
+	w = f.floored(w)
 	cols := make([]string, len(oracleCounters))
 	for i, c := range oracleCounters {
 		cols[i] = `count(*) FILTER (WHERE ` + c + `)`
@@ -87,6 +88,7 @@ var previousZero = []int{7, 8, 9, 10, 11, uniqueAddresses}
 
 func (f *readerFixture) oracleProjectTimeline(project string, x projectFilter, w window, bucket int) map[time.Time][7]int64 {
 	f.t.Helper()
+	w = f.floored(w)
 	rows, err := f.repo.DB.Query(f.ctx, rawProject+`
 		SELECT to_timestamp(floor(extract(epoch FROM recorded_at) / $6::bigint) * $6::bigint), count(*), count(*) FILTER (WHERE action = 'block'),
 		       count(*) FILTER (WHERE action = 'allow'), count(*) FILTER (WHERE action = 'monitor'),
@@ -114,6 +116,7 @@ func (f *readerFixture) oracleProjectTimeline(project string, x projectFilter, w
 
 func (f *readerFixture) oracleProjectTop(project string, x projectFilter, w window, sql string) map[string]int64 {
 	f.t.Helper()
+	w = f.floored(w)
 	rows, err := f.repo.DB.Query(f.ctx, rawProject+sql, rawProjectArgs(project, x, w)...)
 	if err != nil {
 		f.t.Fatal(err)
@@ -622,5 +625,104 @@ func TestDBRollupProjectHostsPastWhatAnHourKeeps(t *testing.T) {
 	}
 	if got.UniqueHosts != 200 {
 		t.Fatalf("%d distinct hosts from the hour rows, want the 200 that an hour keeps of 250", got.UniqueHosts)
+	}
+}
+
+// Once retention has cut the decisions, a reader leaves out those before the cut: they are about to go,
+// and TimescaleDB drops their chunk only when all of it is past the cutoff, up to a day later. In
+// windows that reach below the cut, begin after it, end before it or sit on it, during the backfill
+// and after it, every counter, the distinct addresses and hosts, each timeline bucket and each list of
+// an app and of the project equal what the decisions from the cut on say.
+func TestDBRollupReadersLeaveOutWhatRetentionCut(t *testing.T) {
+	f := newReaderFixture(t)
+	f.keep = 2
+	f.seedAll()
+	filters := f.projectFilters()
+	f.fill(30)
+	wr := f.repo.WAFRollup
+	floor, err := wr.RollupFloor(f.ctx, f.keep, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wr.RaiseRollupFloor(f.ctx, floor); err != nil {
+		t.Fatal(err)
+	}
+	var kept time.Time
+	if err := f.repo.DB.QueryRow(f.ctx, `SELECT kept_from FROM waf_rollup_state`).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept = kept.UTC(); !kept.Equal(floor.Add(-time.Hour)) {
+		t.Fatalf("kept_from is %v, want an hour before the floor %v", kept, floor)
+	}
+	// Decisions a microsecond either side of the cut, and on it.
+	f.seedBoundaries(f.agents[0], f.apps[0], kept)
+	f.kept = kept
+	wins := append(f.windows(rand.New(rand.NewSource(20261127)), 4),
+		window{f.now.Add(-30 * 24 * time.Hour), f.now},
+		window{kept.Add(-time.Hour), kept.Add(time.Hour)},
+		window{kept.Add(-3 * time.Hour), kept.Add(-time.Hour)},
+		window{kept, kept.Add(3 * time.Minute)},
+		window{kept.Add(-time.Microsecond), kept.Add(time.Minute)})
+
+	// The cut leaves decisions out of the long window, so that the comparison below is not one of two
+	// answers that agree because nothing lies below it.
+	long := window{f.now.Add(-30 * 24 * time.Hour), f.now}
+	cut := f.oracleSummary(f.project, f.apps[0], long)[0]
+	f.kept = time.Time{}
+	all := f.oracleSummary(f.project, f.apps[0], long)[0]
+	f.kept = kept
+	if cut == 0 || all <= cut {
+		t.Fatalf("the long window holds %d decisions from the cut on and %d in all", cut, all)
+	}
+
+	for _, phase := range []string{"during the backfill", "after the backfill"} {
+		if phase == "after the backfill" {
+			f.fill(-1)
+		}
+		covered, _, _ := f.state()
+		if !covered.After(kept) {
+			t.Fatalf("%s: covered from %v, not after the cut %v", phase, covered, kept)
+		}
+		for _, w := range wins {
+			at := fmt.Sprintf("%s (covered from %v, cut at %v), window %s to %s", phase, covered, kept, w.from.Format(time.RFC3339Nano), w.to.Format(time.RFC3339Nano))
+			f.checkWindow(t, at+", app", f.apps[0], w)
+			for _, x := range filters {
+				f.checkProject(t, at+", "+x.name, x, w)
+			}
+		}
+	}
+}
+
+// A window that ends behind the minute mark cannot take its distinct addresses from the seen rows, and
+// counts them from the decisions: the same answer, which is what a control plane clock a few minutes
+// behind the database clock gets. A read that carries no window end takes the database clock.
+func TestDBRollupWindowEndingBehindTheMarkEqualsRaw(t *testing.T) {
+	f := newReaderFixture(t)
+	f.seedAll()
+	filters := f.projectFilters()
+	f.fill(-1)
+	_, mark, _ := f.state()
+	to := mark.Add(-3 * time.Minute)
+	w := window{to.Add(-60 * time.Hour), to}
+	at := fmt.Sprintf("window %s to %s, minute mark %v", w.from.Format(time.RFC3339Nano), w.to.Format(time.RFC3339Nano), mark)
+	f.checkWindow(t, at+", app", f.apps[0], w)
+	for _, x := range filters {
+		f.checkProject(t, at+", "+x.name, x, w)
+	}
+
+	end, err := f.repo.WAF.windowEnd(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clock time.Time
+	if err := f.repo.DB.QueryRow(f.ctx, `SELECT clock_timestamp()`).Scan(&clock); err != nil {
+		t.Fatal(err)
+	}
+	if d := clock.Sub(end); d < 0 || d > 5*time.Second {
+		t.Fatalf("the window end of a read without one is %v, the database clock is %v", end, clock)
+	}
+	carried := f.now.Add(-time.Hour)
+	if got, err := f.repo.WAF.windowEnd(WithWAFWindowEnd(f.ctx, carried)); err != nil || !got.Equal(carried) {
+		t.Fatalf("a carried window end %v came back as %v (%v)", carried, got, err)
 	}
 }

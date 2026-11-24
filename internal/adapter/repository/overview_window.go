@@ -13,6 +13,12 @@ import (
 func WithWAFWindowEnd(ctx context.Context, end time.Time) context.Context {
 	return domain.WithWAFWindowEnd(ctx, end)
 }
-func wafWindowEnd(ctx context.Context) time.Time {
-	return domain.WAFWindowEnd(ctx)
+
+// windowEnd is the end the context carries, or the database clock. A window that ends behind the rollup
+// marks counts its distinct addresses from the decisions, which a slow control plane clock would cause.
+func (r *WAFRepo) windowEnd(ctx context.Context) (time.Time, error) {
+	if end, ok := domain.WAFWindowEnd(ctx); ok {
+		return end, nil
+	}
+	return r.DBNow(ctx)
 }

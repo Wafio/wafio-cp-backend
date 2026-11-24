@@ -27,7 +27,8 @@ type WAFRollupStore interface {
 	// moves it back, in one transaction. It reports false, and does nothing, when covered_from is
 	// not above floor or not at or below settled.
 	BackfillRollupHour(ctx context.Context, settled, floor time.Time) (bool, error)
-	// RaiseRollupFloor raises covered_from, the minute mark and the hour mark to at least floor.
+	// RaiseRollupFloor raises covered_from, the minute mark and the hour mark to at least floor, and
+	// sets kept_from, which the readers count decisions from, to an hour before floor.
 	RaiseRollupFloor(ctx context.Context, floor time.Time) error
 	// DeleteExpiredRollups deletes up to limit rows from each rollup table that lie before
 	// covered_from and returns the most rows any one table lost.

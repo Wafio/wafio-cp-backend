@@ -14,8 +14,9 @@ import (
 // transaction, so a fill that commits meanwhile cannot count a decision twice or not at all.
 
 // windowCut splits a window: rollup buckets in [lo, hi), decisions in [first, lo) and [hi, last).
-// With no whole bucket in the window, lo and hi are its end and the decisions are all of it. seen
-// says the seen rows answer for it: they hold the last time of an address, so the window must
+// With no whole bucket in the window, lo and hi are its end and the decisions are all of it. first is
+// never before kept_from: a chunk past retention stays up to a day, and a window would read it all.
+// seen says the seen rows answer for it: they hold the last time of an address, so the window must
 // end after the minute mark.
 type windowCut struct {
 	first, lo, hi, last time.Time
@@ -49,11 +50,11 @@ func (r *WAFRepo) readWindow(ctx context.Context, grain, mark string, exclusiveS
 	}
 	var c windowCut
 	err = tx.QueryRow(ctx, `
-		SELECT since + interval '`+skip+`', until + interval '1 microsecond',
+		SELECT greatest(since + interval '`+skip+`', kept_from), until + interval '1 microsecond',
 		       CASE WHEN lo < hi THEN lo ELSE until END, CASE WHEN lo < hi THEN hi ELSE until END,
 		       COALESCE(lo < hi AND until >= mark, false), covered_from
 		FROM (
-		    SELECT $1::timestamptz AS since, $2::timestamptz AS until, st.covered_from, st.`+mark+` AS mark,
+		    SELECT $1::timestamptz AS since, $2::timestamptz AS until, st.covered_from, st.kept_from, st.`+mark+` AS mark,
 		           CASE WHEN $3::boolean AND st.covered_from IS NOT NULL THEN greatest(st.covered_from,
 		               date_bin('`+grain+`', $1::timestamptz, TIMESTAMPTZ 'epoch') + interval '`+grain+`') END AS lo,
 		           least(st.`+mark+`, date_bin('`+grain+`', $2::timestamptz, TIMESTAMPTZ 'epoch')) AS hi
@@ -155,16 +156,16 @@ func (s readScope) withApps(ctx context.Context, tx pgx.Tx, c windowCut) (readSc
 	return s, nil
 }
 
-// dbNow is the database clock, which the marks of the rollups follow.
-func (r *WAFRepo) dbNow(ctx context.Context) (time.Time, error) {
+// DBNow is the database clock, which the marks of the rollups follow.
+func (r *WAFRepo) DBNow(ctx context.Context) (time.Time, error) {
 	var now time.Time
 	err := r.pool.QueryRow(ctx, `SELECT now()`).Scan(&now)
-	return now, err
+	return now.UTC(), err
 }
 
 // lastMinutes is the window of the last minutes, ending now.
 func (r *WAFRepo) lastMinutes(ctx context.Context, minutes int) (from, to time.Time, err error) {
-	to, err = r.dbNow(ctx)
+	to, err = r.DBNow(ctx)
 	return to.Add(-time.Duration(minutes) * time.Minute), to, err
 }
 

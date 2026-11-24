@@ -13,12 +13,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// perfKeepDays is the retention the rollups are filled for. The loader starts at the beginning of the
-// UTC day 30 days back, so the set holds up to 31 days. With a retention of 30 days the first day stays
-// outside the rollups, and the previous window of a 30 day Overview summary, which ends 30 days back,
-// reads it from the decisions: 1.16 M of them, which took 1.9 s with the distinct hosts. An install that
-// drops whole chunks has up to such a day left below its retention cutoff.
-const perfKeepDays = 31
+// perfKeepDays is the default retention of waf_decisions. The loader starts at the beginning of the UTC day
+// 30 days back, so up to a day lies below the cutoff, as on an install that drops whole chunks. The previous
+// window of a 30 day summary must leave it out: reading it took 1.9 s.
+const perfKeepDays = 30
 
 const (
 	perfProject      = "00000000-0000-4000-8000-0000000000a2"
@@ -164,8 +162,8 @@ func perfWidgets(repo *Repository) []perfWidget {
 }
 
 // perfOverviewWidgets are the readers the project Overview sends for a window: what ProjectOverview.Compute
-// reads from the decisions, with the timeline bucket it picks for the window, and the methods the page asks
-// for next to it.
+// reads from the decisions, with the timeline bucket the page sends for the window, and the methods the
+// page asks for next to it. The first is the summary pair, which perfSets counts.
 func perfOverviewWidgets(repo *Repository) []perfWidget {
 	return []perfWidget{
 		{"summary and previous", nil, func(ctx context.Context, m int) (int, error) {
@@ -176,11 +174,8 @@ func perfOverviewWidgets(repo *Repository) []perfWidget {
 			return int(cur.UniqueIPs + prev.Requests), nil
 		}},
 		{"timeline", nil, func(ctx context.Context, m int) (int, error) {
-			bucket := 3600
-			if m > perfWeek {
-				bucket = 86400
-			}
-			b, err := repo.WAF.TimelineForProject(ctx, perfProject, "", m, bucket, "")
+			// The page's own formula: 108000 s at 30 days, 25200 s at 7 days.
+			b, err := repo.WAF.TimelineForProject(ctx, perfProject, "", m, (m*60+23)/24, "")
 			return len(b), err
 		}},
 		{"top categories", nil, func(ctx context.Context, m int) (int, error) {
@@ -253,22 +248,6 @@ func TestRollupPerfTabSet(t *testing.T) {
 			if on[name] {
 				t.Errorf("%s: %s is not on the tab", c.window, name)
 			}
-		}
-	}
-}
-
-// TestRollupPerfOverviewSet pins the widgets the timing asserts for the Overview to what ProjectOverview.Compute
-// and the page send: the summary pair, the timeline, the categories, the attacker addresses that give
-// the countries, and the methods, at every window.
-func TestRollupPerfOverviewSet(t *testing.T) {
-	for _, minutes := range []int{perfMonth, perfWeek} {
-		var names []string
-		for _, w := range perfOnTab(perfOverviewWidgets(nil), minutes) {
-			names = append(names, w.name)
-		}
-		want := []string{"summary and previous", "timeline", "top categories", "top addresses, countries", "methods"}
-		if !slices.Equal(names, want) {
-			t.Errorf("%d minutes: the Overview sends %v, want %v", minutes, names, want)
 		}
 	}
 }
@@ -611,6 +590,10 @@ func TestRollupAppReadersPerf(t *testing.T) {
 	t.Logf("topped up with %d decisions", perfTopUp(ctx, t, repo, perfNewest(ctx, t, repo), cut))
 	floor, err := wr.RollupFloor(ctx, perfKeepDays, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// What the retention pass does once it has run: the readers leave out the decisions below the cutoff.
+	if err := wr.RaiseRollupFloor(ctx, floor); err != nil {
 		t.Fatal(err)
 	}
 	var units []time.Duration

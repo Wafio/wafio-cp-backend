@@ -296,12 +296,14 @@ func (r *WAFRollupRepo) BackfillRollupHour(ctx context.Context, settled, floor t
 	return filled && err == nil, err
 }
 
-// RaiseRollupFloor moves the three marks up to floor, so that nothing is filled below it.
+// RaiseRollupFloor moves the three marks up to floor, so that nothing is filled below it, and sets
+// kept_from an hour before it. A longer retention moves kept_from back, so it is set, not raised.
 func (r *WAFRollupRepo) RaiseRollupFloor(ctx context.Context, floor time.Time) error {
 	return r.unit(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			UPDATE waf_rollup_state SET covered_from = greatest(covered_from, $1),
-			    minute_mark = greatest(minute_mark, $1), hour_mark = greatest(hour_mark, $1)`, floor)
+			    minute_mark = greatest(minute_mark, $1), hour_mark = greatest(hour_mark, $1),
+			    kept_from = $1::timestamptz - interval '1 hour'`, floor)
 		return err
 	})
 }

@@ -803,7 +803,10 @@ func (r *WAFRepo) SummarizeProject(ctx context.Context, projectID, agentID strin
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
 	}
-	to := wafWindowEnd(ctx)
+	to, err := r.windowEnd(ctx)
+	if err != nil {
+		return nil, err
+	}
 	s, err := r.summarizeProject(ctx, projectScope(projectID, agentID, hostIDs), to.Add(-time.Duration(sinceMinutes)*time.Minute), to, true)
 	if err != nil {
 		return nil, err
@@ -820,7 +823,11 @@ func (r *WAFRepo) SummarizeProjectPrev(ctx context.Context, projectID, agentID s
 		sinceMinutes = 60
 	}
 	window := time.Duration(sinceMinutes) * time.Minute
-	to := wafWindowEnd(ctx).Add(-window)
+	end, err := r.windowEnd(ctx)
+	if err != nil {
+		return nil, err
+	}
+	to := end.Add(-window)
 	s, err := r.summarizeProject(ctx, projectScope(projectID, agentID, hostIDs), to.Add(-window), to, false)
 	if err != nil {
 		return nil, err
@@ -834,7 +841,11 @@ func (r *WAFRepo) SummarizeProjectPrev(ctx context.Context, projectID, agentID s
 // SummarizeProjectBoth returns current and previous summaries; a previous-window
 // error preserves the available current summary and returns the error.
 func (r *WAFRepo) SummarizeProjectBoth(ctx context.Context, projectID, agentID string, sinceMinutes int, hostIDs ...string) (*ProjectWAFSummary, *ProjectWAFSummary, error) {
-	ctx = WithWAFWindowEnd(ctx, wafWindowEnd(ctx))
+	end, err := r.windowEnd(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	ctx = WithWAFWindowEnd(ctx, end)
 	if sinceMinutes <= 0 {
 		sinceMinutes = 60
 	}
@@ -986,7 +997,10 @@ func (r *WAFRepo) TimelineForProject(ctx context.Context, projectID, agentID str
 	if totalSec/bucketSeconds > 200 {
 		bucketSeconds = max(totalSec/200, 1)
 	}
-	to := wafWindowEnd(ctx)
+	to, err := r.windowEnd(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return r.timeline(ctx, projectScope(projectID, agentID, hostIDs), to.Add(-time.Duration(sinceMinutes)*time.Minute), to, bucketSeconds)
 }
 

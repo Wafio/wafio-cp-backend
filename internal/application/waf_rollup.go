@@ -95,7 +95,8 @@ func (j *WAFRollup) floor(ctx context.Context) (time.Time, error) {
 
 // Cleanup is the part of the retention pass that trims the rollups: rows older than the oldest
 // decision retention keeps leave, and the rollups stop claiming to cover that range. Raw rows
-// between the cutoff and the next whole hour stay, and a reader counts them from the decisions.
+// between the cutoff and the next whole hour stay, and a reader counts them from the decisions. A
+// reader leaves out the decisions below the cutoff, which a chunk not yet dropped can still hold.
 // It deletes until a batch is short, with no cap per pass: TimescaleDB drops the raw chunks at
 // once, and the addresses, URIs and user agents in the rollups must leave with them. Each batch is
 // its own short transaction.

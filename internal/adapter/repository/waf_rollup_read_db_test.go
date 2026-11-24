@@ -33,6 +33,9 @@ type readerFixture struct {
 	apps    [2]string
 	now     time.Time
 	keep    int
+	// kept is the retention cut the readers are told about (kept_from); zero until a test sets it. The
+	// oracles then count from it, as the readers do.
+	kept time.Time
 }
 
 func newReaderFixture(t *testing.T) *readerFixture {
@@ -194,6 +197,15 @@ func (f *readerFixture) windows(rnd *rand.Rand, n int) []window {
 	return out
 }
 
+// floored is the window as a reader counts it once retention has cut the decisions: from kept on. The
+// oracles count after the start, so the cut is a microsecond before kept.
+func (f *readerFixture) floored(w window) window {
+	if cut := f.kept.Add(-time.Microsecond); !f.kept.IsZero() && cut.After(w.from) {
+		w.from = cut
+	}
+	return w
+}
+
 // rawWindow is the decisions of an app of a project as the readers counted them before the rollups:
 // agents of the project that are not deleted, recorded in the window.
 const rawWindow = `
@@ -213,6 +225,7 @@ var oracleCounters = []string{
 // oracleSummary is the summary of a window counted from the decisions.
 func (f *readerFixture) oracleSummary(project, app string, w window) []int64 {
 	f.t.Helper()
+	w = f.floored(w)
 	cols := make([]string, len(oracleCounters))
 	for i, c := range oracleCounters {
 		cols[i] = `count(*) FILTER (WHERE ` + c + `)`
@@ -242,6 +255,7 @@ var summaryNames = []string{"requests", "blocks", "allows", "monitors", "logs", 
 // oracleTimeline is the buckets of a window counted from the decisions, by recorded_at.
 func (f *readerFixture) oracleTimeline(project, app string, w window, bucket int) map[time.Time][7]int64 {
 	f.t.Helper()
+	w = f.floored(w)
 	rows, err := f.repo.DB.Query(f.ctx, rawWindow+`
 		SELECT to_timestamp(floor(extract(epoch FROM recorded_at) / $5::bigint) * $5::bigint), count(*), count(*) FILTER (WHERE action = 'block'),
 		       count(*) FILTER (WHERE action = 'allow'), count(*) FILTER (WHERE action = 'monitor'),
@@ -282,6 +296,7 @@ var oracleDims = []struct {
 
 func (f *readerFixture) oracleTop(project, app string, w window, sql string) map[string]int64 {
 	f.t.Helper()
+	w = f.floored(w)
 	rows, err := f.repo.DB.Query(f.ctx, rawWindow+sql, project, app, w.from, w.to)
 	if err != nil {
 		f.t.Fatal(err)
@@ -465,6 +480,9 @@ func (f *readerFixture) hourRange(w window) (lo, hi time.Time) {
 // checkGeo compares a geo list with the decisions of its window, both ends included.
 func (f *readerFixture) checkGeo(at, app string, w window, got []WAFGeoIPRow) {
 	f.t.Helper()
+	if f.kept.After(w.from) {
+		w.from = f.kept
+	}
 	rows, err := f.repo.DB.Query(f.ctx, `
 		SELECT d.remote_addr, count(*), count(*) FILTER (WHERE lower(d.action) = 'block'), count(*) FILTER (WHERE lower(d.action) IN ('monitor','log')),
 		       count(*) FILTER (WHERE lower(d.action) NOT IN ('block','monitor','log'))

@@ -139,6 +139,20 @@ func (failingWAFOverview) TopCategoriesForProject(context.Context, string, strin
 func (failingWAFOverview) TopIPsForProject(context.Context, string, string, int, int, bool, ...string) ([]dashboard.CountRow, error) {
 	return nil, errFakeStore
 }
+func (failingWAFOverview) DBNow(context.Context) (time.Time, error) { return time.Time{}, errFakeStore }
+
+// clockedWAFOverview has a database clock of its own and notes the window end its reads get.
+type clockedWAFOverview struct {
+	failingWAFOverview
+	now time.Time
+	end time.Time
+}
+
+func (c *clockedWAFOverview) DBNow(context.Context) (time.Time, error) { return c.now, nil }
+func (c *clockedWAFOverview) TimelineForProject(ctx context.Context, _, _ string, _, _ int, _ ...string) ([]domain.WAFTimelineBucket, error) {
+	c.end, _ = domain.WAFWindowEnd(ctx)
+	return nil, nil
+}
 
 type fakeHostOverview struct {
 	agents []domain.EBPFAgent
@@ -191,6 +205,24 @@ func TestProjectOverviewQueryFailuresAreUnavailable(t *testing.T) {
 		if result.Widgets[key].State != "unavailable" {
 			t.Errorf("%s=%+v", key, result.Widgets[key])
 		}
+	}
+}
+
+// The window of the widgets ends on the database clock, not on the control plane's: a clock a few
+// minutes behind the database would make the distinct addresses read every decision of the window.
+func TestProjectOverviewWindowEndsOnTheDatabaseClock(t *testing.T) {
+	dbNow := time.Now().Add(3 * time.Minute).UTC().Truncate(time.Microsecond)
+	waf := &clockedWAFOverview{now: dbNow}
+	svc := &ProjectOverview{WAF: waf, Hosts: fakeHostOverview{err: errFakeStore}, HostList: fakeHostList{err: errFakeStore}}
+	result, err := svc.Compute("p", "", "", 60, 300, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.WAFWindowEnd.Equal(dbNow) || !result.WAFWindowStart.Equal(dbNow.Add(-time.Hour)) {
+		t.Fatalf("window %v to %v, want the hour before %v", result.WAFWindowStart, result.WAFWindowEnd, dbNow)
+	}
+	if !waf.end.Equal(dbNow) {
+		t.Fatalf("the reads got the window end %v, want %v", waf.end, dbNow)
 	}
 }
 

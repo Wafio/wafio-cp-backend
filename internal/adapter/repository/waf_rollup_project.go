@@ -117,7 +117,10 @@ func (r *WAFRepo) projectHosts(ctx context.Context, scope readScope, from, to ti
 // topRowsProject is the list of a dimension for the project over the last sinceMinutes minutes before
 // the window end that the context carries, the start left out.
 func (r *WAFRepo) topRowsProject(ctx context.Context, scope readScope, dim rollupDim, sinceMinutes, limit int) ([]WAFTopRow, error) {
-	to := wafWindowEnd(ctx)
+	to, err := r.windowEnd(ctx)
+	if err != nil {
+		return nil, err
+	}
 	top, err := r.top(ctx, scope, dim, to.Add(-time.Duration(sinceMinutes)*time.Minute), to, true, limit)
 	if err != nil {
 		return nil, err

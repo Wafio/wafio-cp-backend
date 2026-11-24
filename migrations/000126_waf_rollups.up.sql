@@ -8,12 +8,15 @@
 -- index key: addresses, URIs and user agents are keyed by the md5 of their full text.
 
 -- One row. covered_from is the oldest instant the rollups hold; minute_mark and hour_mark are the
--- first instant the minute rows and the hour rows do not hold yet.
+-- first instant the minute rows and the hour rows do not hold yet. kept_from is the retention cutoff
+-- of the last retention pass, rounded down by up to an hour: readers leave out decisions before it.
+-- NULL until the first pass.
 CREATE TABLE IF NOT EXISTS waf_rollup_state (
     id           boolean     PRIMARY KEY DEFAULT true CHECK (id),
     covered_from timestamptz NOT NULL,
     minute_mark  timestamptz NOT NULL,
-    hour_mark    timestamptz NOT NULL
+    hour_mark    timestamptz NOT NULL,
+    kept_from    timestamptz
 );
 
 -- The counters of one minute, with the meaning they have in the summaries and the timelines.

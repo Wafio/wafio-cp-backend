@@ -781,6 +781,40 @@ func TestDBRollupCleanupLeavesNothingBeforeTheCutoff(t *testing.T) {
 	}
 }
 
+// Cleanup tells the readers where retention cuts: an hour before the whole hour at or after the
+// cutoff, so at most an hour below it. A longer retention moves it back.
+func TestDBRollupCleanupRecordsWhereRetentionCuts(t *testing.T) {
+	f := newRollupFixture(t)
+	f.settleAt(f.hour())
+	keptFrom := func() (kept *time.Time) {
+		if err := f.repo.DB.QueryRow(f.ctx, `SELECT kept_from FROM waf_rollup_state`).Scan(&kept); err != nil {
+			t.Fatal(err)
+		}
+		return kept
+	}
+	if kept := keptFrom(); kept != nil {
+		t.Fatalf("kept_from is %v before a retention pass", *kept)
+	}
+	var first time.Time
+	for _, days := range []int{3, 10} {
+		before := f.queryTime(`SELECT now()`)
+		if err := f.job().Cleanup(f.ctx, days, nil); err != nil {
+			t.Fatal(err)
+		}
+		after := f.queryTime(`SELECT now()`)
+		keep := time.Duration(days) * 24 * time.Hour
+		kept := keptFrom()
+		if kept == nil || kept.Before(before.Add(-keep-time.Hour)) || !kept.Before(after.Add(-keep)) {
+			t.Fatalf("%d days: kept_from is %v, want from an hour before %v up to %v", days, kept, before.Add(-keep), after.Add(-keep))
+		}
+		if days == 3 {
+			first = *kept
+		} else if !kept.Before(first) {
+			t.Fatalf("a retention of %d days instead of 3 left kept_from at %v, not before %v", days, *kept, first)
+		}
+	}
+}
+
 // A batch deletes no more than its limit of the rows before covered_from, and with no state row there
 // is no covered_from and nothing goes.
 func TestDBRollupDeleteExpiredBatchStopsAtTheLimit(t *testing.T) {

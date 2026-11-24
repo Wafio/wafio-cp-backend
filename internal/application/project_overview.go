@@ -57,7 +57,13 @@ type OverviewResult struct {
 func (s *ProjectOverview) Compute(projectID, hostID, wafAgentID string, minutes, bucketSecs, limit int) (*OverviewResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	windowEnd := time.Now().UTC()
+	// The window ends on the database clock, which the rollups follow. With the database down every
+	// widget fails anyway, so the control plane clock stands in.
+	windowEnd, err := s.WAF.DBNow(ctx)
+	if err != nil {
+		windowEnd = time.Now()
+	}
+	windowEnd = windowEnd.UTC()
 	ctx = domain.WithWAFWindowEnd(ctx, windowEnd)
 
 	// Adaptive bucket size: avoid 8640-bucket GROUP BY for 30-day windows.

@@ -11320,7 +11320,7 @@ paths:
     get:
       operationId: WAFAgentHandler_ProjectTop
       summary: Top-N list of project WAF traffic
-      description: 'Returns the most frequent client addresses, URIs, attack categories or Host headers in the window. For ips, only block, monitor, log and challenge decisions count unless scope=all, so the list shows attackers. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project. For ips and categories the counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour: a count can be lower than the true one, and a value that is never among the busiest of an hour can be missing from the list. The ends of the window that fall outside the rollups are counted exactly. A value longer than 1024 characters is shown cut to 1024.'
+      description: 'Returns the most frequent client addresses, URIs, attack categories or Host headers in the window. For ips, only block, monitor, log and challenge decisions count unless scope=all, so the list shows attackers. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project. For ips and categories the counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour: a count can be lower than the true one, and a value that is never among the busiest of an hour can be missing from the list. The ends of the window that fall outside the rollups are counted exactly. For ips and categories, a value longer than 1024 characters is shown cut to 1024.'
       tags:
         - WAF analytics
       parameters:
