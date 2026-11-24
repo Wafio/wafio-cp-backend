@@ -42,6 +42,9 @@ type TLSSettings struct {
 	Listen         string   `json:"listen"`
 	RedirectListen string   `json:"redirect_listen"`
 	Source         string   `json:"source"`
+	// CanonicalHost is the main host name: "" sends no redirect, otherwise it is one of Hosts and a
+	// visitor who comes in by another host name of the application is sent to it.
+	CanonicalHost string `json:"canonical_host,omitempty"`
 }
 
 // TLSFieldError is a rejected field of a TLSSettings. Field is the JSON key.
@@ -57,7 +60,8 @@ func tlsErr(field, format string, args ...any) error {
 
 // Normalize validates s and rewrites it to its stored form: host names in lower case, trimmed and
 // without repeats (first one kept), both listeners as ip:port with the default HTTPS listener filled
-// in. It returns a *TLSFieldError for the first field that is not valid. The checks do not depend
+// in, and the main host name in lower case and one of the hosts. It returns a *TLSFieldError for the
+// first field that is not valid. The checks do not depend
 // on other applications; those are CheckTLSPlacement. A proxy application may keep an empty host
 // list, a gateway application needs at least one host and a source.
 func (s *TLSSettings) Normalize() error {
@@ -83,6 +87,10 @@ func (s *TLSSettings) Normalize() error {
 		return tlsErr("hosts", "at least one host is required when mode is %q", TLSModeGateway)
 	}
 	s.Hosts = hosts
+	s.CanonicalHost = lowerASCII(strings.TrimSpace(s.CanonicalHost))
+	if msg := CheckCanonicalHost(s.CanonicalHost, hosts); msg != "" {
+		return tlsErr("canonical_host", "%s", msg)
+	}
 
 	listen := strings.TrimSpace(s.Listen)
 	if listen == "" {

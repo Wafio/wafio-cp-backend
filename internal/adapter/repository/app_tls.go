@@ -85,8 +85,10 @@ type AppTLS struct {
 	Listen         string // never empty: a row that never saved reads as the default listener
 	RedirectListen string
 	Source         string
-	CertificateID  string // the current uploaded certificate, "" when none
-	ACMERequestID  string
+	// CanonicalHost is the main host name, "" for no redirect (apps.tls_canonical_host).
+	CanonicalHost string
+	CertificateID string // the current uploaded certificate, "" when none
+	ACMERequestID string
 	// ACMERequestedAt is when ACME was last requested, nil when never.
 	ACMERequestedAt *time.Time
 }
@@ -94,7 +96,7 @@ type AppTLS struct {
 // sameForAgent says whether two settings give the agent the same bundle entry.
 func (t AppTLS) sameForAgent(o AppTLS) bool {
 	return t.Mode == o.Mode && t.Listen == o.Listen && t.RedirectListen == o.RedirectListen && t.Source == o.Source &&
-		t.CertificateID == o.CertificateID && t.ACMERequestID == o.ACMERequestID && slices.Equal(t.Hosts, o.Hosts)
+		t.CanonicalHost == o.CanonicalHost && t.CertificateID == o.CertificateID && t.ACMERequestID == o.ACMERequestID && slices.Equal(t.Hosts, o.Hosts)
 }
 
 // AppCertificate is an uploaded certificate without its chain and key.
@@ -161,7 +163,7 @@ func readTLSApp(ctx context.Context, q queryer, projectID, appID string, lock bo
 		}
 	}
 	query := `SELECT a.id::text, a.project_id::text, a.name, a.tls_mode, a.tls_hosts, a.tls_listen, a.tls_redirect_listen,
-		a.tls_source, COALESCE(a.tls_certificate_id::text, ''), a.acme_request_id, a.acme_requested_at,
+		a.tls_source, a.tls_canonical_host, COALESCE(a.tls_certificate_id::text, ''), a.acme_request_id, a.acme_requested_at,
 		wafio_listen_host_key(a.listen_host), a.listen_port,
 		COALESCE((SELECT waa.agent_id::text FROM waf_agent_apps waa WHERE waa.app_id = a.id AND waa.enabled = TRUE LIMIT 1), '')
 		FROM apps a WHERE a.id = $1 AND a.project_id = $2`
@@ -169,7 +171,7 @@ func readTLSApp(ctx context.Context, q queryer, projectID, appID string, lock bo
 	var hostKey string
 	var port *int32
 	if err := q.QueryRow(ctx, query, appID, projectID).Scan(&a.id, &a.projectID, &a.name, &a.Mode, &a.Hosts, &a.Listen, &a.RedirectListen,
-		&a.Source, &a.CertificateID, &a.ACMERequestID, &a.ACMERequestedAt, &hostKey, &port, &a.agentID); err != nil {
+		&a.Source, &a.CanonicalHost, &a.CertificateID, &a.ACMERequestID, &a.ACMERequestedAt, &hostKey, &port, &a.agentID); err != nil {
 		return tlsApp{}, err
 	}
 	a.plain = plainListenerOf(a.id, a.name, hostKey, port)
@@ -249,10 +251,22 @@ func readTLSAgent(ctx context.Context, q queryer, projectID, agentID string) (TL
 // bumpBundle raises the bundle generation of the agent that serves the application. It reports
 // whether there was one.
 func bumpBundle(ctx context.Context, tx pgx.Tx, appID string) (bool, error) {
-	tag, err := tx.Exec(ctx, `INSERT INTO waf_agent_bundles (agent_id,generation,updated_at)
+	gen, err := bumpBundleGen(ctx, tx, appID)
+	return gen > 0, err
+}
+
+// bumpBundleGen raises the bundle generation of the agent that serves the application and returns the
+// new one, 0 when no agent does.
+func bumpBundleGen(ctx context.Context, tx pgx.Tx, appID string) (int64, error) {
+	var gen int64
+	err := tx.QueryRow(ctx, `INSERT INTO waf_agent_bundles (agent_id,generation,updated_at)
  SELECT agent_id,1,NOW() FROM waf_agent_apps WHERE app_id=$1 AND enabled=TRUE
- ON CONFLICT(agent_id) DO UPDATE SET generation=waf_agent_bundles.generation+1,updated_at=NOW()`, appID)
-	return tag.RowsAffected() > 0, err
+ ON CONFLICT(agent_id) DO UPDATE SET generation=waf_agent_bundles.generation+1,updated_at=NOW()
+ RETURNING generation`, appID).Scan(&gen)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	return gen, err
 }
 
 // GetTLS returns the TLS settings of an application of the project and its current certificate,
@@ -409,8 +423,16 @@ func (r *TLSRepo) UpdateTLSChecked(ctx context.Context, projectID, appID string,
 
 	saved := a.AppTLS
 	saved.Mode, saved.Hosts, saved.Listen, saved.RedirectListen, saved.Source = s.Mode, s.Hosts, s.Listen, s.RedirectListen, s.Source
+	saved.CanonicalHost = s.CanonicalHost
 	if saved.Hosts == nil {
 		saved.Hosts = []string{}
+	}
+	// A main host name that is new needs an agent that redirects; clearing it or saving the stored
+	// one again never does, so an application whose agent is older keeps saving.
+	if saved.CanonicalHost != "" && saved.CanonicalHost != a.CanonicalHost && a.agentID != "" {
+		if err := requireEdgeFeature(ctx, tx, projectID, a.agentID, EdgeRedirects); err != nil {
+			return TLSUpdate{}, err
+		}
 	}
 	if saved.Mode == domain.TLSModeGateway {
 		switched := a.Mode != domain.TLSModeGateway
@@ -436,8 +458,8 @@ func (r *TLSRepo) UpdateTLSChecked(ctx context.Context, projectID, appID string,
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE apps SET tls_mode = $3, tls_hosts = $4, tls_listen = $5, tls_redirect_listen = $6,
-		tls_source = $7, acme_request_id = $8, acme_requested_at = $9, updated_at = NOW() WHERE id = $1 AND project_id = $2`,
-		appID, projectID, saved.Mode, saved.Hosts, saved.Listen, saved.RedirectListen, saved.Source, saved.ACMERequestID, saved.ACMERequestedAt); err != nil {
+		tls_source = $7, acme_request_id = $8, acme_requested_at = $9, tls_canonical_host = $10, updated_at = NOW() WHERE id = $1 AND project_id = $2`,
+		appID, projectID, saved.Mode, saved.Hosts, saved.Listen, saved.RedirectListen, saved.Source, saved.ACMERequestID, saved.ACMERequestedAt, saved.CanonicalHost); err != nil {
 		return TLSUpdate{}, err
 	}
 	// The agent reports the state of one source and of one agent; once either changes, the old
@@ -483,6 +505,9 @@ func admitTLSMove(ctx context.Context, tx pgx.Tx, projectID, appID, agentID stri
 		if a.Source == domain.TLSSourceUploaded && !agent.HostBound {
 			return ErrAgentNotHostBound
 		}
+	}
+	if err := admitEdgeMove(ctx, tx, projectID, appID, agentID); err != nil {
+		return err
 	}
 	return checkTLSFit(ctx, tx, a, agentID)
 }

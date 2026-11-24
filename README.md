@@ -85,7 +85,7 @@ internal/                 adapter, agentserver, apicontract, application, certut
                           dashboard, domain, engine, fairshare, fsstat, installertest, keyauth, lru, otp,
                           setup, testutil, updater, validate (internal/README.md describes them)
 shared/                   Go module github.com/wafio/wafio-cp-backend/shared (see below)
-migrations/               000001 to 000126, up and down
+migrations/               000001 to 000127, up and down
 api/openapi.yaml          HTTP contract
 config/                   config.example.yaml
 deploy/                   the backup units (systemd/) and an nginx example for the HTTP API
@@ -101,7 +101,15 @@ docker-compose.yml        services db (TimescaleDB) and api (the control plane i
 
 ## Migrations
 
-Files are `golang-migrate` pairs, `NNNNNN_name.up.sql` and `.down.sql`: 117 pairs, the latest is 000126, and 000066 to 000072, 000088 and 000092 are unused numbers. A new migration is numbered above every one already applied, or `golang-migrate` never runs it. `wafio migrate up`, `down [--steps N]` and `fresh` (development only, drops everything) run them; the applied version is in `SELECT version, dirty FROM schema_migrations`; `wafio serve --migrate` applies pending ones at boot. The migrations ship in the control plane bundle.
+Files are `golang-migrate` pairs, `NNNNNN_name.up.sql` and `.down.sql`: 118 pairs, the latest is 000127, and 000066 to 000072, 000088 and 000092 are unused numbers. A new migration is numbered above every one already applied, or `golang-migrate` never runs it. `wafio migrate up`, `down [--steps N]` and `fresh` (development only, drops everything) run them; the applied version is in `SELECT version, dirty FROM schema_migrations`; `wafio serve --migrate` applies pending ones at boot. The migrations ship in the control plane bundle.
+
+## Delivery settings of an application
+
+Migration 000127 lets an application ask its WAF agent for four things: to send visitors who use another host name of the application to one main host name, to remove a path prefix before the application sees the request, to compress answers, to serve files from a folder of the agent's host, and to keep copies of answers (the cache). The main host name is `tls_canonical_host` (one of the TLS hosts, used in gateway mode), the prefix is `strip_path_prefix` inside `proxy_config`, and compression, files and cache are the objects `apps.compression`, `apps.static_files` and `apps.cache`. The control plane fills in every default and checks every limit when an object is saved (`internal/domain/delivery_settings.go`); `test/frontend-fixtures/delivery-checks.json` holds the cases the dashboard and the agent check themselves against, and the agent is never stricter. The bundle carries an object only while its `enabled` is true.
+
+`GET /api/projects/{id}/apps/{appId}/delivery` returns the three objects, the agent that serves the application and what it said in Hello (`edge_redirects`, `edge_compression`, `edge_static_files`, `edge_cache`), the bundle generation, the last report of the agent for each part, the counters of the last hour and the last 10 removals. `PUT .../delivery/compression`, `.../static-files` and `.../cache` replace one object and answer it with the generation it goes out with. The main host name is saved with `PUT .../tls` (`canonical_host`) and the prefix with `PUT .../apps/{appId}` or the route of its agent (`proxy_config`). A save that switches a part on, sets a main host name or sets a prefix is refused with `AGENT_TOO_OLD` when the agent reported that it lacks that part; defaults, turning a part off and saving the stored value again always pass, so an application whose agent is older keeps saving, and an agent that never reported is let through. Assigning an application that uses a part to an agent that reported it false is refused with `FEATURE_UNSUPPORTED`.
+
+The agent reports with `EdgeStatus`, which the control plane stores in `app_edge_status` (one row per application, shown and never acted on). `POST .../cache/purge` queues the removal of stored copies in `app_cache_purges`: it is sent at once to a connected agent and again after the first bundle of each connect while it is pending, so a removal for an offline agent runs when it comes back. At most 20 removals wait for one application, and one that waits 7 days fails. `docs/agent-protocol.md` has the messages and their checks.
 
 ## Dashboard rollups
 

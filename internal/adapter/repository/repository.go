@@ -32,6 +32,7 @@ type Repository struct {
 	HostEnroll       *HostEnrollRepo
 	Storage          *StorageRepo
 	TLS              *TLSRepo
+	Edge             *EdgeRepo
 
 	// keyTuning is the lock key and the waits of the encryption key lock; the zero value is the
 	// production setting, and a test sets its own.
@@ -134,6 +135,7 @@ func FromPool(pool *pgxpool.Pool) *Repository {
 		HostEnroll:       &HostEnrollRepo{pool: pool, host: host, grpc: agentGRPC},
 		Storage:          NewStorageRepo(pool),
 		TLS:              &TLSRepo{pool: pool},
+		Edge:             &EdgeRepo{pool: pool},
 	}
 }
 

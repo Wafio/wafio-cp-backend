@@ -15,6 +15,9 @@ type BundleTLS struct {
 	Hosts          []string `json:"hosts"`
 	RedirectListen string   `json:"redirect_listen,omitempty"`
 	Source         string   `json:"source"`
+	// CanonicalHost is the main host name, one of Hosts: a request for another host name of the
+	// application is redirected to it. Left out when empty.
+	CanonicalHost string `json:"canonical_host,omitempty"`
 	// CertificateID and LeafSHA256 are the current certificate of an uploaded source, empty when it
 	// has none. ACMERequestID is set for an acme source only.
 	CertificateID string `json:"certificate_id,omitempty"`
@@ -30,7 +33,8 @@ var bundleLeafPlaceholder = strings.Repeat("0", 64)
 // mode. The leaf of an uploaded certificate is a placeholder of the same length, so the entry has the
 // size it will have; the caller measures a bundle with it, and never sends it.
 func (t AppTLS) BundleEntry() *BundleTLS {
-	e := BundleTLS{Listen: t.Listen, Hosts: t.Hosts, RedirectListen: t.RedirectListen, Source: t.Source, CertificateID: t.CertificateID, ACMERequestID: t.ACMERequestID}
+	e := BundleTLS{Listen: t.Listen, Hosts: t.Hosts, RedirectListen: t.RedirectListen, Source: t.Source, CanonicalHost: t.CanonicalHost,
+		CertificateID: t.CertificateID, ACMERequestID: t.ACMERequestID}
 	if t.CertificateID != "" {
 		e.LeafSHA256 = bundleLeafPlaceholder
 	}

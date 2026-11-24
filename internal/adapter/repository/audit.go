@@ -65,6 +65,13 @@ const (
 	AuditAppTLSCertificateDeleted  = "app.tls_certificate_deleted"
 	AuditAppTLSACMERequested       = "app.tls_acme_requested"
 
+	// Delivery of an application: compression, files from a folder and the response cache saved, and
+	// stored copies removed.
+	AuditAppCompressionUpdated = "app.compression_updated"
+	AuditAppStaticFilesUpdated = "app.static_files_updated"
+	AuditAppCacheUpdated       = "app.cache_updated"
+	AuditAppCachePurged        = "app.cache_purged"
+
 	// WAF (project-level) config
 	AuditWafConfigSaved      = "waf.config_saved"
 	AuditWafAppAssigned      = "waf.app_assigned" //nolint:gosec // audit action name, not a credential

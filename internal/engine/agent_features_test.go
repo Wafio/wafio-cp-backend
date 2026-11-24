@@ -71,3 +71,25 @@ func TestAgentTLSCertificates(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentEdgeFeatures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features []string
+		want     EdgeFeatures
+		any      bool
+	}{
+		{"no features: an agent built before Hello.features", nil, EdgeFeatures{}, false},
+		{"a 2.1.1 agent sends none of the four", []string{FeatureScriptRules, FeatureMaintenanceMode, FeatureTLSCertificates}, EdgeFeatures{}, false},
+		{"redirects only", []string{FeatureEdgeRedirects}, EdgeFeatures{Redirects: true}, true},
+		{"a build with the cache sends all four", []string{FeatureEdgeRedirects, FeatureEdgeCompression, FeatureEdgeStaticFiles, FeatureEdgeCache},
+			EdgeFeatures{Redirects: true, Compression: true, StaticFiles: true, Cache: true}, true},
+		{"the cache alone, with its directory unusable", []string{FeatureEdgeCache}, EdgeFeatures{Cache: true}, true},
+		{"a name that only contains one", []string{"edge_cache_v2", "xedge_redirects"}, EdgeFeatures{}, false},
+	} {
+		got := AgentEdgeFeatures(tc.features)
+		if got != tc.want || got.Any() != tc.any {
+			t.Errorf("%s: AgentEdgeFeatures(%v) = %+v (any %v), want %+v (any %v)", tc.name, tc.features, got, got.Any(), tc.want, tc.any)
+		}
+	}
+}

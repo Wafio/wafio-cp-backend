@@ -779,6 +779,12 @@ func (h *WAFAgentHandler) UpdateAgentRoute(c *fiber.Ctx) error {
 		if err != nil {
 			return invalidInput(c, "INVALID_PROXY_CONFIG", err)
 		}
+		if err := requireRedirectsForPrefix(c.UserContext(), h.Repo, projectID, appID, app.ProxyConfig, body.ProxyConfig); err != nil {
+			if handled, answered := edgeRefused(c, err); handled {
+				return answered
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update route"})
+		}
 	}
 	patch := repository.AppPatch{ProxyConfig: body.ProxyConfig, AgentID: agentID}
 	if name := strings.TrimSpace(body.Name); name != "" {

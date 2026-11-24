@@ -530,6 +530,19 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	pViewer.Post("/apps/:appId/tls/certificate", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, rateCertUploadByUser, appTLS.UploadCertificate)
 	pViewer.Delete("/apps/:appId/tls/certificate", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.DeleteCertificate)
 	pViewer.Post("/apps/:appId/tls/acme", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.RequestACME)
+	// Delivery of an application: compression, files from a folder, the response cache and the removal
+	// of stored copies. The agent reports on them in EdgeStatus.
+	delivery := &handlers.AppDeliveryHandler{Repo: repo}
+	if agentServer != nil {
+		delivery.AgentServer = agentServer
+		delivery.Bundles = agentServer
+	}
+	rateCachePurgeByUser := RateLimitCachePurgeByUser(cfg)
+	pViewer.Get("/apps/:appId/delivery", RequireAppInProject(repo), rateReadByUser, delivery.Get)
+	pViewer.Put("/apps/:appId/delivery/compression", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, delivery.PutCompression)
+	pViewer.Put("/apps/:appId/delivery/static-files", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, delivery.PutStaticFiles)
+	pViewer.Put("/apps/:appId/delivery/cache", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, delivery.PutCache)
+	pViewer.Post("/apps/:appId/cache/purge", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, rateCachePurgeByUser, delivery.PurgeCache)
 	// Per-app WAF dashboard (decisions + counters pushed by the WAF agents)
 	pViewer.Get("/apps/:appId/waf/decisions", RequireAppInProject(repo), rateReadByUser, wafAgent.AppDecisions)
 	feedbackH := &handlers.WAFFeedbackHandler{Repo: repo, SummarySvc: &application.FeedbackSummary{Store: repo.WAF}}
