@@ -49,6 +49,13 @@ const (
 	perfPace = 10 * time.Second
 )
 
+// The bars of a unit of the job: one minute of decisions, one hour of hour rows, one backfill hour.
+const (
+	perfMinuteUnitLimit   = 200 * time.Millisecond
+	perfHourUnitLimit     = 2 * time.Second
+	perfBackfillUnitLimit = time.Second
+)
+
 // perfTopUpSQL copies the decisions recorded in [$1 - 1 day, $2 - 1 day) to [$1, $2), in the order of
 // their time. shortcut: it needs the day before $1 in the table, load the set again past that.
 const perfTopUpSQL = `
@@ -83,14 +90,32 @@ func perfRepo(t *testing.T) (context.Context, string, *Repository) {
 	return ctx, dsn, repo
 }
 
-// perfTopUp adds the decisions of [from, to) as copies of the day before.
-func perfTopUp(ctx context.Context, t *testing.T, repo *Repository, from, to time.Time) int64 {
+// perfExec runs a statement that sets the database up, which the statement timeout of the dashboard reads
+// must not cut short: on a cold cache the copy of a day takes longer than that.
+func perfExec(ctx context.Context, t *testing.T, repo *Repository, sql string, args ...any) int64 {
 	t.Helper()
-	tag, err := repo.DB.Exec(ctx, perfTopUpSQL, from, to)
+	tx, err := repo.DB.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = 0`); err != nil {
+		t.Fatal(err)
+	}
+	tag, err := tx.Exec(ctx, sql, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
 	return tag.RowsAffected()
+}
+
+// perfTopUp adds the decisions of [from, to) as copies of the day before.
+func perfTopUp(ctx context.Context, t *testing.T, repo *Repository, from, to time.Time) int64 {
+	t.Helper()
+	return perfExec(ctx, t, repo, perfTopUpSQL, from, to)
 }
 
 // perfNewest is the recorded_at of the newest decision.
@@ -373,9 +398,10 @@ type perfWindow struct {
 	minutes int
 }
 
-// perfUnits returns what a pass of the job does besides the minute unit: an hour unit and then a backfill
-// unit. Each deletes the rows of an hour that is filled already, ten and twenty days back, and fills them
-// again with the statements of the job in one transaction: the same cost, the same rows afterwards.
+// perfUnits returns what a pass of the job does besides the minute unit: a backfill unit, the longest, so
+// that the shorter reads meet it, and then an hour unit. Each deletes the rows of an hour that is filled
+// already, twenty and ten days back, and fills them again with the statements of the job in one
+// transaction: the same cost, the same rows afterwards.
 //
 // shortcut: the hours already have rows, so the tables do not grow while it runs, upgrade to the units
 // themselves when a run can wait for new traffic.
@@ -403,8 +429,8 @@ func perfUnits(ctx context.Context, t *testing.T, repo *Repository) func() {
 		}
 	}
 	return func() {
-		refill(hourUnit, false)
 		refill(backfillUnit, true)
+		refill(hourUnit, false)
 	}
 }
 
@@ -455,7 +481,7 @@ func perfAgainstRaw(ctx context.Context, t *testing.T, repo *Repository, widgets
 }
 
 // perfMeasureSet reads the widgets of a page in each of the windows: the first load on a new pool, each
-// widget alone, and the widgets at once, worst of three rounds, with an hour unit and a backfill unit
+// widget alone, and the widgets at once, worst of three rounds, with a backfill unit and an hour unit
 // running in each round, and then at 30 days ten times in a row on one connection. It fails when a read
 // takes a second or more alone, or when one that the page sends does with the others the page sends, and
 // for a day or an hour when the rollups made a read slower than counting decisions does (perfAgainstRaw).
@@ -692,25 +718,11 @@ func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 	t.Logf("autovacuum of the seen table ran for about %v", time.Since(begin).Round(100*time.Millisecond))
 }
 
-// TestRollupAppReadersPerf times the readers behind the widgets of the app Monitoring tab and the project Overview on a
-// database loaded with testdata/rollup_perf.sql (TimescaleDB, 33 M decisions of one app over 30
-// days, from two agents, and a tenth of that for a second app). It runs only with WAFIO_PERF_DSN
-// set, and the database must be migrated with the real migrations, loaded, and have no state row:
-//
-//	WAFIO_PERF_DSN=postgres://user:pass@host:5432/wafio_perf?sslmode=disable go test -run TestRollupAppReadersPerf -timeout 60m -v ./internal/adapter/repository/
-//
-// It works as the job does, and times the longest raw part the readers can meet, whatever the time
-// of the run. The state row starts at the hour three hours back (H), the rollups are filled back to the
-// retention of perfKeepDays (a few hundred backfill units, timed) and forward to H plus 59 minutes, and the decisions
-// after H plus 62 minutes are removed. A job in the first two minutes of an hour has filled the hours
-// up to the one before the last, so there a top list or the map reads that whole hour and a bit more
-// raw, 62 minutes and about 47,000 decisions of the app, and a summary reads the last three minutes.
-// TestRollupSteadyHourPerf adds the next hour from H plus 59 minutes, and TestRollupTopErrorPerf then
-// compares the top lists with the decisions. Each widget of the Monitoring tab and the Overview is read as
-// perfMeasure says. Each run of the three, in this order, needs a fresh clone of the migrated and loaded
-// database: the state row of an earlier run stops it.
-func TestRollupAppReadersPerf(t *testing.T) {
-	ctx, dsn, repo := perfRepo(t)
+// perfFill starts the state row three hours back, tops the decisions up to perfWorstTail past it, and
+// fills the rollups as the job would have: back to the retention floor, then forward. It times the
+// backfill units against their bar and returns when the tables are as the longest raw part wants them.
+func perfFill(ctx context.Context, t *testing.T, repo *Repository) {
+	t.Helper()
 	wr := repo.WAFRollup
 	if _, err := repo.DB.Exec(ctx, `
 		INSERT INTO waf_rollup_state (covered_from, minute_mark, hour_mark)
@@ -735,9 +747,7 @@ func TestRollupAppReadersPerf(t *testing.T) {
 	}
 	// The decisions from H on are added again, in the order of their time as they arrive; the loaded
 	// ones lie scattered over their day. A bound the planner can see, so that it reads the newest chunk only.
-	if _, err := repo.DB.Exec(ctx, `DELETE FROM waf_decisions WHERE recorded_at >= $1`, hour); err != nil {
-		t.Fatal(err)
-	}
+	perfExec(ctx, t, repo, `DELETE FROM waf_decisions WHERE recorded_at >= $1`, hour)
 	t.Logf("topped up with %d decisions", perfTopUp(ctx, t, repo, perfNewest(ctx, t, repo), cut))
 	floor, err := wr.RollupFloor(ctx, perfKeepDays, nil)
 	if err != nil {
@@ -761,7 +771,12 @@ func TestRollupAppReadersPerf(t *testing.T) {
 	}
 	if len(units) > 0 {
 		sort.Slice(units, func(i, j int) bool { return units[i] < units[j] })
-		t.Logf("backfill: %d units, median %v, slowest %v", len(units), units[len(units)/2].Round(time.Millisecond), units[len(units)-1].Round(time.Millisecond))
+		median := units[len(units)/2]
+		t.Logf("backfill: %d units, median %v, slowest %v", len(units), median.Round(time.Millisecond), units[len(units)-1].Round(time.Millisecond))
+		// The median: a unit that meets a checkpoint or a vacuum can take twice as long.
+		if median >= perfBackfillUnitLimit {
+			t.Errorf("a backfill unit took %v at the median, over %v", median, perfBackfillUnitLimit)
+		}
 	}
 	fills := perfCatchUp(ctx, t, repo, until)
 	minute, hourMark := perfMarks(ctx, t, repo)
@@ -772,6 +787,28 @@ func TestRollupAppReadersPerf(t *testing.T) {
 		t.Fatalf("the raw part holds %d decisions of the app, under %d: it is not the longest one; load the set again", tail, perfMinTail)
 	}
 	t.Logf("tables: %s", perfTableSizes(ctx, t, repo))
+}
+
+// TestRollupAppReadersPerf times the readers behind the widgets of the app Monitoring tab and the project Overview on a
+// database loaded with testdata/rollup_perf.sql (TimescaleDB, 33 M decisions of one app over 30
+// days, from two agents, and a tenth of that for a second app). It runs only with WAFIO_PERF_DSN
+// set, and the database must be migrated with the real migrations, loaded, and have no state row:
+//
+//	WAFIO_PERF_DSN=postgres://user:pass@host:5432/wafio_perf?sslmode=disable go test -run TestRollupAppReadersPerf -timeout 60m -v ./internal/adapter/repository/
+//
+// It works as the job does, and times the longest raw part the readers can meet, whatever the time
+// of the run. The state row starts at the hour three hours back (H), the rollups are filled back to the
+// retention of perfKeepDays (a few hundred backfill units, timed) and forward to H plus 59 minutes, and the decisions
+// after H plus 62 minutes are removed. A job in the first two minutes of an hour has filled the hours
+// up to the one before the last, so there a top list or the map reads that whole hour and a bit more
+// raw, 62 minutes and about 47,000 decisions of the app, and a summary reads the last three minutes.
+// TestRollupSteadyHourPerf adds the next hour from H plus 59 minutes, and TestRollupTopErrorPerf then
+// compares the top lists with the decisions. Each widget of the Monitoring tab and the Overview is read as
+// perfMeasure says. Each run of the three, in this order, needs a fresh clone of the migrated and loaded
+// database: the state row of an earlier run stops it.
+func TestRollupAppReadersPerf(t *testing.T) {
+	ctx, dsn, repo := perfRepo(t)
+	perfFill(ctx, t, repo)
 	perfQuiet(ctx, t, repo)
 	// The decisions end two hours ago, so an hour holds none.
 	perfMeasure(ctx, t, dsn, repo, "longest raw part", perfWindows[:3])
@@ -801,9 +838,7 @@ func TestRollupSteadyHourPerf(t *testing.T) {
 	if mark.Add(perfMinutesAHour * time.Minute).After(settled) {
 		t.Fatalf("the minute mark %v leaves no hour before %v: run TestRollupAppReadersPerf on a database without a state row first", mark, settled)
 	}
-	if _, err := repo.DB.Exec(ctx, `DELETE FROM waf_decisions WHERE recorded_at >= $1`, mark); err != nil {
-		t.Fatal(err)
-	}
+	perfExec(ctx, t, repo, `DELETE FROM waf_decisions WHERE recorded_at >= $1`, mark)
 	summary := perfWidgets(repo)[0]
 	var minuteFills, hourFills []time.Duration
 	for i := 0; i < perfMinutesAHour; i++ {
@@ -831,8 +866,17 @@ func TestRollupSteadyHourPerf(t *testing.T) {
 		time.Sleep(max(0, perfPace-time.Since(minuteBegin)))
 	}
 	sort.Slice(minuteFills, func(i, j int) bool { return minuteFills[i] < minuteFills[j] })
-	t.Logf("%d minute units, median %v, slowest %v; slowest hour unit %v", len(minuteFills),
-		minuteFills[len(minuteFills)/2].Round(time.Millisecond), minuteFills[len(minuteFills)-1].Round(time.Millisecond), slices.Max(hourFills).Round(time.Millisecond))
+	slowestMinute, slowestHour := minuteFills[len(minuteFills)-1], slices.Max(hourFills)
+	p95Minute := minuteFills[len(minuteFills)*95/100]
+	t.Logf("%d minute units, median %v, 95th percentile %v, slowest %v; slowest hour unit %v", len(minuteFills),
+		minuteFills[len(minuteFills)/2].Round(time.Millisecond), p95Minute.Round(time.Millisecond), slowestMinute.Round(time.Millisecond), slowestHour.Round(time.Millisecond))
+	// The 95th percentile: one unit in an hour can meet a vacuum or a checkpoint.
+	if p95Minute >= perfMinuteUnitLimit {
+		t.Errorf("a minute unit took %v at the 95th percentile, over %v", p95Minute, perfMinuteUnitLimit)
+	}
+	if slowestHour >= perfHourUnitLimit {
+		t.Errorf("an hour unit took %v, over %v", slowestHour, perfHourUnitLimit)
+	}
 	// A running job would have filled the minutes since, up to two minutes before now: the raw part of
 	// a read is as long as it leaves it.
 	perfTopUp(ctx, t, repo, perfNewest(ctx, t, repo), time.Now())

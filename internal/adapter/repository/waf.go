@@ -1555,7 +1555,8 @@ func (r *WAFRepo) DecisionsGeoAggregatesForApp(
 }
 
 // DecisionsGeoAggregates returns per-IP action counts in dashboard vocabulary
-// for the window. The handler then does the geo-enrichment pass.
+// for the decisions recorded in the window, the column the hypertable is
+// partitioned on. The handler then does the geo-enrichment pass.
 func (r *WAFRepo) DecisionsGeoAggregates(
 	ctx context.Context, projectID string, fromTS, toTS int64,
 ) ([]WAFGeoAggRow, error) {
@@ -1564,7 +1565,7 @@ func (r *WAFRepo) DecisionsGeoAggregates(
 		FROM waf_decisions d
 		JOIN agents a ON a.id = d.agent_id AND a.deleted_at IS NULL
 		WHERE a.project_id = $1
-		  AND d.event_time BETWEEN to_timestamp($2) AND to_timestamp($3)
+		  AND d.recorded_at BETWEEN to_timestamp($2) AND to_timestamp($3)
 		  AND COALESCE(d.remote_addr,'') <> ''
 		GROUP BY d.remote_addr, d.action`, projectID, fromTS, toTS)
 	if err != nil {

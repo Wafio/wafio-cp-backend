@@ -726,3 +726,38 @@ func TestDBRollupWindowEndingBehindTheMarkEqualsRaw(t *testing.T) {
 		t.Fatalf("a carried window end %v came back as %v (%v)", carried, got, err)
 	}
 }
+
+// The project map counts decisions by the time the control plane recorded them, as the app map does:
+// a decision an agent dated outside the window counts when it was recorded inside it, and not the other
+// way round. The deleted agent and the other project's agent count for no one.
+func TestDBRollupProjectGeoCountsByRecordedTime(t *testing.T) {
+	f := newReaderFixture(t)
+	from, to := f.now.Add(-3*time.Hour).Truncate(time.Second), f.now.Truncate(time.Second)
+	inside, outside := from.Add(time.Hour), from.Add(-48*time.Hour)
+	for _, d := range []struct {
+		agent, addr    string
+		event, written time.Time
+	}{
+		{f.agents[0], "198.51.100.1", outside, inside},
+		{f.agents[0], "198.51.100.2", inside, outside},
+		{f.agents[1], "198.51.100.3", inside, inside},
+		{f.agents[1], "198.51.100.3", outside, to},
+		{f.gone, "198.51.100.4", inside, inside},
+		{f.foreign, "198.51.100.5", inside, inside},
+	} {
+		f.exec(`INSERT INTO waf_decisions (agent_id, app_id, remote_addr, action, event_time, recorded_at)
+			VALUES ($1, $2, $3, 'block', $4, $5)`, d.agent, f.apps[0], d.addr, d.event, d.written)
+	}
+	rows, err := f.repo.WAF.DecisionsGeoAggregates(f.ctx, f.project, from.Unix(), to.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, r := range rows {
+		got[r.RemoteAddr] += r.Count
+	}
+	want := map[string]int{"198.51.100.1": 1, "198.51.100.3": 2}
+	if len(got) != len(want) || got["198.51.100.1"] != 1 || got["198.51.100.3"] != 2 {
+		t.Fatalf("the map counts %v, the decisions recorded in the window say %v", got, want)
+	}
+}

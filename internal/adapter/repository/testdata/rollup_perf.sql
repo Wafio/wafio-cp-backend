@@ -4,7 +4,7 @@
 --   psql -v ON_ERROR_STOP=1 -d wafio_perf -f rollup_perf.sql
 --
 -- It adds one project with two agents and two apps (ids ending b1 and b2). App b1 gets 1.1 M decisions a day for 30 days
--- (33 M), in the shape measured on a customer install: 63 k to 79 k client addresses and 250 k to
+-- (33 M), in a realistic shape: 63 k to 79 k client addresses and 250 k to
 -- 520 k URIs a day, 74 % of the URIs with a query string, 3.3 k user agents, 97.2 % allow, 2.5 %
 -- block and 0.3 % log. Its decisions come from either agent at random, as behind a load balancer, so
 -- each agent sees most of the clients. App b2 gets a tenth of that, from the first agent. Each day is
