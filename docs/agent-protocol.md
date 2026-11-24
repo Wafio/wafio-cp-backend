@@ -218,13 +218,13 @@ Security: authn=mTLS-client-cert; authz=enabled-assignment-of-the-app-to-this-ag
 
 ## event: EdgeStatus
 
-WAF agent to the server, only from an agent that sends one of the Hello features `edge_redirects`, `edge_compression`, `edge_static_files` or `edge_cache`, for each app whose bundle entry holds edge settings: once after each applied bundle and again from time to time with fresh counters. Defined since `shared/v0.4.0`. A control plane that does not handle it, and a reader built before `shared/v0.4.0`, skip it as an unknown kind. It never carries file content or a visitor's request.
+WAF agent to the server, only from an agent that sends one of the Hello features `edge_redirects`, `edge_compression`, `edge_static_files` or `edge_cache`. It goes to each app in the bundle that has an edge part on, and also to every app when the cache directory is unusable, whether that app's cache is on or off, so the dashboard can warn before an admin turns the cache on. It is sent once after each applied bundle and again from time to time with fresh counters. Defined since `shared/v0.4.0`. A control plane that does not handle it, and a reader built before `shared/v0.4.0`, skip it as an unknown kind. It never carries file content or a visitor's request.
 
 | Field | Type | Rules |
 |---|---|---|
 | `app_id` | string | Required. Canonical lower-case UUID of the app |
 | `generation` | int64 | The generation of the bundle these states answer |
-| `features` | repeated `EdgeFeatureState` | One entry for each part of the app's edge settings that the bundle turns on |
+| `features` | repeated `EdgeFeatureState` | One entry for each part of the app's edge settings that the bundle turns on, plus one `cache` entry (`refused`, `cache_dir_unusable`, `running_previous` false) when the cache directory is unusable, even if the cache is off |
 | `features[].feature` | string | `redirects`, `compression`, `static_files` or `cache` |
 | `features[].state` | string | `applied` (the part runs as the bundle says) or `refused` (the agent could not apply it) |
 | `features[].code` | string | For `refused`: `invalid`, `root_missing`, `root_not_directory`, `root_unreadable`, `root_forbidden`, `cache_dir_unusable`, `disk_too_small` or `memory_too_small`. Empty for `applied` |
@@ -246,8 +246,10 @@ Server to a WAF agent, only to a stream whose Hello holds `edge_cache`, for an a
 |---|---|---|
 | `command_id` | string | The id the ack repeats |
 | `app_id` | string | Canonical lower-case UUID of the app |
-| `scope` | string | `url` (one stored answer with its variants), `prefix` (every stored answer whose path starts with `url`) or `app` (everything the app has stored) |
-| `url` | string | For `url` and `prefix`: a path that starts with `/`. Empty for `app` |
+| `scope` | string | `url` (one stored target with every encoding and `Vary` variant), `prefix` (every stored answer whose target path starts with `url`) or `app` (everything the app has stored) |
+| `url` | string | For `url` and `prefix`: a path that starts with `/` (every scheme and host of the app) or an absolute `http://` or `https://` URL (that host only: lower case, default port removed). Empty for `app` |
+
+`url` is compared byte for byte with the stored request target, query included. `prefix` compares the target's path only. Other spellings of the same target (`/p?`, `/p%2F`) are separate copies that only `prefix` or `app` removes.
 
 The ack `error` is one of `""` (done), `not_in_bundle` (the app is not in the agent's bundle), `cache_off` (the app has no cache), `invalid` (scope or url not accepted) or `busy` (try again later), never free text.
 
