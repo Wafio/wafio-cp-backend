@@ -10142,7 +10142,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppSummary
       summary: Request counters of an application
-      description: Returns decision counters (blocks, allows, logs, challenges, errors, WebSocket counts, detector breakdown) for the application over the last N minutes.
+      description: 'Returns decision counters (blocks, allows, logs, challenges, errors, WebSocket counts, detector breakdown) for the application over the last N minutes. The counters and the distinct client addresses are exact: they are read from per-minute and per-address rollups for the whole minutes of the window and from the decisions for its ends.'
       tags:
         - Applications
         - WAF analytics
@@ -13373,7 +13373,7 @@ paths:
     put:
       operationId: StorageHandler_UpdateRetention
       summary: Set telemetry retention per table
-      description: 'Sets the retention in days of one or more tables (null resets a table to its default) and applies it at once: TimescaleDB policies are replaced in the same transaction, a shortened policy also drops its expired chunks right away, and control-plane modes run a pass immediately. Returns the new status, or {ok: true} when the save succeeded but the status could not be read. Recorded as admin.retention_updated in the system audit log with old and new days per table. The route exists only when the storage service started with the control plane.'
+      description: 'Sets the retention in days of one or more tables (null resets a table to its default) and applies it at once: TimescaleDB policies are replaced in the same transaction, a shortened policy also drops its expired chunks right away, and control-plane modes run a pass immediately. The dashboard rollups of waf_decisions (counters per minute, client addresses, busiest values per hour) are trimmed by the retention pass, which also runs hourly in policy mode, so after a shortening a dashboard window that reaches back past the new cutoff can still count them until the next pass. Returns the new status, or {ok: true} when the save succeeded but the status could not be read. Recorded as admin.retention_updated in the system audit log with old and new days per table. The route exists only when the storage service started with the control plane.'
       tags:
         - Admin
       requestBody:

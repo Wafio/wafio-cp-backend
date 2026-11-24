@@ -43,6 +43,8 @@ scripts/ci-local.sh
 
 `go test ./...` alone skips the database tests and needs no external service.
 
+The timing tests of the dashboard readers (`TestRollup*Perf`) run only with `WAFIO_PERF_DSN` set, on a migrated database loaded with `internal/adapter/repository/testdata/rollup_perf.sql`: 33 million decisions of one app over 30 days. The comment of `TestRollupAppReadersPerf` says how to run them.
+
 Hosted CI (`.github/workflows/ci.yml`) runs the whole gate of `scripts/ci-local.sh` on every push to `main`, on every pull request and on manual dispatch. The database tests run against a TimescaleDB service that lives for the job.
 
 ## Run locally
@@ -100,6 +102,18 @@ docker-compose.yml        services db (TimescaleDB) and api (the control plane i
 ## Migrations
 
 Files are `golang-migrate` pairs, `NNNNNN_name.up.sql` and `.down.sql`: 117 pairs, the latest is 000126, and 000066 to 000072, 000088 and 000092 are unused numbers. A new migration is numbered above every one already applied, or `golang-migrate` never runs it. `wafio migrate up`, `down [--steps N]` and `fresh` (development only, drops everything) run them; the applied version is in `SELECT version, dirty FROM schema_migrations`; `wafio serve --migrate` applies pending ones at boot. The migrations ship in the control plane bundle.
+
+## Dashboard rollups
+
+The app Monitoring tab and the project Overview answer from tables that the control plane fills from `waf_decisions` (migration 000126), not from the decisions themselves. `waf_rollup_minute` holds the counters of each agent, app and minute. `waf_rollup_addr_seen` holds the last time each client address was seen, which counts the distinct addresses of a window. `waf_rollup_hour` holds the busiest values of each agent, app and hour: 500 URIs, 500 user agents, 1000 client addresses, 1000 addresses of blocked, monitored, logged or challenged requests, 200 categories, 200 hosts and 50 methods, each keyed by the md5 of its full text, which is cut to 1024 characters. `waf_rollup_state` has one row: `covered_from`, the oldest instant the rollups hold; `minute_mark` and `hour_mark`, the first instant the minute rows and the hour rows do not hold yet; and `kept_from`, the retention cutoff that readers apply. They are plain tables with or without TimescaleDB, with no project column and no foreign key: a read reaches the project through `agents`, as it does for the decisions.
+
+`wafio serve` runs the job (`internal/application/waf_rollup.go`) next to the retention loop. A pass runs every minute under the advisory lock `wafiorol`, so of several control planes on one database one works. It fills minute and address rows for the decisions recorded up to two minutes ago on the database clock (at most an hour a pass), hour rows for each hour that is complete, and then older hours, newest first, until the pass has used 20 seconds, down to the oldest decision that retention keeps. Each unit is one transaction that moves its mark with its rows. A unit that fails is logged and tried again at the next pass, and until it succeeds a reader counts its range from the decisions. A control plane that was down catches up an hour a pass.
+
+A reader takes the whole minutes (counters, timelines, distinct addresses) or the whole hours (top lists, map) of its window that lie between `covered_from` and the mark from the rollups, and the two ends of the window from `waf_decisions`, in one repeatable-read transaction, so that a unit that commits meanwhile cannot make it count a decision twice or not at all. A window without a whole bucket reads decisions only, as does a database the job has not run on yet. Decisions before `kept_from` are never counted. Counters, timeline buckets of whole minutes and the distinct addresses of a window that ends now are exact. Top lists, the map and the distinct hosts are approximate: an hour keeps only its busiest values, so a count can be lower than the true one, and a value that is never among the busiest of an hour can be missing. The OpenAPI description of each says so. The previous window of an Overview summary reports 0 distinct addresses.
+
+On the timing set (33 million decisions over 30 days, 63,000 to 79,000 client addresses a day) the tables take about 2.4 GB with their indexes: hour rows 1.6 GB, address rows 0.8 GB, minute rows 30 MB, next to 2.9 GB of compressed decisions. The hour rows are the large part; compressing them is possible on TimescaleDB and is not done.
+
+The retention pass of `waf_decisions` raises `covered_from` to the first whole hour at or after the oldest decision it keeps and deletes the rollup rows below it, so client addresses, URIs and user agents leave the rollups with the decisions. Everything else that aggregates `waf_decisions` still reads the decisions: the feedback summary, the other dashboard routes, lists and logs. `rollupCounters` and `rollupDims` in `internal/adapter/repository/waf_rollup.go` say what the fill and the raw reads count, one definition each: a new counter goes there, an aggregate over `waf_decisions` for a dashboard window reads the rollups or says in a comment why it does not, and no request text goes into an index key.
 
 ## HTTP contract tests
 
