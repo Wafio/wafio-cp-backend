@@ -3,10 +3,11 @@
 // Bidirectional gRPC stream shared by two agent types:
 //
 //   WAF agent (cmd/wafio-waf-agent):
-//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation and
-//               CertificateInstall ack), CertificateStatus
+//     → sends : Hello, Heartbeat, WAFDecisionEvent, CommandAck (KeyRotation,
+//               CertificateInstall and CachePurge ack), CertificateStatus,
+//               EdgeStatus
 //     ← receives: Welcome, BundleUpdate (WAF rules JSON), KeyRotation, Ping,
-//                 CertificateInstall
+//                 CertificateInstall, CachePurge
 //
 //   eBPF/host agent (cmd/wafio-host-agent):
 //     → sends : Hello, Heartbeat, CommandAck{id="ebpf:telemetry"} (telemetry)
@@ -52,6 +53,7 @@ type AgentMessage struct {
 	//	*AgentMessage_Decision
 	//	*AgentMessage_Ack
 	//	*AgentMessage_CertificateStatus
+	//	*AgentMessage_EdgeStatus
 	Kind          isAgentMessage_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -139,6 +141,15 @@ func (x *AgentMessage) GetCertificateStatus() *CertificateStatus {
 	return nil
 }
 
+func (x *AgentMessage) GetEdgeStatus() *EdgeStatus {
+	if x != nil {
+		if x, ok := x.Kind.(*AgentMessage_EdgeStatus); ok {
+			return x.EdgeStatus
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Kind interface {
 	isAgentMessage_Kind()
 }
@@ -156,12 +167,16 @@ type AgentMessage_Decision struct {
 }
 
 type AgentMessage_Ack struct {
-	Ack *CommandAck `protobuf:"bytes,4,opt,name=ack,proto3,oneof"` // WAF agent: KeyRotation and CertificateInstall ack
+	Ack *CommandAck `protobuf:"bytes,4,opt,name=ack,proto3,oneof"` // WAF agent: KeyRotation, CertificateInstall and CachePurge ack
 }
 
 type AgentMessage_CertificateStatus struct {
 	// eBPF agent: telemetry (id="ebpf:telemetry")
 	CertificateStatus *CertificateStatus `protobuf:"bytes,5,opt,name=certificate_status,json=certificateStatus,proto3,oneof"` // WAF agent only, with feature "tls_certificates"
+}
+
+type AgentMessage_EdgeStatus struct {
+	EdgeStatus *EdgeStatus `protobuf:"bytes,6,opt,name=edge_status,json=edgeStatus,proto3,oneof"` // WAF agent only, with an "edge_*" feature
 }
 
 func (*AgentMessage_Hello) isAgentMessage_Kind() {}
@@ -173,6 +188,8 @@ func (*AgentMessage_Decision) isAgentMessage_Kind() {}
 func (*AgentMessage_Ack) isAgentMessage_Kind() {}
 
 func (*AgentMessage_CertificateStatus) isAgentMessage_Kind() {}
+
+func (*AgentMessage_EdgeStatus) isAgentMessage_Kind() {}
 
 // Hello is the first message every agent sends after opening the stream.
 // Both agent types use Hello; fields used differ slightly:
@@ -205,7 +222,13 @@ type Hello struct {
 	// custom_rule_field_paths); the server ignores them, and every agent gets
 	// the same bundle. "tls_certificates": the WAF agent serves an app over TLS
 	// from the bundle's settings, accepts CertificateInstall and sends
-	// CertificateStatus. Unknown names are ignored.
+	// CertificateStatus. "edge_redirects", "edge_compression" and
+	// "edge_static_files": the WAF agent applies that part of an app's edge
+	// settings from the bundle and reports it in EdgeStatus. "edge_cache": the
+	// same for the response cache, and the agent also accepts CachePurge. Every
+	// build that has the cache sends "edge_cache", also when its cache directory
+	// is unusable (EdgeStatus says so); a missing name reads as an agent that is
+	// too old. Unknown names are ignored.
 	Features      []string `protobuf:"bytes,8,rep,name=features,proto3" json:"features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1018,6 +1041,430 @@ func (x *CertificateStatus) GetUnixTime() int64 {
 	return 0
 }
 
+// EdgeStatus is sent by a WAF agent that sends one of the "edge_*" Hello
+// features, for each app whose bundle entry holds edge settings: once after
+// each applied bundle, and again from time to time with fresh counters. An
+// older control plane never sends edge settings, so it never receives the
+// message; if it did, it would skip it as an unknown kind, as a reader built
+// before this message does. It never carries file content or a visitor's
+// request. The server treats every field as untrusted input;
+// docs/agent-protocol.md lists its checks.
+type EdgeStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	// The generation of the bundle these states answer.
+	Generation int64 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	// One entry for each part of the app's edge settings that the bundle turns on.
+	Features []*EdgeFeatureState `protobuf:"bytes,3,rep,name=features,proto3" json:"features,omitempty"`
+	// Unset when the app has no cache part.
+	Cache *EdgeCacheCounters `protobuf:"bytes,4,opt,name=cache,proto3" json:"cache,omitempty"`
+	// Unset when the app has no compression part.
+	Compression *EdgeCompressionCounters `protobuf:"bytes,5,opt,name=compression,proto3" json:"compression,omitempty"`
+	// When the agent built this status. The server records its own receive time.
+	UnixTime      int64 `protobuf:"varint,6,opt,name=unix_time,json=unixTime,proto3" json:"unix_time,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EdgeStatus) Reset() {
+	*x = EdgeStatus{}
+	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EdgeStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EdgeStatus) ProtoMessage() {}
+
+func (x *EdgeStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EdgeStatus.ProtoReflect.Descriptor instead.
+func (*EdgeStatus) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *EdgeStatus) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *EdgeStatus) GetGeneration() int64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *EdgeStatus) GetFeatures() []*EdgeFeatureState {
+	if x != nil {
+		return x.Features
+	}
+	return nil
+}
+
+func (x *EdgeStatus) GetCache() *EdgeCacheCounters {
+	if x != nil {
+		return x.Cache
+	}
+	return nil
+}
+
+func (x *EdgeStatus) GetCompression() *EdgeCompressionCounters {
+	if x != nil {
+		return x.Compression
+	}
+	return nil
+}
+
+func (x *EdgeStatus) GetUnixTime() int64 {
+	if x != nil {
+		return x.UnixTime
+	}
+	return 0
+}
+
+// EdgeFeatureState is the outcome of applying one part of an app's edge
+// settings.
+type EdgeFeatureState struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// "redirects", "compression", "static_files" or "cache".
+	Feature string `protobuf:"bytes,1,opt,name=feature,proto3" json:"feature,omitempty"`
+	// "applied" (the part runs as the bundle says) or "refused" (the agent
+	// could not apply it).
+	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	// For "refused": "invalid", "root_missing", "root_not_directory",
+	// "root_unreadable", "root_forbidden", "cache_dir_unusable",
+	// "disk_too_small" or "memory_too_small". Empty for "applied".
+	Code string `protobuf:"bytes,3,opt,name=code,proto3" json:"code,omitempty"`
+	// For "refused": a path or numbers, at most 256 bytes, no control character,
+	// never file content. Empty for "applied".
+	Detail string `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`
+	// For "refused": true when the agent keeps running the part of the bundle it
+	// applied before, false when the part is off.
+	RunningPrevious bool `protobuf:"varint,5,opt,name=running_previous,json=runningPrevious,proto3" json:"running_previous,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *EdgeFeatureState) Reset() {
+	*x = EdgeFeatureState{}
+	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EdgeFeatureState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EdgeFeatureState) ProtoMessage() {}
+
+func (x *EdgeFeatureState) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EdgeFeatureState.ProtoReflect.Descriptor instead.
+func (*EdgeFeatureState) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *EdgeFeatureState) GetFeature() string {
+	if x != nil {
+		return x.Feature
+	}
+	return ""
+}
+
+func (x *EdgeFeatureState) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *EdgeFeatureState) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *EdgeFeatureState) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
+func (x *EdgeFeatureState) GetRunningPrevious() bool {
+	if x != nil {
+		return x.RunningPrevious
+	}
+	return false
+}
+
+// EdgeCacheCounters count the response cache of one app over the last hour,
+// kept by the agent in one-minute buckets (the agent sends the sum of the
+// buckets still inside the hour, not a total since start), and report three
+// gauges of the moment.
+type EdgeCacheCounters struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Requests          uint64                 `protobuf:"varint,1,opt,name=requests,proto3" json:"requests,omitempty"`
+	HitsMemory        uint64                 `protobuf:"varint,2,opt,name=hits_memory,json=hitsMemory,proto3" json:"hits_memory,omitempty"`
+	HitsDisk          uint64                 `protobuf:"varint,3,opt,name=hits_disk,json=hitsDisk,proto3" json:"hits_disk,omitempty"`
+	Misses            uint64                 `protobuf:"varint,4,opt,name=misses,proto3" json:"misses,omitempty"`
+	Bypass            uint64                 `protobuf:"varint,5,opt,name=bypass,proto3" json:"bypass,omitempty"`
+	Stale             uint64                 `protobuf:"varint,6,opt,name=stale,proto3" json:"stale,omitempty"`
+	Stored            uint64                 `protobuf:"varint,7,opt,name=stored,proto3" json:"stored,omitempty"`
+	SkippedNoLifetime uint64                 `protobuf:"varint,8,opt,name=skipped_no_lifetime,json=skippedNoLifetime,proto3" json:"skipped_no_lifetime,omitempty"`
+	SkippedPrivate    uint64                 `protobuf:"varint,9,opt,name=skipped_private,json=skippedPrivate,proto3" json:"skipped_private,omitempty"`
+	SkippedTooLarge   uint64                 `protobuf:"varint,10,opt,name=skipped_too_large,json=skippedTooLarge,proto3" json:"skipped_too_large,omitempty"`
+	SkippedStreamed   uint64                 `protobuf:"varint,11,opt,name=skipped_streamed,json=skippedStreamed,proto3" json:"skipped_streamed,omitempty"`
+	SkippedDiskFull   uint64                 `protobuf:"varint,12,opt,name=skipped_disk_full,json=skippedDiskFull,proto3" json:"skipped_disk_full,omitempty"`
+	Evictions         uint64                 `protobuf:"varint,13,opt,name=evictions,proto3" json:"evictions,omitempty"`
+	Corrupt           uint64                 `protobuf:"varint,14,opt,name=corrupt,proto3" json:"corrupt,omitempty"`
+	// Gauges, not counted over the hour.
+	DiskBytes     uint64 `protobuf:"varint,15,opt,name=disk_bytes,json=diskBytes,proto3" json:"disk_bytes,omitempty"`
+	MemoryBytes   uint64 `protobuf:"varint,16,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	Objects       uint64 `protobuf:"varint,17,opt,name=objects,proto3" json:"objects,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EdgeCacheCounters) Reset() {
+	*x = EdgeCacheCounters{}
+	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EdgeCacheCounters) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EdgeCacheCounters) ProtoMessage() {}
+
+func (x *EdgeCacheCounters) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EdgeCacheCounters.ProtoReflect.Descriptor instead.
+func (*EdgeCacheCounters) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *EdgeCacheCounters) GetRequests() uint64 {
+	if x != nil {
+		return x.Requests
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetHitsMemory() uint64 {
+	if x != nil {
+		return x.HitsMemory
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetHitsDisk() uint64 {
+	if x != nil {
+		return x.HitsDisk
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetMisses() uint64 {
+	if x != nil {
+		return x.Misses
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetBypass() uint64 {
+	if x != nil {
+		return x.Bypass
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetStale() uint64 {
+	if x != nil {
+		return x.Stale
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetStored() uint64 {
+	if x != nil {
+		return x.Stored
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetSkippedNoLifetime() uint64 {
+	if x != nil {
+		return x.SkippedNoLifetime
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetSkippedPrivate() uint64 {
+	if x != nil {
+		return x.SkippedPrivate
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetSkippedTooLarge() uint64 {
+	if x != nil {
+		return x.SkippedTooLarge
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetSkippedStreamed() uint64 {
+	if x != nil {
+		return x.SkippedStreamed
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetSkippedDiskFull() uint64 {
+	if x != nil {
+		return x.SkippedDiskFull
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetEvictions() uint64 {
+	if x != nil {
+		return x.Evictions
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetCorrupt() uint64 {
+	if x != nil {
+		return x.Corrupt
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetDiskBytes() uint64 {
+	if x != nil {
+		return x.DiskBytes
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetMemoryBytes() uint64 {
+	if x != nil {
+		return x.MemoryBytes
+	}
+	return 0
+}
+
+func (x *EdgeCacheCounters) GetObjects() uint64 {
+	if x != nil {
+		return x.Objects
+	}
+	return 0
+}
+
+// EdgeCompressionCounters count the compressed answers of one app over the
+// last hour, as EdgeCacheCounters do.
+type EdgeCompressionCounters struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Responses       uint64                 `protobuf:"varint,1,opt,name=responses,proto3" json:"responses,omitempty"`
+	SkippedStreamed uint64                 `protobuf:"varint,2,opt,name=skipped_streamed,json=skippedStreamed,proto3" json:"skipped_streamed,omitempty"`
+	BytesSaved      uint64                 `protobuf:"varint,3,opt,name=bytes_saved,json=bytesSaved,proto3" json:"bytes_saved,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *EdgeCompressionCounters) Reset() {
+	*x = EdgeCompressionCounters{}
+	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EdgeCompressionCounters) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EdgeCompressionCounters) ProtoMessage() {}
+
+func (x *EdgeCompressionCounters) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EdgeCompressionCounters.ProtoReflect.Descriptor instead.
+func (*EdgeCompressionCounters) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *EdgeCompressionCounters) GetResponses() uint64 {
+	if x != nil {
+		return x.Responses
+	}
+	return 0
+}
+
+func (x *EdgeCompressionCounters) GetSkippedStreamed() uint64 {
+	if x != nil {
+		return x.SkippedStreamed
+	}
+	return 0
+}
+
+func (x *EdgeCompressionCounters) GetBytesSaved() uint64 {
+	if x != nil {
+		return x.BytesSaved
+	}
+	return 0
+}
+
 // ServerMessage is the union of all messages the server can push.
 type ServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1029,6 +1476,7 @@ type ServerMessage struct {
 	//	*ServerMessage_Ping
 	//	*ServerMessage_FetchSecurityData
 	//	*ServerMessage_CertificateInstall
+	//	*ServerMessage_CachePurge
 	Kind          isServerMessage_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1036,7 +1484,7 @@ type ServerMessage struct {
 
 func (x *ServerMessage) Reset() {
 	*x = ServerMessage{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1048,7 +1496,7 @@ func (x *ServerMessage) String() string {
 func (*ServerMessage) ProtoMessage() {}
 
 func (x *ServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[6]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1061,7 +1509,7 @@ func (x *ServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMessage.ProtoReflect.Descriptor instead.
 func (*ServerMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{6}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ServerMessage) GetKind() isServerMessage_Kind {
@@ -1125,6 +1573,15 @@ func (x *ServerMessage) GetCertificateInstall() *CertificateInstall {
 	return nil
 }
 
+func (x *ServerMessage) GetCachePurge() *CachePurge {
+	if x != nil {
+		if x, ok := x.Kind.(*ServerMessage_CachePurge); ok {
+			return x.CachePurge
+		}
+	}
+	return nil
+}
+
 type isServerMessage_Kind interface {
 	isServerMessage_Kind()
 }
@@ -1154,6 +1611,10 @@ type ServerMessage_CertificateInstall struct {
 	CertificateInstall *CertificateInstall `protobuf:"bytes,7,opt,name=certificate_install,json=certificateInstall,proto3,oneof"` // WAF agent with feature "tls_certificates" only
 }
 
+type ServerMessage_CachePurge struct {
+	CachePurge *CachePurge `protobuf:"bytes,8,opt,name=cache_purge,json=cachePurge,proto3,oneof"` // WAF agent with feature "edge_cache" only
+}
+
 func (*ServerMessage_Welcome) isServerMessage_Kind() {}
 
 func (*ServerMessage_Bundle) isServerMessage_Kind() {}
@@ -1165,6 +1626,8 @@ func (*ServerMessage_Ping) isServerMessage_Kind() {}
 func (*ServerMessage_FetchSecurityData) isServerMessage_Kind() {}
 
 func (*ServerMessage_CertificateInstall) isServerMessage_Kind() {}
+
+func (*ServerMessage_CachePurge) isServerMessage_Kind() {}
 
 // Welcome is sent by the server to both agents immediately after Hello validation.
 type Welcome struct {
@@ -1178,7 +1641,7 @@ type Welcome struct {
 
 func (x *Welcome) Reset() {
 	*x = Welcome{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1190,7 +1653,7 @@ func (x *Welcome) String() string {
 func (*Welcome) ProtoMessage() {}
 
 func (x *Welcome) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[7]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1203,7 +1666,7 @@ func (x *Welcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Welcome.ProtoReflect.Descriptor instead.
 func (*Welcome) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{7}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Welcome) GetAgentId() string {
@@ -1247,7 +1710,7 @@ type BundleUpdate struct {
 
 func (x *BundleUpdate) Reset() {
 	*x = BundleUpdate{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1259,7 +1722,7 @@ func (x *BundleUpdate) String() string {
 func (*BundleUpdate) ProtoMessage() {}
 
 func (x *BundleUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[8]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1272,7 +1735,7 @@ func (x *BundleUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BundleUpdate.ProtoReflect.Descriptor instead.
 func (*BundleUpdate) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{8}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *BundleUpdate) GetCommandId() string {
@@ -1310,7 +1773,7 @@ type KeyRotation struct {
 
 func (x *KeyRotation) Reset() {
 	*x = KeyRotation{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1322,7 +1785,7 @@ func (x *KeyRotation) String() string {
 func (*KeyRotation) ProtoMessage() {}
 
 func (x *KeyRotation) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[9]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1335,7 +1798,7 @@ func (x *KeyRotation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyRotation.ProtoReflect.Descriptor instead.
 func (*KeyRotation) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{9}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *KeyRotation) GetCommandId() string {
@@ -1398,7 +1861,7 @@ type CertificateInstall struct {
 
 func (x *CertificateInstall) Reset() {
 	*x = CertificateInstall{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1410,7 +1873,7 @@ func (x *CertificateInstall) String() string {
 func (*CertificateInstall) ProtoMessage() {}
 
 func (x *CertificateInstall) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[10]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1423,7 +1886,7 @@ func (x *CertificateInstall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CertificateInstall.ProtoReflect.Descriptor instead.
 func (*CertificateInstall) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{10}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CertificateInstall) GetCommandId() string {
@@ -1468,6 +1931,85 @@ func (x *CertificateInstall) GetLeafSha256() string {
 	return ""
 }
 
+// CachePurge asks the WAF agent to remove stored answers of one app from its
+// response cache. The server sends it only to a stream whose Hello holds
+// "edge_cache", for an app that is assigned to that agent. A purge for an
+// agent that is offline waits and is sent again after the next connect. The
+// agent answers with CommandAck{command_id, ok, error}, where error is one of
+// "" (done), "not_in_bundle" (the app is not in the agent's bundle),
+// "cache_off" (the app has no cache), "invalid" (scope or url not accepted) or
+// "busy" (try again later).
+type CachePurge struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	CommandId string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	AppId     string                 `protobuf:"bytes,2,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"` // canonical lower-case UUID
+	// "url" (one stored answer, with its variants), "prefix" (every answer
+	// whose path starts with url) or "app" (everything the app has stored).
+	Scope string `protobuf:"bytes,3,opt,name=scope,proto3" json:"scope,omitempty"`
+	// For "url" and "prefix": a path that starts with "/". Empty for "app".
+	Url           string `protobuf:"bytes,4,opt,name=url,proto3" json:"url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CachePurge) Reset() {
+	*x = CachePurge{}
+	mi := &file_agent_v1_agent_control_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CachePurge) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CachePurge) ProtoMessage() {}
+
+func (x *CachePurge) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_control_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CachePurge.ProtoReflect.Descriptor instead.
+func (*CachePurge) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *CachePurge) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *CachePurge) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *CachePurge) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *CachePurge) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
 // Ping is sent by the server to both agents as a liveness probe.
 // Agents reply with a bare Heartbeat (unix_time only).
 type Ping struct {
@@ -1479,7 +2021,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1491,7 +2033,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[11]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1504,7 +2046,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{11}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Ping) GetNonce() int64 {
@@ -1534,7 +2076,7 @@ type FetchSecurityData struct {
 
 func (x *FetchSecurityData) Reset() {
 	*x = FetchSecurityData{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1546,7 +2088,7 @@ func (x *FetchSecurityData) String() string {
 func (*FetchSecurityData) ProtoMessage() {}
 
 func (x *FetchSecurityData) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[12]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1559,7 +2101,7 @@ func (x *FetchSecurityData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchSecurityData.ProtoReflect.Descriptor instead.
 func (*FetchSecurityData) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{12}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *FetchSecurityData) GetCommandId() string {
@@ -1598,7 +2140,7 @@ type MalwareDatabaseRequest struct {
 
 func (x *MalwareDatabaseRequest) Reset() {
 	*x = MalwareDatabaseRequest{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[13]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1610,7 +2152,7 @@ func (x *MalwareDatabaseRequest) String() string {
 func (*MalwareDatabaseRequest) ProtoMessage() {}
 
 func (x *MalwareDatabaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[13]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1623,7 +2165,7 @@ func (x *MalwareDatabaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MalwareDatabaseRequest.ProtoReflect.Descriptor instead.
 func (*MalwareDatabaseRequest) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{13}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{18}
 }
 
 type MalwareDatabaseChunk struct {
@@ -1637,7 +2179,7 @@ type MalwareDatabaseChunk struct {
 
 func (x *MalwareDatabaseChunk) Reset() {
 	*x = MalwareDatabaseChunk{}
-	mi := &file_agent_v1_agent_control_proto_msgTypes[14]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1649,7 +2191,7 @@ func (x *MalwareDatabaseChunk) String() string {
 func (*MalwareDatabaseChunk) ProtoMessage() {}
 
 func (x *MalwareDatabaseChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_control_proto_msgTypes[14]
+	mi := &file_agent_v1_agent_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1662,7 +2204,7 @@ func (x *MalwareDatabaseChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MalwareDatabaseChunk.ProtoReflect.Descriptor instead.
 func (*MalwareDatabaseChunk) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{14}
+	return file_agent_v1_agent_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *MalwareDatabaseChunk) GetData() []byte {
@@ -1683,13 +2225,15 @@ var File_agent_v1_agent_control_proto protoreflect.FileDescriptor
 
 const file_agent_v1_agent_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1cagent/v1/agent_control.proto\x12\x0ewafio.agent.v1\"\xc4\x02\n" +
+	"\x1cagent/v1/agent_control.proto\x12\x0ewafio.agent.v1\"\x83\x03\n" +
 	"\fAgentMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.wafio.agent.v1.HelloH\x00R\x05hello\x129\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x19.wafio.agent.v1.HeartbeatH\x00R\theartbeat\x12>\n" +
 	"\bdecision\x18\x03 \x01(\v2 .wafio.agent.v1.WAFDecisionEventH\x00R\bdecision\x12.\n" +
 	"\x03ack\x18\x04 \x01(\v2\x1a.wafio.agent.v1.CommandAckH\x00R\x03ack\x12R\n" +
-	"\x12certificate_status\x18\x05 \x01(\v2!.wafio.agent.v1.CertificateStatusH\x00R\x11certificateStatusB\x06\n" +
+	"\x12certificate_status\x18\x05 \x01(\v2!.wafio.agent.v1.CertificateStatusH\x00R\x11certificateStatus\x12=\n" +
+	"\vedge_status\x18\x06 \x01(\v2\x1a.wafio.agent.v1.EdgeStatusH\x00R\n" +
+	"edgeStatusB\x06\n" +
 	"\x04kind\"\xf9\x01\n" +
 	"\x05Hello\x12\x1d\n" +
 	"\n" +
@@ -1794,14 +2338,58 @@ const file_agent_v1_agent_control_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\t \x01(\tR\trequestId\x12\x1b\n" +
 	"\tunix_time\x18\n" +
-	" \x01(\x03R\bunixTime\"\xb1\x03\n" +
+	" \x01(\x03R\bunixTime\"\xa2\x02\n" +
+	"\n" +
+	"EdgeStatus\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x03R\n" +
+	"generation\x12<\n" +
+	"\bfeatures\x18\x03 \x03(\v2 .wafio.agent.v1.EdgeFeatureStateR\bfeatures\x127\n" +
+	"\x05cache\x18\x04 \x01(\v2!.wafio.agent.v1.EdgeCacheCountersR\x05cache\x12I\n" +
+	"\vcompression\x18\x05 \x01(\v2'.wafio.agent.v1.EdgeCompressionCountersR\vcompression\x12\x1b\n" +
+	"\tunix_time\x18\x06 \x01(\x03R\bunixTime\"\x99\x01\n" +
+	"\x10EdgeFeatureState\x12\x18\n" +
+	"\afeature\x18\x01 \x01(\tR\afeature\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12\x12\n" +
+	"\x04code\x18\x03 \x01(\tR\x04code\x12\x16\n" +
+	"\x06detail\x18\x04 \x01(\tR\x06detail\x12)\n" +
+	"\x10running_previous\x18\x05 \x01(\bR\x0frunningPrevious\"\xbb\x04\n" +
+	"\x11EdgeCacheCounters\x12\x1a\n" +
+	"\brequests\x18\x01 \x01(\x04R\brequests\x12\x1f\n" +
+	"\vhits_memory\x18\x02 \x01(\x04R\n" +
+	"hitsMemory\x12\x1b\n" +
+	"\thits_disk\x18\x03 \x01(\x04R\bhitsDisk\x12\x16\n" +
+	"\x06misses\x18\x04 \x01(\x04R\x06misses\x12\x16\n" +
+	"\x06bypass\x18\x05 \x01(\x04R\x06bypass\x12\x14\n" +
+	"\x05stale\x18\x06 \x01(\x04R\x05stale\x12\x16\n" +
+	"\x06stored\x18\a \x01(\x04R\x06stored\x12.\n" +
+	"\x13skipped_no_lifetime\x18\b \x01(\x04R\x11skippedNoLifetime\x12'\n" +
+	"\x0fskipped_private\x18\t \x01(\x04R\x0eskippedPrivate\x12*\n" +
+	"\x11skipped_too_large\x18\n" +
+	" \x01(\x04R\x0fskippedTooLarge\x12)\n" +
+	"\x10skipped_streamed\x18\v \x01(\x04R\x0fskippedStreamed\x12*\n" +
+	"\x11skipped_disk_full\x18\f \x01(\x04R\x0fskippedDiskFull\x12\x1c\n" +
+	"\tevictions\x18\r \x01(\x04R\tevictions\x12\x18\n" +
+	"\acorrupt\x18\x0e \x01(\x04R\acorrupt\x12\x1d\n" +
+	"\n" +
+	"disk_bytes\x18\x0f \x01(\x04R\tdiskBytes\x12!\n" +
+	"\fmemory_bytes\x18\x10 \x01(\x04R\vmemoryBytes\x12\x18\n" +
+	"\aobjects\x18\x11 \x01(\x04R\aobjects\"\x83\x01\n" +
+	"\x17EdgeCompressionCounters\x12\x1c\n" +
+	"\tresponses\x18\x01 \x01(\x04R\tresponses\x12)\n" +
+	"\x10skipped_streamed\x18\x02 \x01(\x04R\x0fskippedStreamed\x12\x1f\n" +
+	"\vbytes_saved\x18\x03 \x01(\x04R\n" +
+	"bytesSaved\"\xf0\x03\n" +
 	"\rServerMessage\x123\n" +
 	"\awelcome\x18\x01 \x01(\v2\x17.wafio.agent.v1.WelcomeH\x00R\awelcome\x126\n" +
 	"\x06bundle\x18\x02 \x01(\v2\x1c.wafio.agent.v1.BundleUpdateH\x00R\x06bundle\x12@\n" +
 	"\fkey_rotation\x18\x03 \x01(\v2\x1b.wafio.agent.v1.KeyRotationH\x00R\vkeyRotation\x12*\n" +
 	"\x04ping\x18\x04 \x01(\v2\x14.wafio.agent.v1.PingH\x00R\x04ping\x12S\n" +
 	"\x13fetch_security_data\x18\x05 \x01(\v2!.wafio.agent.v1.FetchSecurityDataH\x00R\x11fetchSecurityData\x12U\n" +
-	"\x13certificate_install\x18\a \x01(\v2\".wafio.agent.v1.CertificateInstallH\x00R\x12certificateInstallB\x06\n" +
+	"\x13certificate_install\x18\a \x01(\v2\".wafio.agent.v1.CertificateInstallH\x00R\x12certificateInstall\x12=\n" +
+	"\vcache_purge\x18\b \x01(\v2\x1a.wafio.agent.v1.CachePurgeH\x00R\n" +
+	"cachePurgeB\x06\n" +
 	"\x04kindJ\x04\b\x06\x10\aR\vself_update\"{\n" +
 	"\aWelcome\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12(\n" +
@@ -1828,7 +2416,14 @@ const file_agent_v1_agent_control_proto_rawDesc = "" +
 	"\tchain_pem\x18\x04 \x01(\fR\bchainPem\x12\x1c\n" +
 	"\akey_pem\x18\x05 \x01(\fB\x03\x80\x01\x01R\x06keyPem\x12\x1f\n" +
 	"\vleaf_sha256\x18\x06 \x01(\tR\n" +
-	"leafSha256\"\x1c\n" +
+	"leafSha256\"j\n" +
+	"\n" +
+	"CachePurge\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x15\n" +
+	"\x06app_id\x18\x02 \x01(\tR\x05appId\x12\x14\n" +
+	"\x05scope\x18\x03 \x01(\tR\x05scope\x12\x10\n" +
+	"\x03url\x18\x04 \x01(\tR\x03url\"\x1c\n" +
 	"\x04Ping\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\x03R\x05nonce\"\xa5\x01\n" +
 	"\x11FetchSecurityData\x12\x1d\n" +
@@ -1859,24 +2454,29 @@ func file_agent_v1_agent_control_proto_rawDescGZIP() []byte {
 	return file_agent_v1_agent_control_proto_rawDescData
 }
 
-var file_agent_v1_agent_control_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_agent_v1_agent_control_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_agent_v1_agent_control_proto_goTypes = []any{
-	(*AgentMessage)(nil),           // 0: wafio.agent.v1.AgentMessage
-	(*Hello)(nil),                  // 1: wafio.agent.v1.Hello
-	(*Heartbeat)(nil),              // 2: wafio.agent.v1.Heartbeat
-	(*WAFDecisionEvent)(nil),       // 3: wafio.agent.v1.WAFDecisionEvent
-	(*CommandAck)(nil),             // 4: wafio.agent.v1.CommandAck
-	(*CertificateStatus)(nil),      // 5: wafio.agent.v1.CertificateStatus
-	(*ServerMessage)(nil),          // 6: wafio.agent.v1.ServerMessage
-	(*Welcome)(nil),                // 7: wafio.agent.v1.Welcome
-	(*BundleUpdate)(nil),           // 8: wafio.agent.v1.BundleUpdate
-	(*KeyRotation)(nil),            // 9: wafio.agent.v1.KeyRotation
-	(*CertificateInstall)(nil),     // 10: wafio.agent.v1.CertificateInstall
-	(*Ping)(nil),                   // 11: wafio.agent.v1.Ping
-	(*FetchSecurityData)(nil),      // 12: wafio.agent.v1.FetchSecurityData
-	(*MalwareDatabaseRequest)(nil), // 13: wafio.agent.v1.MalwareDatabaseRequest
-	(*MalwareDatabaseChunk)(nil),   // 14: wafio.agent.v1.MalwareDatabaseChunk
-	nil,                            // 15: wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
+	(*AgentMessage)(nil),            // 0: wafio.agent.v1.AgentMessage
+	(*Hello)(nil),                   // 1: wafio.agent.v1.Hello
+	(*Heartbeat)(nil),               // 2: wafio.agent.v1.Heartbeat
+	(*WAFDecisionEvent)(nil),        // 3: wafio.agent.v1.WAFDecisionEvent
+	(*CommandAck)(nil),              // 4: wafio.agent.v1.CommandAck
+	(*CertificateStatus)(nil),       // 5: wafio.agent.v1.CertificateStatus
+	(*EdgeStatus)(nil),              // 6: wafio.agent.v1.EdgeStatus
+	(*EdgeFeatureState)(nil),        // 7: wafio.agent.v1.EdgeFeatureState
+	(*EdgeCacheCounters)(nil),       // 8: wafio.agent.v1.EdgeCacheCounters
+	(*EdgeCompressionCounters)(nil), // 9: wafio.agent.v1.EdgeCompressionCounters
+	(*ServerMessage)(nil),           // 10: wafio.agent.v1.ServerMessage
+	(*Welcome)(nil),                 // 11: wafio.agent.v1.Welcome
+	(*BundleUpdate)(nil),            // 12: wafio.agent.v1.BundleUpdate
+	(*KeyRotation)(nil),             // 13: wafio.agent.v1.KeyRotation
+	(*CertificateInstall)(nil),      // 14: wafio.agent.v1.CertificateInstall
+	(*CachePurge)(nil),              // 15: wafio.agent.v1.CachePurge
+	(*Ping)(nil),                    // 16: wafio.agent.v1.Ping
+	(*FetchSecurityData)(nil),       // 17: wafio.agent.v1.FetchSecurityData
+	(*MalwareDatabaseRequest)(nil),  // 18: wafio.agent.v1.MalwareDatabaseRequest
+	(*MalwareDatabaseChunk)(nil),    // 19: wafio.agent.v1.MalwareDatabaseChunk
+	nil,                             // 20: wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
 }
 var file_agent_v1_agent_control_proto_depIdxs = []int32{
 	1,  // 0: wafio.agent.v1.AgentMessage.hello:type_name -> wafio.agent.v1.Hello
@@ -1884,22 +2484,27 @@ var file_agent_v1_agent_control_proto_depIdxs = []int32{
 	3,  // 2: wafio.agent.v1.AgentMessage.decision:type_name -> wafio.agent.v1.WAFDecisionEvent
 	4,  // 3: wafio.agent.v1.AgentMessage.ack:type_name -> wafio.agent.v1.CommandAck
 	5,  // 4: wafio.agent.v1.AgentMessage.certificate_status:type_name -> wafio.agent.v1.CertificateStatus
-	15, // 5: wafio.agent.v1.WAFDecisionEvent.request_headers:type_name -> wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
-	7,  // 6: wafio.agent.v1.ServerMessage.welcome:type_name -> wafio.agent.v1.Welcome
-	8,  // 7: wafio.agent.v1.ServerMessage.bundle:type_name -> wafio.agent.v1.BundleUpdate
-	9,  // 8: wafio.agent.v1.ServerMessage.key_rotation:type_name -> wafio.agent.v1.KeyRotation
-	11, // 9: wafio.agent.v1.ServerMessage.ping:type_name -> wafio.agent.v1.Ping
-	12, // 10: wafio.agent.v1.ServerMessage.fetch_security_data:type_name -> wafio.agent.v1.FetchSecurityData
-	10, // 11: wafio.agent.v1.ServerMessage.certificate_install:type_name -> wafio.agent.v1.CertificateInstall
-	0,  // 12: wafio.agent.v1.AgentControl.Stream:input_type -> wafio.agent.v1.AgentMessage
-	13, // 13: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:input_type -> wafio.agent.v1.MalwareDatabaseRequest
-	6,  // 14: wafio.agent.v1.AgentControl.Stream:output_type -> wafio.agent.v1.ServerMessage
-	14, // 15: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:output_type -> wafio.agent.v1.MalwareDatabaseChunk
-	14, // [14:16] is the sub-list for method output_type
-	12, // [12:14] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	6,  // 5: wafio.agent.v1.AgentMessage.edge_status:type_name -> wafio.agent.v1.EdgeStatus
+	20, // 6: wafio.agent.v1.WAFDecisionEvent.request_headers:type_name -> wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
+	7,  // 7: wafio.agent.v1.EdgeStatus.features:type_name -> wafio.agent.v1.EdgeFeatureState
+	8,  // 8: wafio.agent.v1.EdgeStatus.cache:type_name -> wafio.agent.v1.EdgeCacheCounters
+	9,  // 9: wafio.agent.v1.EdgeStatus.compression:type_name -> wafio.agent.v1.EdgeCompressionCounters
+	11, // 10: wafio.agent.v1.ServerMessage.welcome:type_name -> wafio.agent.v1.Welcome
+	12, // 11: wafio.agent.v1.ServerMessage.bundle:type_name -> wafio.agent.v1.BundleUpdate
+	13, // 12: wafio.agent.v1.ServerMessage.key_rotation:type_name -> wafio.agent.v1.KeyRotation
+	16, // 13: wafio.agent.v1.ServerMessage.ping:type_name -> wafio.agent.v1.Ping
+	17, // 14: wafio.agent.v1.ServerMessage.fetch_security_data:type_name -> wafio.agent.v1.FetchSecurityData
+	14, // 15: wafio.agent.v1.ServerMessage.certificate_install:type_name -> wafio.agent.v1.CertificateInstall
+	15, // 16: wafio.agent.v1.ServerMessage.cache_purge:type_name -> wafio.agent.v1.CachePurge
+	0,  // 17: wafio.agent.v1.AgentControl.Stream:input_type -> wafio.agent.v1.AgentMessage
+	18, // 18: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:input_type -> wafio.agent.v1.MalwareDatabaseRequest
+	10, // 19: wafio.agent.v1.AgentControl.Stream:output_type -> wafio.agent.v1.ServerMessage
+	19, // 20: wafio.agent.v1.AgentControl.DownloadMalwareDatabase:output_type -> wafio.agent.v1.MalwareDatabaseChunk
+	19, // [19:21] is the sub-list for method output_type
+	17, // [17:19] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_agent_v1_agent_control_proto_init() }
@@ -1913,15 +2518,17 @@ func file_agent_v1_agent_control_proto_init() {
 		(*AgentMessage_Decision)(nil),
 		(*AgentMessage_Ack)(nil),
 		(*AgentMessage_CertificateStatus)(nil),
+		(*AgentMessage_EdgeStatus)(nil),
 	}
 	file_agent_v1_agent_control_proto_msgTypes[2].OneofWrappers = []any{}
-	file_agent_v1_agent_control_proto_msgTypes[6].OneofWrappers = []any{
+	file_agent_v1_agent_control_proto_msgTypes[10].OneofWrappers = []any{
 		(*ServerMessage_Welcome)(nil),
 		(*ServerMessage_Bundle)(nil),
 		(*ServerMessage_KeyRotation)(nil),
 		(*ServerMessage_Ping)(nil),
 		(*ServerMessage_FetchSecurityData)(nil),
 		(*ServerMessage_CertificateInstall)(nil),
+		(*ServerMessage_CachePurge)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1929,7 +2536,7 @@ func file_agent_v1_agent_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_v1_agent_control_proto_rawDesc), len(file_agent_v1_agent_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
