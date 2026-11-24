@@ -47,11 +47,19 @@ type CachePurge struct {
 // ErrCacheOff when the saved cache is off and ErrPurgeQueueFull when the application already has
 // CachePurgeMaxPending removals waiting, and pgx.ErrNoRows when the application is not in the
 // project. Waiting removals older than CachePurgeExpiry fail first, and rows past the newest
-// CachePurgeKept are deleted unless they wait.
+// CachePurgeKept are deleted unless they wait. It holds the row of the application like a save of a
+// delivery object does, so it takes a place among the open transactions of its kind first
+// (enterNestedTx): a burst of removals would otherwise hold the pool while they wait for the row of
+// a save that still has to read through it.
 func (r *EdgeRepo) CreateCachePurge(ctx context.Context, projectID, appID, userID, scope, url string) (CachePurge, error) {
 	if !canonicalIDs(&projectID, &appID) {
 		return CachePurge{}, pgx.ErrNoRows
 	}
+	leave, err := enterNestedTx(ctx)
+	if err != nil {
+		return CachePurge{}, err
+	}
+	defer leave()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return CachePurge{}, err

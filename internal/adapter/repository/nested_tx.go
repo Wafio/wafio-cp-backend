@@ -13,8 +13,8 @@ import (
 // the pool. Saves of one application wait for each other on its row lock, so without a bound a
 // burst of them could hold the whole pool and leave the one that holds the lock without a connection
 // to read through. Every transaction that takes one of those locks takes a place here first (the
-// TLS changes, a move, an assignment, a config save). With two open at a time the pool needs four
-// connections.
+// TLS changes, a move, an assignment, a config save, a delivery save, a cache removal). With two open
+// at a time the pool needs four connections.
 var nestedTx = make(chan struct{}, 2)
 
 // enterNestedTx waits for a place among the open transactions of that kind. leave gives it back.
