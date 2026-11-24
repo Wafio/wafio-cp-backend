@@ -144,13 +144,22 @@ var fillMinuteSQL = `
 	GROUP BY 1, 2, 3`
 
 // A NULL address is not an address, the empty one is, as COUNT(DISTINCT remote_addr) has it. A row
-// only ever gets a later last_seen.
+// only ever gets a later last_seen. A backfill hour meets mostly addresses that a later hour has
+// seen already: NOT EXISTS leaves those out before ON CONFLICT, which would lock each of them, dirty
+// its heap page and write WAL even where its WHERE is false. The conflict clause stays for a row
+// that another transaction commits in between.
 const fillSeenSQL = `
 	INSERT INTO waf_rollup_addr_seen (agent_id, app_key, addr_key, last_seen)
-	SELECT agent_id, ` + rollupAppKey + `, md5(remote_addr)::uuid, MAX(recorded_at)
-	FROM ` + rollupRows + `
-	WHERE remote_addr IS NOT NULL
-	GROUP BY 1, 2, 3
+	SELECT n.agent_id, n.app_key, n.addr_key, n.last_seen
+	FROM (
+	    SELECT agent_id, ` + rollupAppKey + ` AS app_key, md5(remote_addr)::uuid AS addr_key, MAX(recorded_at) AS last_seen
+	    FROM ` + rollupRows + `
+	    WHERE remote_addr IS NOT NULL
+	    GROUP BY 1, 2, 3
+	) n
+	WHERE NOT EXISTS (
+	    SELECT 1 FROM waf_rollup_addr_seen s
+	    WHERE s.app_key = n.app_key AND s.addr_key = n.addr_key AND s.agent_id = n.agent_id AND s.last_seen >= n.last_seen)
 	ON CONFLICT (app_key, addr_key, agent_id) DO UPDATE SET last_seen = EXCLUDED.last_seen
 	WHERE waf_rollup_addr_seen.last_seen < EXCLUDED.last_seen`
 

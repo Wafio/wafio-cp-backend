@@ -838,3 +838,62 @@ func TestDBRollupSeenTableVacuumsEarly(t *testing.T) {
 		t.Fatalf("the seen table has the options %v, want %v", options, want)
 	}
 }
+
+// A backfill hour meets addresses that a later hour has seen already, and the fill must leave those
+// rows alone: an ON CONFLICT that finds nothing to change still locks the row, which sets its xmax and
+// dirties its page. A later sighting still raises last_seen, and a repeated hour changes nothing.
+func TestDBRollupSeenFillLeavesRowsThatAreNewerAlready(t *testing.T) {
+	f := newReaderFixture(t)
+	agent, app := f.agents[0], f.apps[0]
+	hour := f.now.Truncate(time.Hour).Add(-6 * time.Hour)
+	add := func(addr string, at time.Time) {
+		f.exec(`INSERT INTO waf_decisions (agent_id, app_id, remote_addr, action, event_time, recorded_at)
+			VALUES ($1, $2, $3, 'allow', $4, $4)`, agent, app, addr, at)
+	}
+	// .1 in both hours, .2 only in the first, .3 only in the second.
+	add("10.2.0.1", hour.Add(10*time.Minute))
+	add("10.2.0.2", hour.Add(20*time.Minute))
+	add("10.2.0.1", hour.Add(70*time.Minute))
+	add("10.2.0.3", hour.Add(80*time.Minute))
+	fill := func(from time.Time) {
+		t.Helper()
+		err := f.repo.WAFRollup.unit(f.ctx, func(tx pgx.Tx) error {
+			_, err := tx.Exec(f.ctx, fillSeenSQL, from, from.Add(time.Hour))
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := func(addr string) (last time.Time, locked bool) {
+		t.Helper()
+		if err := f.repo.DB.QueryRow(f.ctx, `
+			SELECT last_seen, xmax::text <> '0' FROM waf_rollup_addr_seen
+			WHERE agent_id = $1 AND app_key = $2 AND addr_key = md5($3)::uuid`, agent, app, addr).Scan(&last, &locked); err != nil {
+			t.Fatalf("seen row of %s: %v", addr, err)
+		}
+		return last, locked
+	}
+	check := func(step string, want map[string]time.Time) {
+		t.Helper()
+		for addr, at := range want {
+			if last, locked := seen(addr); !last.Equal(at) || locked {
+				t.Errorf("%s: %s has last_seen %v and was locked %v, want %v and not locked", step, addr, last.UTC(), locked, at.UTC())
+			}
+		}
+	}
+	// The later hour first, as a backfill goes, then the earlier one, then the later one again.
+	fill(hour.Add(time.Hour))
+	fill(hour)
+	fill(hour.Add(time.Hour))
+	check("later hour first", map[string]time.Time{
+		"10.2.0.1": hour.Add(70 * time.Minute), "10.2.0.2": hour.Add(20 * time.Minute), "10.2.0.3": hour.Add(80 * time.Minute)})
+
+	// A sighting after the first two raises a row, and leaves the others as they are.
+	add("10.2.0.2", hour.Add(130*time.Minute))
+	fill(hour.Add(2 * time.Hour))
+	if last, _ := seen("10.2.0.2"); !last.Equal(hour.Add(130 * time.Minute)) {
+		t.Errorf("a later sighting left last_seen of 10.2.0.2 at %v", last.UTC())
+	}
+	check("after a later hour", map[string]time.Time{"10.2.0.1": hour.Add(70 * time.Minute), "10.2.0.3": hour.Add(80 * time.Minute)})
+}

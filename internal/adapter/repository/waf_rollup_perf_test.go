@@ -401,7 +401,8 @@ type perfWindow struct {
 // perfUnits returns what a pass of the job does besides the minute unit: a backfill unit, the longest, so
 // that the shorter reads meet it, and then an hour unit. Each deletes the rows of an hour that is filled
 // already, twenty and ten days back, and fills them again with the statements of the job in one
-// transaction: the same cost, the same rows afterwards.
+// transaction: the same cost, the same rows afterwards. The seen rows of the backfill hour that no
+// later hour has touched go with it, as they are new to a real backfill unit; the others it skips.
 //
 // shortcut: the hours already have rows, so the tables do not grow while it runs, upgrade to the units
 // themselves when a run can wait for new traffic.
@@ -416,6 +417,9 @@ func perfUnits(ctx context.Context, t *testing.T, repo *Repository) func() {
 			}
 			if minutes {
 				if _, err := tx.Exec(ctx, `DELETE FROM waf_rollup_minute WHERE bucket >= $1 AND bucket < $2`, hour, hour.Add(time.Hour)); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, `DELETE FROM waf_rollup_addr_seen WHERE last_seen >= $1 AND last_seen < $2`, hour, hour.Add(time.Hour)); err != nil {
 					return err
 				}
 				if err := fillRange(ctx, tx, hour, hour.Add(time.Hour)); err != nil {
@@ -669,12 +673,13 @@ func perfTail(ctx context.Context, t *testing.T, repo *Repository, hour time.Tim
 	return n
 }
 
-// perfDuringVacuum reads the widgets of each page at 30 days at once while autovacuum works on the seen
-// table, the case perfQuiet keeps out of the other rounds, and logs how long that vacuum ran. Whatever
-// dead rows the hour before left, it updates an indexed column of perfHotRows addresses
-// perfDeadRows/perfHotRows times, as the fill's upserts do, which passes the table's threshold, and then
-// waits for the vacuum. For each page the reads it sends, the feedback summary among them, go first and
-// the others must stay under a second; all of them follow, for the log only.
+// perfDuringVacuum reads the widgets of each page at 30 days at once, with a backfill unit and an hour
+// unit running, while autovacuum works on the seen table, the case perfQuiet keeps out of the other
+// rounds, and logs how long that vacuum ran. Whatever dead rows the hour before left, it updates an
+// indexed column of perfHotRows addresses perfDeadRows/perfHotRows times, as the fill's upserts do,
+// which passes the table's threshold, and then waits for the vacuum. For each page the reads it sends,
+// the feedback summary among them, go first and the others must stay under a second; all of them
+// follow, for the log only.
 func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 	t.Helper()
 	running := func() bool {
@@ -699,11 +704,12 @@ func perfDuringVacuum(ctx context.Context, t *testing.T, repo *Repository) {
 		}
 	}
 	begin := time.Now()
+	units := perfUnits(ctx, t, repo)
 	for _, set := range perfSets {
 		widgets := set.widgets(repo)
-		onTab := perfRound(ctx, t, perfOnTab(widgets, perfMonth), "30d during a vacuum, "+set.name, perfMonth, nil)
+		onTab := perfRound(ctx, t, perfOnTab(widgets, perfMonth), "30d during a vacuum, "+set.name, perfMonth, units)
 		runningAfterTab := running()
-		everything := perfRound(ctx, t, widgets, "30d during a vacuum, "+set.name, perfMonth, nil)
+		everything := perfRound(ctx, t, widgets, "30d during a vacuum, "+set.name, perfMonth, units)
 		t.Logf("%s: the vacuum was still running after the page's reads: %v, after all of them: %v", set.name, runningAfterTab, running())
 		for _, w := range widgets {
 			t.Logf("during a vacuum, 30d, %s, %-26s the page's reads at once %s, all at once %s", set.name, w.name, perfMS(onTab, w), perfMS(everything, w))
