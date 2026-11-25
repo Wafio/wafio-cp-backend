@@ -19605,7 +19605,7 @@ components:
       additionalProperties: false
     AppCache:
       type: object
-      description: The response cache of an application, with every default filled in. The WAF agent keeps copies of answers on disk and in memory and sends them without asking the application. It checks every request first, so a blocked request never gets a copy. A request is signed in when it has an Authorization header, user information in an absolute-form request target, or a session cookie (a built-in name or one of session_cookies). A signed-in request is never answered from a stored copy and never makes one, unless a path rule that matches it has signed_in. It goes to the application with X-Cache BYPASS. A request that has a cookie that is not a session cookie is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers. A matching path rule alone does not allow that, only a rule with signed_in does.
+      description: The response cache of an application, with every default filled in. The WAF agent keeps copies of answers on disk and in memory and sends them without asking the application. It checks every request first, so a blocked request never gets a copy. A request is signed in when it has an Authorization header, user information in an absolute-form request target, or a session cookie (a built-in name or one of session_cookies). A signed-in request is never answered from a stored copy and never makes one, unless a path rule that matches it has signed_in. It goes to the application with X-Cache BYPASS. A request that has a cookie that is not a session cookie is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers. A matching path rule alone does not allow that, only a rule with signed_in does. This limits only what is stored, and such a request is still answered from a copy that another request made.
       properties:
         enabled:
           type: boolean
@@ -19648,7 +19648,7 @@ components:
         rules:
           type: array
           maxItems: 50
-          description: Path rules. The longest matching prefix wins. A rule alone does not let a request that carries a cookie be stored. For that the rule needs signed_in.
+          description: Path rules. The longest matching prefix wins. A rule's copies are sent to every request that is not signed in, with a cookie or without. A rule alone does not let the answer to a request that carries a cookie be stored. For that the rule needs signed_in.
           items:
             $ref: '#/components/schemas/AppCacheRule'
       required:
@@ -19714,7 +19714,7 @@ components:
           description: 1 second to 365 days for cache. A bypass rule stores 0.
         signed_in:
           type: boolean
-          description: Also for signed-in visitors. Without it, a signed-in request (an Authorization header, user information in the request target or a session cookie) never uses the cache under this prefix, and a request with another cookie is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers. With it, both are stored and answered from a copy. Everyone then gets the same copy. A bypass rule stores false.
+          description: Also for signed-in visitors. Without it, a signed-in request (an Authorization header, user information in the request target or a session cookie) never uses the cache under this prefix, and a request with another cookie is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers. With it, a signed-in request is answered from a copy too, and the answers to both are stored. Everyone then gets the same copy. A request with another cookie is answered from a copy either way. A bypass rule stores false.
       required:
         - prefix
         - action

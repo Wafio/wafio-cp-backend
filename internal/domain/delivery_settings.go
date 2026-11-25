@@ -227,11 +227,11 @@ type CacheRule struct {
 	Action string `json:"action"`
 	// TTLS is 1 to 365 days for a keep rule and 0 for a bypass rule.
 	TTLS int64 `json:"ttl_s"`
-	// SignedIn lets a keep rule store answers for, and send copies to, visitors who are signed in or
-	// who send a cookie that is not a session cookie. Without it a signed-in request skips the cache
-	// and such a cookie request is stored only for an answer marked public or with s-maxage or a
-	// default lifetime file type: a rule alone does not allow it. The dashboard asks the admin to
-	// type the prefix first.
+	// SignedIn lets a keep rule send copies to visitors who are signed in, and store the answers made
+	// for them and for visitors who send a cookie that is not a session cookie. Without it a signed-in
+	// request skips the cache, and such a cookie request is answered from a copy but stored only for
+	// an answer marked public or with s-maxage or a default lifetime file type: a rule alone does not
+	// allow it. The dashboard asks the admin to type the prefix first.
 	SignedIn bool `json:"signed_in"`
 }
 
