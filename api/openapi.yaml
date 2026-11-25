@@ -32749,6 +32749,10 @@ components:
         key_field:
           type: string
           description: Deprecated single key field; use key_fields.
+        target:
+          type: string
+          enum: [waf, kernel]
+          description: '`waf` (default, also when missing or empty) blocks in WAFio only; `kernel` also drops every packet from the client address at the host firewall (all ports, SSH included) until the block ends. Behind a CDN or a proxy on another machine only the WAFio block applies. Save rejects other values.'
       additionalProperties: true
     WafRulesBotProtection:
       type: object
