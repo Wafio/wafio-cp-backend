@@ -19,7 +19,7 @@ The control plane follows the hexagonal pattern (ports and adapters): the domain
 - `dashboard/` holds the response types of the log dashboard.
 - `certutil/` generates the CA, server and client certificates for agent mTLS.
 - `keyauth/` generates and verifies the host key that binds an agent to a host.
-- `otp/` holds TOTP, backup codes and the second-factor failure limiter.
+- `otp/` holds TOTP, backup codes, the second-factor failure limiter and the AES-256-GCM encryptor that seals secrets at rest (`totp.enc_key`): TOTP secrets, the SMTP password, the malware database key and, bound to their project and certificate, the private keys of uploaded TLS certificates.
 - `fairshare/` decides who gives up a slot when an in-memory pool shared by many tenants is full. `lru/` is a bounded, sharded LRU map.
 - `fsstat/` reports the free space of the filesystem that holds the database.
 - `updater/` verifies the signature and checksum of a release bundle.

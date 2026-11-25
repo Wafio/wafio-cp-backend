@@ -197,9 +197,11 @@ type JWTConfig struct {
 	ExpireHours int    `mapstructure:"expire_hours"`
 }
 
-// TOTPConfig holds the key used to encrypt TOTP secrets at rest.
-// EncKey is a 32-byte AES key (64 hex chars or base64). Empty = plaintext
-// fallback (a startup warning is logged). Env: WAFIO_TOTP_ENC_KEY.
+// TOTPConfig holds the key that encrypts the TOTP secrets, the SMTP password, the malware key and
+// the private keys of uploaded certificates at rest.
+// EncKey is a 32-byte AES key (64 hex chars or base64). It is required: Validate refuses an empty
+// or malformed key at boot, and a control plane refuses to start with a key other than the one the
+// database was sealed with. Change it with wafio rekey. Env: WAFIO_TOTP_ENC_KEY.
 type TOTPConfig struct {
 	EncKey string `mapstructure:"enc_key"`
 }

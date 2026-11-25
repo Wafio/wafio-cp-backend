@@ -22,6 +22,8 @@ type WAFOverviewStore interface {
 	TimelineForProject(ctx context.Context, projectID, agentID string, sinceMinutes, bucketSeconds int, hostIDs ...string) ([]WAFTimelineBucket, error)
 	TopCategoriesForProject(ctx context.Context, projectID, agentID string, sinceMinutes, limit int, hostIDs ...string) ([]dashboard.CountRow, error)
 	TopIPsForProject(ctx context.Context, projectID, agentID string, sinceMinutes, limit int, onlyBadActors bool, hostIDs ...string) ([]dashboard.CountRow, error)
+	// DBNow is the database clock, which ends the windows of the widgets: the rollups follow it.
+	DBNow(ctx context.Context) (time.Time, error)
 }
 
 // HostAgentLister lists a project's non-WAF agents.
@@ -70,10 +72,8 @@ func WithWAFWindowEnd(ctx context.Context, end time.Time) context.Context {
 	return context.WithValue(ctx, wafWindowEndKey{}, end.UTC())
 }
 
-// WAFWindowEnd returns the end set by WithWAFWindowEnd, or now.
-func WAFWindowEnd(ctx context.Context) time.Time {
-	if end, ok := ctx.Value(wafWindowEndKey{}).(time.Time); ok {
-		return end
-	}
-	return time.Now().UTC()
+// WAFWindowEnd returns the end set by WithWAFWindowEnd; ok is false when the context carries none.
+func WAFWindowEnd(ctx context.Context) (end time.Time, ok bool) {
+	end, ok = ctx.Value(wafWindowEndKey{}).(time.Time)
+	return end, ok
 }

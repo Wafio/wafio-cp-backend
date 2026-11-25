@@ -320,10 +320,15 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 		}
 	}
 
-	// 000119 adds agents.maintenance_mode, which UpdateAgentFeatures writes. This schema has no apps
-	// table, so only the agents column is added here; the migration itself runs in the round-trip test.
-	if _, err := pool.Exec(ctx, `ALTER TABLE agents ADD COLUMN maintenance_mode BOOLEAN`); err != nil {
-		t.Fatalf("maintenance_mode column: %v", err)
+	// 000119 and 000124 add agents.maintenance_mode and agents.tls_certificates, which UpdateAgentFeatures
+	// writes. This schema has no apps table, so only the agents columns are added here; the migrations
+	// themselves run in the round-trip test.
+	if _, err := pool.Exec(ctx, `ALTER TABLE agents ADD COLUMN maintenance_mode BOOLEAN, ADD COLUMN tls_certificates BOOLEAN`); err != nil {
+		t.Fatalf("feature columns: %v", err)
+	}
+	// The write of the TLS flag asks whether a credential is bound to the agent row; only the columns it reads exist here.
+	if _, err := pool.Exec(ctx, `CREATE TABLE mtls_credentials (id uuid PRIMARY KEY, project_id uuid, host_id uuid, agent_kind text, agent_name text)`); err != nil {
+		t.Fatalf("credentials table: %v", err)
 	}
 
 	// 000117 adds waf_decisions.status.
@@ -332,6 +337,11 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 		if _, err := pool.Exec(ctx, up117); err != nil {
 			t.Fatalf("000117 up (run %d): %v", i+1, err)
 		}
+	}
+
+	// The app summary reads the rollup tables.
+	if _, err := pool.Exec(ctx, readMigration(t, "000126_waf_rollups.up.sql")); err != nil {
+		t.Fatalf("000126 up: %v", err)
 	}
 
 	projectID, otherProject := uuid.NewString(), uuid.NewString()
@@ -408,10 +418,10 @@ func TestWAFObservabilityAgainstPostgres(t *testing.T) {
 		t.Fatalf("an agent that never reported script rules must read NULL: %+v", got)
 	}
 	no := false
-	if err := ebpf.UpdateAgentFeatures(ctx, projectID, wafID, &no, nil); err != nil {
+	if err := ebpf.UpdateAgentFeatures(ctx, projectID, wafID, &no, nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := ebpf.UpdateAgentFeatures(ctx, otherProject, oldID, &no, nil); err != nil {
+	if err := ebpf.UpdateAgentFeatures(ctx, otherProject, oldID, &no, nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	if sr, err := ebpf.AgentScriptRules(ctx, wafID); err != nil || sr == nil || *sr {

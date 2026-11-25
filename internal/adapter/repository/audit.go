@@ -58,6 +58,20 @@ const (
 	AuditAppMaintenanceDisabled = "app.maintenance_disabled"
 	AuditAppMaintenanceUpdated  = "app.maintenance_updated"
 
+	// TLS of an application: the settings saved, a certificate uploaded or deleted, an ACME
+	// certificate requested.
+	AuditAppTLSUpdated             = "app.tls_updated"
+	AuditAppTLSCertificateUploaded = "app.tls_certificate_uploaded"
+	AuditAppTLSCertificateDeleted  = "app.tls_certificate_deleted"
+	AuditAppTLSACMERequested       = "app.tls_acme_requested"
+
+	// Delivery of an application: compression, files from a folder and the response cache saved, and
+	// stored copies removed.
+	AuditAppCompressionUpdated = "app.compression_updated"
+	AuditAppStaticFilesUpdated = "app.static_files_updated"
+	AuditAppCacheUpdated       = "app.cache_updated"
+	AuditAppCachePurged        = "app.cache_purged"
+
 	// WAF (project-level) config
 	AuditWafConfigSaved      = "waf.config_saved"
 	AuditWafAppAssigned      = "waf.app_assigned" //nolint:gosec // audit action name, not a credential
@@ -90,6 +104,10 @@ const (
 	// Agent lifecycle (eBPF/host agents)
 	AuditAgentRegistered = "agent.registered"
 	AuditAgentDeleted    = "agent.deleted"
+
+	// Certificate keys sent to a WAF agent over its stream, and the agent's refusals
+	AuditAgentCertificateDelivered = "agent.certificate_delivered"
+	AuditAgentCertificateRefused   = "agent.certificate_refused"
 
 	// Firewall (eBPF) operations
 	AuditFirewallConfigUpdated     = "firewall.config_updated"

@@ -39,6 +39,7 @@ var traceStringGetters = map[string]func(*TraceEventPayload) string{
 	"event_name":       func(t *TraceEventPayload) string { return t.EventName },
 	"category":         func(t *TraceEventPayload) string { return t.Category },
 	"filename":         func(t *TraceEventPayload) string { return t.Filename },
+	"args":             func(t *TraceEventPayload) string { return t.Args },
 	"addr":             func(t *TraceEventPayload) string { return t.Addr },
 	"container_image":  func(t *TraceEventPayload) string { return t.ContainerImage },
 	"container_name":   func(t *TraceEventPayload) string { return t.ContainerName },
@@ -219,7 +220,7 @@ func NewTraceRuleEvaluator(rules []DetectionRule) *TraceRuleEvaluator {
 			}
 			conditions = append(conditions, preparedDetectionCondition{condition: condition, match: match})
 		}
-		if valid {
+		if valid && argsNameTheirEvent(rule.Conditions) {
 			prepared = append(prepared, preparedDetectionRule{DetectionRule: rule, conditions: conditions})
 		}
 	}
@@ -431,6 +432,8 @@ func traceStringField(t *TraceEventPayload, field string) (string, bool) {
 		return t.Category, true
 	case "filename":
 		return t.Filename, true
+	case "args":
+		return t.Args, true
 	case "addr":
 		return t.Addr, true
 	case "container_image":
@@ -502,6 +505,8 @@ func getEventField(t *TraceEventPayload, field string) any {
 		return t.Severity
 	case "filename":
 		return t.Filename
+	case "args":
+		return t.Args
 	case "addr":
 		return t.Addr
 	case "port":

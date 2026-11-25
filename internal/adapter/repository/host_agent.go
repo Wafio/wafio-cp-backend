@@ -370,16 +370,29 @@ func (r *EBPFRepo) UpdateAgentWAFHealth(ctx context.Context, projectID, agentID 
 }
 
 // UpdateAgentFeatures stores what the WAF agent reported in Hello: whether it can run script rules
-// (engine.AgentScriptRules) and whether it supports maintenance mode (engine.AgentMaintenanceMode);
-// nil = unknown. Written on every connect, so an agent replaced by an older build goes back to
-// unknown or false.
-func (r *EBPFRepo) UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance *bool) error {
+// (engine.AgentScriptRules), whether it supports maintenance mode (engine.AgentMaintenanceMode) and
+// whether it serves TLS certificates (engine.AgentTLSCertificates); nil = unknown. Written on every
+// connect, so an agent replaced by an older build goes back to unknown or false.
+//
+// hostBound says that the stream's credential is bound to a host. When a credential is bound to the
+// agent row (to its host, kind waf and name), only such a stream writes the TLS flag: a project-wide
+// credential connecting under the same name must not switch off, or on, what the agent of that
+// host reported, since the flag is one of the checks before a key is sent. Any other row takes the
+// flag from any stream, as the other two flags. A row can have a host without such a credential: a
+// project-wide agent that a host was linked to by its host name, whose own stream must still write
+// the flag.
+func (r *EBPFRepo) UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool, hostBound bool) error {
 	if r == nil || r.pool == nil {
 		return nil
 	}
 	_, err := r.pool.Exec(ctx,
-		`UPDATE agents SET script_rules = $3, maintenance_mode = $4 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
-		agentID, projectID, scriptRules, maintenance)
+		`UPDATE agents SET script_rules = $3, maintenance_mode = $4,
+		        tls_certificates = CASE WHEN $6::boolean OR NOT EXISTS (
+		            SELECT 1 FROM mtls_credentials c WHERE c.project_id = agents.project_id AND c.host_id IS NOT NULL
+		               AND c.host_id = agents.host_id AND c.agent_kind = 'waf' AND c.agent_name = agents.name
+		        ) THEN $5::boolean ELSE tls_certificates END
+		 WHERE deleted_at IS NULL AND id = $1 AND project_id = $2`,
+		agentID, projectID, scriptRules, maintenance, tlsCertificates, hostBound)
 	return err
 }
 
@@ -922,6 +935,8 @@ func (r *EBPFRepo) DeleteAgent(ctx context.Context, projectID, agentID string) e
 		`DELETE FROM waf_agent_apps WHERE agent_id = $1`,
 		`DELETE FROM waf_agent_bundles WHERE agent_id = $1`,
 		`DELETE FROM ebpf_trace_policies WHERE agent_id = $1`,
+		// The soft delete leaves the row, so the cascade that would take the reports does not run.
+		`DELETE FROM app_tls_status WHERE agent_id = $1`,
 	} {
 		if _, err := tx.Exec(ctx, q, agentID); err != nil {
 			return err

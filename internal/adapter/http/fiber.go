@@ -179,6 +179,10 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 		ReadTimeout:           httpReadTimeout,
 		WriteTimeout:          httpWriteTimeout,
 		IdleTimeout:           httpIdleTimeout,
+		// No handler reads a form or a file; they all read JSON. Without the pre-parse a multipart
+		// body is not copied into form values before a handler looks at it, which an upload of a
+		// private key would otherwise leave behind.
+		DisablePreParseMultipartForm: true,
 	})
 	// First: every later middleware and handler reads the resolved client
 	// address through c.IP() (server.trusted_proxies; never Fiber's
@@ -512,6 +516,33 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 	}
 	pViewer.Get("/apps/:appId/maintenance", RequireAppInProject(repo), rateReadByUser, maintenance.Get)
 	pViewer.Put("/apps/:appId/maintenance", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, maintenance.Put)
+	// TLS of an application: settings, uploaded certificate (the key is sealed with totp.enc_key),
+	// ACME request. Uploads have a budget of their own on top of the write limiter.
+	tlsOpts := resolveOptions(opts)
+	appTLS := &handlers.AppTLSHandler{Repo: repo, Resolver: tlsOpts.tlsResolver, Roots: tlsOpts.tlsRoots}
+	if agentServer != nil {
+		appTLS.AgentServer = agentServer
+		appTLS.Bundles = agentServer
+	}
+	rateCertUploadByUser := RateLimitCertUploadByUser(cfg)
+	pViewer.Get("/apps/:appId/tls", RequireAppInProject(repo), rateReadByUser, appTLS.Get)
+	pViewer.Put("/apps/:appId/tls", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.Put)
+	pViewer.Post("/apps/:appId/tls/certificate", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, rateCertUploadByUser, appTLS.UploadCertificate)
+	pViewer.Delete("/apps/:appId/tls/certificate", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.DeleteCertificate)
+	pViewer.Post("/apps/:appId/tls/acme", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, appTLS.RequestACME)
+	// Delivery of an application: compression, files from a folder, the response cache and the removal
+	// of stored copies. The agent reports on them in EdgeStatus.
+	delivery := &handlers.AppDeliveryHandler{Repo: repo}
+	if agentServer != nil {
+		delivery.AgentServer = agentServer
+		delivery.Bundles = agentServer
+	}
+	rateCachePurgeByUser := RateLimitCachePurgeByUser(cfg)
+	pViewer.Get("/apps/:appId/delivery", RequireAppInProject(repo), rateReadByUser, delivery.Get)
+	pViewer.Put("/apps/:appId/delivery/compression", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, delivery.PutCompression)
+	pViewer.Put("/apps/:appId/delivery/static-files", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, delivery.PutStaticFiles)
+	pViewer.Put("/apps/:appId/delivery/cache", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, delivery.PutCache)
+	pViewer.Post("/apps/:appId/cache/purge", RequireAppInProject(repo), RequireProjectAccess(repo, "member"), rateWriteByUser, rateCachePurgeByUser, delivery.PurgeCache)
 	// Per-app WAF dashboard (decisions + counters pushed by the WAF agents)
 	pViewer.Get("/apps/:appId/waf/decisions", RequireAppInProject(repo), rateReadByUser, wafAgent.AppDecisions)
 	feedbackH := &handlers.WAFFeedbackHandler{Repo: repo, SummarySvc: &application.FeedbackSummary{Store: repo.WAF}}
@@ -634,6 +665,9 @@ func NewFiberApp(ctx context.Context, cfg *config.Config, repo *repository.Repos
 		adminAPI.Put("/storage/budget", rateWriteByUser, storageH.UpdateBudget)
 		registerStorageMetrics(resolveOptions(opts).metrics, storage)
 	}
+
+	// Warns the members of a project before the certificate an application serves expires.
+	newCertificateExpiry(ctx, repo, mailSettings)
 
 	// ── Security data management (admin only) ──
 	if secDataH != nil {

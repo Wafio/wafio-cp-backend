@@ -35,6 +35,11 @@ func (r *WAFRepo) AppConfigRevision(ctx context.Context, projectID, appID string
 // effective override and bundle generation commit together. Raw snapshots are
 // never returned directly by the history read API.
 func (r *WAFRepo) SaveAppConfigRevision(ctx context.Context, projectID, appID, actor string, expected int64, rules []byte, sensitivity int, rollback *int64) (int64, error) {
+	leave, err := enterNestedTx(ctx) // it waits for the row of the application, with a connection in hand
+	if err != nil {
+		return 0, err
+	}
+	defer leave()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return 0, err

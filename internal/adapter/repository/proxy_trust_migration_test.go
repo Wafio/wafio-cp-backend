@@ -16,18 +16,19 @@ import (
 
 // appsProxyDDL is the part of apps that 000091 and AppRepo reads touch.
 const appsProxyDDL = `CREATE TABLE apps (
-	id            uuid PRIMARY KEY,
-	project_id    uuid NOT NULL,
-	name          text NOT NULL,
-	listen_host   text,
-	listen_port   int,
-	upstream_url  text,
-	proxy_config  jsonb NOT NULL DEFAULT '{}'::jsonb,
-	fcgi_doc_root text,
-	fcgi_index    text,
-	maintenance   jsonb NOT NULL DEFAULT '{}'::jsonb,
-	created_at    timestamptz NOT NULL DEFAULT now(),
-	updated_at    timestamptz NOT NULL DEFAULT now()
+	id             uuid PRIMARY KEY,
+	project_id     uuid NOT NULL,
+	name           text NOT NULL,
+	listen_host    text,
+	listen_port    int,
+	upstream_url   text,
+	proxy_config   jsonb NOT NULL DEFAULT '{}'::jsonb,
+	fcgi_doc_root  text,
+	fcgi_index     text,
+	fcgi_keep_conn boolean NOT NULL DEFAULT false,
+	maintenance    jsonb NOT NULL DEFAULT '{}'::jsonb,
+	created_at     timestamptz NOT NULL DEFAULT now(),
+	updated_at     timestamptz NOT NULL DEFAULT now()
 )`
 
 func proxyTrustSchema(t *testing.T) *pgxpool.Pool {

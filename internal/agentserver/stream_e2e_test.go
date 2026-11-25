@@ -610,18 +610,20 @@ func TestStreamHostAgentTelemetryOverMTLS(t *testing.T) {
 // script_rules is false for an agent that sent no_script_rules, true for one that sent script_rules or
 // any other feature (a v1 agent), and unknown for one that sent none. maintenance_mode is true for an
 // agent that sent maintenance_mode and false for every other agent that said Hello, also one that sent none.
+// tls_certificates follows the same rule.
 func TestStreamStoresAgentFeaturesFromHello(t *testing.T) {
 	for _, tc := range []struct {
-		name                       string
-		features                   []string
-		wantScripts, wantMaintMode string
+		name                            string
+		features                        []string
+		wantScripts, wantMaintMode, tls string
 	}{
-		{"script_rules", []string{engine.FeatureScriptRules}, "true", "false"},
-		{"no_script_rules", []string{engine.FeatureNoScriptRules}, "false", "false"},
-		{"script_rules and maintenance_mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true"},
-		{"a v1 agent", []string{"semantic_keys_jwt_graphql", "semantic_only"}, "true", "false"},
-		{"a v1 agent, no script rules", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false"},
-		{"no features", nil, "unknown", "false"},
+		{"script_rules", []string{engine.FeatureScriptRules}, "true", "false", "false"},
+		{"no_script_rules", []string{engine.FeatureNoScriptRules}, "false", "false", "false"},
+		{"script_rules and maintenance_mode", []string{engine.FeatureScriptRules, engine.FeatureMaintenanceMode}, "true", "true", "false"},
+		{"script_rules and tls_certificates", []string{engine.FeatureScriptRules, engine.FeatureTLSCertificates}, "true", "false", "true"},
+		{"a v1 agent", []string{"semantic_keys_jwt_graphql", "semantic_only"}, "true", "false", "false"},
+		{"a v1 agent, no script rules", []string{"semantic_keys_jwt_graphql", "semantic_only", engine.FeatureNoScriptRules}, "false", "false", "false"},
+		{"no features", nil, "unknown", "false", "false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newE2EEnv(t)
@@ -633,7 +635,7 @@ func TestStreamStoresAgentFeaturesFromHello(t *testing.T) {
 			waitUntil(t, "features stored", func() bool {
 				return len(env.health.featuresCalls()) == 1
 			})
-			if got, want := env.health.featuresCalls()[0], (featuresCall{e2eProject, e2eAgentID, tc.wantScripts, tc.wantMaintMode}); got != want {
+			if got, want := env.health.featuresCalls()[0], (featuresCall{e2eProject, e2eAgentID, tc.wantScripts, tc.wantMaintMode, tc.tls, false}); got != want {
 				t.Fatalf("stored features %+v, want %+v", got, want)
 			}
 		})

@@ -132,6 +132,33 @@ func RateLimitMailTestByUser(cfg *config.Config) fiber.Handler {
 	return newRateLimitByUser(cfg, mailTestMax, mailTestWindow)
 }
 
+// Certificate uploads per user: each one checks a chain of up to ten certificates and is the one
+// request that carries a private key.
+const (
+	certUploadMax    = 10
+	certUploadWindow = time.Minute
+)
+
+// RateLimitCertUploadByUser throttles POST /api/projects/{id}/apps/{appId}/tls/certificate to ten
+// uploads per minute per user, refused uploads included (fixed budget; off with
+// server.rate_limit_enabled = false like every limiter).
+func RateLimitCertUploadByUser(cfg *config.Config) fiber.Handler {
+	return newRateLimitByUser(cfg, certUploadMax, certUploadWindow)
+}
+
+// Removals of stored copies per user: each one is sent to the agent and clears part of its cache.
+const (
+	cachePurgeMax    = 30
+	cachePurgeWindow = time.Minute
+)
+
+// RateLimitCachePurgeByUser throttles POST /api/projects/{id}/apps/{appId}/cache/purge to thirty
+// removals per minute per user, refused ones included (fixed budget; off with
+// server.rate_limit_enabled = false like every limiter).
+func RateLimitCachePurgeByUser(cfg *config.Config) fiber.Handler {
+	return newRateLimitByUser(cfg, cachePurgeMax, cachePurgeWindow)
+}
+
 // RateLimitAgentByIP throttles the agent bearer-token endpoints
 // (/api/internal/host/*). Keyed by source IP so a
 // compromised key cannot be brute-force enumerated from a single host; the

@@ -48,6 +48,13 @@ type ProxyConfig struct {
 	// null) key means true; only an explicit false forwards such requests,
 	// which are then matched on the forwarded path like any other.
 	RejectInvalidPathEncoding bool `json:"reject_invalid_path_encoding"`
+
+	// StripPathPrefix is the path the application lives under, such as /shop: the upstream sees
+	// /cart for /shop/cart. A path that is not the prefix and does not continue it with / (/shopping
+	// is not under /shop) is answered 404 by the agent and never reaches the application, a
+	// WebSocket handshake included. "" removes nothing. Inspection, rules, events and the cache keep
+	// the full path. CheckStripPathPrefix lists what is valid.
+	StripPathPrefix string `json:"strip_path_prefix,omitempty"`
 }
 
 // ProxyTimeouts holds the per-app deadlines, in milliseconds.
@@ -271,6 +278,9 @@ func (pc ProxyConfig) Validate() error {
 		if total > maxProxyHeaderByte {
 			return fmt.Errorf("%s: header rules too large (max %d bytes)", hr.label, maxProxyHeaderByte)
 		}
+	}
+	if msg := CheckStripPathPrefix(pc.StripPathPrefix); msg != "" {
+		return fmt.Errorf("strip_path_prefix: %s", msg)
 	}
 	return validateTrustedProxies(pc.TrustedProxies)
 }

@@ -42,6 +42,7 @@ import (
 	"github.com/wafio/wafio-cp-backend/internal/domain"
 	"github.com/wafio/wafio-cp-backend/internal/engine"
 	"github.com/wafio/wafio-cp-backend/internal/fairshare"
+	"github.com/wafio/wafio-cp-backend/internal/otp"
 	"github.com/wafio/wafio-cp-backend/internal/validate"
 	agentv1 "github.com/wafio/wafio-cp-backend/shared/agentpb"
 	"google.golang.org/grpc"
@@ -104,6 +105,28 @@ type Server struct {
 	// EBPFPrepare decodes a v2 batch once before receipt deduplication. If
 	// decoding fails, the legacy callback preserves malformed-batch behavior.
 	EBPFPrepare func(payload []byte) (PreparedHostTelemetry, error)
+
+	// KeyCrypto opens the sealed private keys of uploaded certificates for delivery to an agent
+	// (certificate_install.go). With none, no key can be opened and no delivery happens.
+	KeyCrypto *otp.Encryptor
+	// certInstalls holds the CertificateInstall messages that wait for their ack, by command id.
+	certMu       sync.Mutex
+	certInstalls map[string]*certInstall
+	// certs, audit and clock replace the TLS repository, the audit repository and the wall clock,
+	// certTimeout the time an install waits for its ack, and afterWipe is called with the key buffer
+	// once it was zeroed after a send (tests only); nil or 0 means Repo.TLS, Repo.Audit, time.Now,
+	// 30 seconds and nothing.
+	certs       certificateStore
+	audit       auditSink
+	clock       func() time.Time
+	certTimeout time.Duration
+	afterWipe   func(key []byte)
+
+	// edge replaces the edge repository (the reports, features and removals of the cache; tests
+	// only), purgeRetry the time a busy purge waits before it is sent again; nil or 0 means
+	// Repo.Edge and 10 seconds.
+	edge       edgeStore
+	purgeRetry time.Duration
 
 	// BlockWindow tracks active block events so operators can see and clear them.
 	BlockWindow *BlockWindowStore
@@ -230,6 +253,48 @@ type streamHandle struct {
 	// legacyLogged holds the legacy-setting rewrites already logged on this
 	// connection (one line per scope and rewrite).
 	legacyLogged sync.Map
+	// binding and bound are what the mTLS credential of the stream was enrolled for (host, kind and
+	// name), taken from the authenticated context when the stream was made; bound is false for a
+	// project-wide credential. hostID above does not tell: a project-wide credential connecting
+	// under the name of an agent that has a host carries that host too. Only these decide whether
+	// the stream may be sent a private key (certificate_install.go).
+	binding credentialBinding
+	bound   bool
+	// peerIP is the address of the agent as the transport saw it, for audit rows.
+	peerIP string
+	// The worker that delivers keys on this stream is started by the first request and ended with the
+	// stream (certificate_install.go). queued counts the requests that wait or are being served.
+	workerMu        sync.Mutex
+	deliveries      chan deliveryRequest
+	workerCancel    context.CancelFunc
+	workerDone      chan struct{}
+	workerStopped   bool
+	pendingCerts    map[string]struct{} // certificate ids queued or being served, under workerMu
+	queued          atomic.Int64
+	queueFullLogged atomic.Bool
+	// installsDropped is set under Server.certMu when the installs of the stream were dropped, after
+	// which none is added.
+	installsDropped bool
+	// tlsApps are the ids of the apps whose entry in the last WAF bundle sent on this stream turns TLS
+	// on, under bundleMu. A status for any other app is dropped before it costs a query.
+	tlsApps map[string]struct{}
+	// open reports whether the stream is still taking part: not ended, revoked, or cut after a push
+	// that missed its deadline. Nil for handles built in tests, which count as open.
+	open func() bool
+	// certClaims tracks the certificates already sent on this stream (claimCertificateDelivery).
+	certMu     sync.Mutex
+	certClaims map[string]certClaim
+	// statusBudgets limits the statuses and chain parses per app (certificate_status.go).
+	statusMu      sync.Mutex
+	statusBudgets map[string]*appBudget
+	// edgeSeen limits the edge reports per app (edge_status.go).
+	edgeMu   sync.Mutex
+	edgeSeen map[string]edgeSeen
+	// purges are the cache purges sent on this stream that wait for their ack (cache_purge.go);
+	// purgesDropped is set when the stream ends, after which none is added.
+	purgeMu       sync.Mutex
+	purges        map[string]*purgeFlight
+	purgesDropped bool
 }
 
 func NewServer(repo *repository.Repository, loader BundleLoader, broker *DecisionBroker) *Server {
@@ -589,7 +654,7 @@ func decisionRowFromEvent(projectID, agentID, countryCode string, dec *agentv1.W
 // health counters. Narrow so ingestion can be tested without a database.
 type wafHealthWriter interface {
 	UpdateAgentWAFHealth(ctx context.Context, projectID, agentID string, h repository.AgentWAFHealth) error
-	UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance *bool) error
+	UpdateAgentFeatures(ctx context.Context, projectID, agentID string, scriptRules, maintenance, tlsCertificates *bool, hostBound bool) error
 }
 
 // wafHealthFromHeartbeat extracts the inspection-health fields (5-8, 11-20)
@@ -696,18 +761,28 @@ func (s *Server) storeWAFHealth(projectID, agentName string, hb *agentv1.Heartbe
 	}
 }
 
-// storeAgentFeatures records whether the agent can run script rules and whether it supports
-// maintenance mode, as reported in its Hello.
-// Synchronous; Stream calls it in a goroutine.
-func (s *Server) storeAgentFeatures(projectID, agentID string, features []string) {
+// storeAgentFeatures records whether the agent can run script rules, whether it supports
+// maintenance mode and whether it serves TLS certificates, as reported in its Hello. hostBound
+// says that the stream's credential is bound to a host: only such a stream writes the TLS flag of
+// an agent row that has a host (UpdateAgentFeatures).
+// Synchronous; Stream calls it before it registers the stream, so a CertificateStatus that the
+// agent sends after its first bundle finds the flag written. A failure is logged, since without the
+// flag no key is sent and nothing else says why.
+func (s *Server) storeAgentFeatures(projectID, agentID string, features []string, hostBound bool) {
 	defer recoverPanic("store-agent-features")
+	if agentID == "" {
+		log.Printf("[agentserver] agent features not stored, the agent has no row yet project=%s", projectID)
+		return
+	}
 	w := s.healthWriter()
-	if w == nil || agentID == "" {
+	if w == nil {
+		log.Printf("[agentserver] agent features not stored, no store project=%s agent=%s", projectID, agentID)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := w.UpdateAgentFeatures(ctx, projectID, agentID, engine.AgentScriptRules(features), engine.AgentMaintenanceMode(features)); err != nil {
+	if err := w.UpdateAgentFeatures(ctx, projectID, agentID, engine.AgentScriptRules(features), engine.AgentMaintenanceMode(features),
+		engine.AgentTLSCertificates(features), hostBound); err != nil {
 		log.Printf("[agentserver] store agent features failed project=%s agent=%s: %v", projectID, agentID, err)
 	}
 }
@@ -1296,8 +1371,10 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 		s.bindLive(live, hostID, resolvedAgentID)
 	}
 	rx.agentID = resolvedAgentID
+	binding, bound := bindingFrom(ctx)
 	if ebpfAgentID == "" {
-		go s.storeAgentFeatures(projectID, resolvedAgentID, hello.GetFeatures())
+		s.storeAgentFeatures(projectID, resolvedAgentID, hello.GetFeatures(), bound)
+		s.storeEdgeFeatures(projectID, resolvedAgentID, hello.GetFeatures())
 	}
 	handle := &streamHandle{
 		agentID:      resolvedAgentID,
@@ -1313,6 +1390,10 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 		hostID:       hostID,
 		disconnect:   live.markStuck,
 		features:     hello.GetFeatures(),
+		binding:      binding,
+		bound:        bound,
+		peerIP:       peerIP(ctx),
+		open:         func() bool { return ctx.Err() == nil && !live.ending() },
 	}
 	// Register before loading the first bundle so a push that lands in between
 	// reaches this connection rather than a predecessor with the same
@@ -1321,6 +1402,10 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 	rx.handle = handle
 	s.registerStream(handle)
 	defer s.unregisterStream(handle)
+	// Deferred after unregisterStream, so that it runs before it: the worker is stopped and refuses
+	// requests by the time unregisterStream drops the installs of the stream.
+	defer handle.stopDeliveries()
+	defer handle.dropPurges()
 	s.announceTelemetryDemand(handle)
 
 	// Send initial bundle for WAF agents only. Host/eBPF agents don't need routing
@@ -1343,6 +1428,11 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 			// Bounded like every push: a stuck initial Send marks the stream
 			// stuck and the receive loop below ends it.
 			_ = s.sendBounded(handle, func() error { return handle.sendHostBundle("waf_config", initMsg) })
+			// Removals that waited for this agent go out after its first bundle, on their own goroutine so
+			// that the receive loop is not held up by the database.
+			if handle.mayReceivePurges() {
+				go s.sendPendingPurges(handle, "")
+			}
 		} else if berr != nil {
 			log.Printf("[agentserver] bundle load for project=%s failed: %v", projectID, berr)
 		}
@@ -1458,6 +1548,8 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 			}
 			handle.recordHostBundleAck(ack)
 			s.recordUnblockAck(handle, ack)
+			s.recordCertificateInstallAck(handle, ack)
+			s.recordCachePurgeAck(handle, ack)
 			// eBPF telemetry batches are sent as CommandAck with a special
 			// command_id so we can reuse the existing proto message without
 			// a schema change.
@@ -1509,6 +1601,14 @@ func (s *Server) Stream(stream agentv1.AgentControl_StreamServer) error {
 					}
 				}
 			}
+			continue
+		}
+		if cs := msg.GetCertificateStatus(); cs != nil {
+			s.handleCertificateStatus(handle, cs)
+			continue
+		}
+		if es := msg.GetEdgeStatus(); es != nil {
+			s.handleEdgeStatus(handle, es)
 			continue
 		}
 		// Unknown messages are tolerated for forward-compat.
@@ -1671,6 +1771,8 @@ func (s *Server) registerStream(h *streamHandle) {
 //
 // Lock order agentCompMu -> mu, as in GetAgentComponentStatusPerAgent.
 func (s *Server) unregisterStream(h *streamHandle) {
+	// An ack can no longer come from this stream, so its installs need not wait out their timeout.
+	s.dropCertInstallsOf(h)
 	s.agentCompMu.Lock()
 	defer s.agentCompMu.Unlock()
 	s.mu.Lock()

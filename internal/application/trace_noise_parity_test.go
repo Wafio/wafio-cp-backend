@@ -66,7 +66,7 @@ func TestAgentReportNamesMatchControlPlane(t *testing.T) {
 // of /etc/passwd by any user would fill the ring and lose execs); their
 // writes, and reads of credential files, stay exempt.
 func TestPublicIdentityReadsAreNotShedExempt(t *testing.T) {
-	for _, path := range []string{"/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/root/.ssh/authorized_keys", "/home/u/.ssh/authorized_keys"} {
+	for _, path := range []string{"/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/login.defs", "/root/.ssh/authorized_keys", "/home/u/.ssh/authorized_keys"} {
 		p := TraceEventPayload{EventName: "openat", Filename: path}
 		if !tracefilter.IsPublicIdentityRead(&p) {
 			t.Fatalf("%s: no longer a public identity read at ingest; revisit traceKeepBuiltin", path)
@@ -75,7 +75,7 @@ func TestPublicIdentityReadsAreNotShedExempt(t *testing.T) {
 			t.Errorf("%s: a read is shed-exempt although ingest drops it", path)
 		}
 	}
-	for _, path := range []string{"/etc/shadow", "/etc/sudoers", "/etc/pam.d/common-auth", "/etc/security/limits.conf", "/root/.ssh/id_ed25519"} {
+	for _, path := range []string{"/etc/shadow", "/etc/sudoers", "/etc/pam.d/common-auth", "/etc/security/limits.conf", "/root/.ssh/id_ed25519", "/var/lib/wafio-waf-agent/tls/0b6f3c1e/key.pem", "/var/lib/wafio-waf-agent/tls/acme-account.pem"} {
 		if !hostpolicy.KeepsBuiltinRead(path) {
 			t.Errorf("%s: a read must stay shed-exempt", path)
 		}

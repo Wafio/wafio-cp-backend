@@ -3061,7 +3061,7 @@ paths:
     get:
       operationId: DashboardHandler_ByMethod
       summary: Decisions per HTTP method
-      description: Counts decisions by HTTP method, most frequent first. A decision without a method counts as GET. Reads decisions of the project's agents from waf_decisions by event time. Times are Unix seconds; the default window is the last 24 hours.
+      description: 'Counts decisions by HTTP method, most frequent first. A decision without a method counts as GET, in the same row as the decisions that say GET. Reads decisions of the project''s agents from waf_decisions by the time the control plane recorded them. Times are Unix seconds; the default window is the last 24 hours. Counts are approximate for the part of the window read from hourly rollups, which keep only the 50 busiest methods of each hour, so a method is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - WAF analytics
       parameters:
@@ -3487,7 +3487,7 @@ paths:
     get:
       operationId: DashboardHandler_GeoLocations
       summary: Client locations for the geo map
-      description: Returns the busiest client addresses with country, city, coordinates and per-action counts, enriched from the GeoIP database when the server has one. total_allow, total_log and total_block cover all decisions in the window, not only the listed locations. Reads decisions of the project's agents from waf_decisions by event time. Times are Unix seconds; the default window is the last 24 hours.
+      description: Returns the busiest client addresses with country, city, coordinates and per-action counts, enriched from the GeoIP database when the server has one. total_allow, total_log and total_block cover all decisions in the window, not only the listed locations. Reads decisions of the project's agents from waf_decisions by the time the control plane recorded them. Times are Unix seconds; the default window is the last 24 hours.
       tags:
         - WAF analytics
       parameters:
@@ -8307,6 +8307,7 @@ paths:
                       trust_forwarded: false
                     fcgi_doc_root: ''
                     fcgi_index: ''
+                    fcgi_keep_conn: false
                     maintenance_enabled: false
                     created_at: '2026-10-01T09:30:00Z'
                     updated_at: '2026-10-02T11:00:00Z'
@@ -8380,6 +8381,7 @@ paths:
                   upstream_url: null
                   fcgi_doc_root: ''
                   fcgi_index: ''
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
                   created_at: '2026-10-01T09:30:00Z'
                   updated_at: '2026-10-01T09:30:00Z'
@@ -8462,6 +8464,7 @@ paths:
                     trust_forwarded: false
                   fcgi_doc_root: ''
                   fcgi_index: ''
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
                   created_at: '2026-10-01T09:30:00Z'
                   updated_at: '2026-10-02T11:00:00Z'
@@ -8532,6 +8535,7 @@ paths:
                     trust_forwarded: false
                   fcgi_doc_root: ''
                   fcgi_index: ''
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
                   created_at: '2026-10-01T09:30:00Z'
                   updated_at: '2026-10-02T11:00:00Z'
@@ -8560,7 +8564,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE). Nothing is saved.
+          description: 'Name already used in the project (CONFLICT), listen address already used by another application on the same WAF agent (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of its WAF agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or the application is in gateway mode and the change gives it a listen port and an upstream for the first time, which brings its TLS entry (up to 100 hosts) into that bundle, and the bundle would be larger than an agent accepts (TLS_BUNDLE_TOO_LARGE), or a new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one (LISTEN_CONFLICT; field is listen_port), or proxy_config sets a strip_path_prefix that is not empty and differs from the stored one while the WAF agent reported that it does not apply redirects (AGENT_TOO_OLD; the answer carries feature and agent). A save that sends the listen host and port the application already has is not checked again. Nothing is saved.'
           content:
             application/json:
               schema:
@@ -8630,6 +8634,94 @@ paths:
                 $ref: '#/components/schemas/Error'
         '500':
           description: 'Database error. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/cache/purge:
+    post:
+      operationId: AppDeliveryHandler_PurgeCache
+      summary: Remove stored copies from the cache of an application
+      description: 'Queues the removal of stored copies and sends it to the WAF agent that serves the application. scope is url (one stored address with every encoding and Vary variant), prefix (everything whose path starts with url, on every host or on the host of an absolute URL) or app (everything, url empty). For url and prefix the address is a path that starts with / or an absolute http:// or https:// URL, written with a lower-case scheme and host and without the default port; prefix takes no query; at most 2,048 bytes of printable ASCII without space or #. Everything after the host is sent as typed, and the agent reads it the way it reads a request target before it makes the key of a stored copy: the path is decoded, . and .. segments are resolved and it is escaped again with upper-case hex, so /a%2db and /a%2Db name one copy; the query is kept byte for byte, so /p?a=1&b=2 and /p?b=2&a=1 are two copies. A url is then compared with the whole stored target, query included. Answers 202 with the row: the state is pending until the agent answers. The row is sent at once to a connected agent, and again after the first bundle of each connect while it is pending, so a removal for an offline agent waits and runs when it comes back; a busy agent is asked again after 10 seconds; a removal still pending after 7 days fails with expired. At most 20 removals wait for one application (PURGE_QUEUE_FULL) and the newest 20 rows are kept (one that still waits is never deleted). 409 CACHE_OFF when the saved cache is off. Writes the audit entry app.cache_purged.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateCachePurgeByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppCachePurgeInput'
+            example:
+              scope: url
+              url: https://shop.example.com/products/42
+      responses:
+        '202':
+          description: The removal is queued. The dashboard reads its progress from GET delivery (purges).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppCachePurge'
+              example:
+                id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                scope: url
+                url: https://shop.example.com/products/42
+                state: pending
+                error: ''
+                by: Dewi
+                agent: ''
+                created_at: '2026-11-24T09:20:00Z'
+                finished_at: null
+        '400':
+          description: 'The body is not valid JSON (BAD_REQUEST), or the scope or the address is not valid (INVALID_CACHE_PURGE; field is scope or url).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Enter an address that starts with http://, https:// or /.
+                code: INVALID_CACHE_PURGE
+                field: url
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'The saved cache of the application is off, so nothing is stored (CACHE_OFF).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: The cache of this application is off, so nothing is stored. Turn it on first.
+                code: CACHE_OFF
+        '429':
+          description: 'Rate limit exceeded (RATE_LIMITED, RATE_LIMIT_EXCEEDED; 30 removals a minute per user, refused ones included), or 20 removals already wait for the application (PURGE_QUEUE_FULL). May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The removal could not be stored. Code: INTERNAL_ERROR.'
           content:
             application/json:
               schema:
@@ -9185,6 +9277,417 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/delivery:
+    get:
+      operationId: AppDeliveryHandler_Get
+      summary: Get the compression, files and cache settings of an application
+      description: 'Returns the three delivery objects (compression, static_files, cache) with every default filled in, so an application that never saved one reads as the defaults with its switch off, the WAF agent that serves the application (agent: id, name, online, and what it said in Hello about applying redirects, compression, static_files and cache; null in a feature = it never said, false = it said Hello without that name and is older than that part), the bundle generation of that agent (generation) and its last report (status). status holds, for each of redirects, compression, static_files and cache, the state the agent reported (applied or refused, with a code and a detail when refused, and running_previous when it keeps the part it applied before) or null when it sent none, with the generation of the bundle the report answers and when the server received it; a report below the generation means the agent has not answered the latest bundle yet. cache_stats and compression_stats are the counters of the last hour from that report (null when there is none). A report of an agent that the application has left is not shown. purges lists the last 10 removals of stored copies, newest first. Everything in status, cache_stats and the detail of a part came from the agent and is text or numbers only.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: viewer
+      x-rate-limiter: rateReadByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      responses:
+        '200':
+          description: The delivery settings and what the agent reported.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppDelivery'
+              example:
+                compression:
+                  enabled: true
+                  min_bytes: 1024
+                static_files:
+                  enabled: false
+                  root: ''
+                  missing: app
+                  max_age_s: 0
+                cache:
+                  enabled: true
+                  default_ttl_s: 3600
+                  stale_if_error_s: 600
+                  disk_bytes: 1073741824
+                  memory_bytes: 33554432
+                  max_object_bytes: 8388608
+                  session_cookies: []
+                  rules: []
+                agent:
+                  id: a1f0c2d4-8e5b-4a77-b1c9-5d1c2e3f4a5b
+                  name: edge-1
+                  online: true
+                  features:
+                    redirects: true
+                    compression: true
+                    static_files: true
+                    cache: true
+                generation: 1767225600
+                status:
+                  agent_id: a1f0c2d4-8e5b-4a77-b1c9-5d1c2e3f4a5b
+                  generation: 1767225600
+                  received_at: '2026-11-24T09:31:00Z'
+                  redirects: null
+                  compression:
+                    feature: compression
+                    state: applied
+                    code: ''
+                    detail: ''
+                    running_previous: false
+                  static_files: null
+                  cache:
+                    feature: cache
+                    state: applied
+                    code: ''
+                    detail: ''
+                    running_previous: false
+                cache_stats:
+                  requests: 1200
+                  hits_memory: 700
+                  hits_disk: 200
+                  misses: 250
+                  bypass: 50
+                  stale: 0
+                  stored: 240
+                  skipped_no_lifetime: 30
+                  skipped_private: 12
+                  skipped_too_large: 0
+                  skipped_streamed: 3
+                  skipped_disk_full: 0
+                  evictions: 0
+                  corrupt: 0
+                  disk_bytes: 52428800
+                  memory_bytes: 4194304
+                  objects: 310
+                compression_stats:
+                  responses: 800
+                  skipped_streamed: 3
+                  bytes_saved: 91234567
+                purges:
+                  - id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                    scope: url
+                    url: /products/42
+                    state: done
+                    error: ''
+                    by: Dewi
+                    agent: edge-1
+                    created_at: '2026-11-24T09:20:00Z'
+                    finished_at: '2026-11-24T09:20:02Z'
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The settings could not be read. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/delivery/cache:
+    put:
+      operationId: AppDeliveryHandler_PutCache
+      summary: Set the response cache of an application
+      description: 'Replaces the cache object: the switch and its settings. Every value that is left out takes its default, and every value is checked on every save, whether the switch is on or off (400 INVALID_DELIVERY_SETTINGS with the field and the sentence for it). default_ttl_s 0 to 365 days (default 1 hour; the lifetime of images, fonts, media, styles and scripts the application gives none for, 0 turns it off), stale_if_error_s 0 to 1 day (default 10 minutes; 0 sends the error while the application is down), disk_bytes 16 MiB to 1 TiB (default 1 GiB), memory_bytes 0 to 4 GiB (default 32 MiB), max_object_bytes 1 KiB to 64 MiB and at most disk_bytes (default 8 MiB), up to 20 session_cookies (RFC 6265 names of up to 64 characters, trimmed, a repeat in any case dropped; they are sent to the agent while compression or the cache is on, the cache being off included, so compression can tell a signed-in visitor) and up to 50 rules, each path prefix once (action cache with ttl_s 1 second to 365 days, or bypass, which stores no lifetime and no signed_in). A visitor who is signed in (an Authorization header, user information in the request target or a session cookie) skips the cache unless a matching rule has signed_in, and a request with a cookie that is not a session cookie is stored only for an answer marked public or with s-maxage or of a default_ttl_s file type, unless a matching rule has signed_in: a rule alone does not allow it. A save raises the bundle generation and pushes it to the project agents when the bundle changed (nothing changes while the cache is off before and after unless session_cookies changed while compression is on, or when the stored object is saved again) and writes the audit entry app.cache_updated with the old and the new object. Turning the cache on, or changing it while it is on, needs an agent that did not report edge_cache as false (AGENT_TOO_OLD); an agent that never reported is let through. The agent applies the settings itself and may refuse them (see status): the control plane cannot check the free space of its disk.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppCacheInput'
+            example:
+              enabled: true
+              default_ttl_s: 3600
+              stale_if_error_s: 600
+              disk_bytes: 1073741824
+              memory_bytes: 33554432
+              max_object_bytes: 8388608
+              session_cookies:
+                - shop_session
+              rules:
+                - prefix: /blog/
+                  action: cache
+                  ttl_s: 600
+                  signed_in: false
+                - prefix: /account/
+                  action: bypass
+                  ttl_s: 0
+                  signed_in: false
+      responses:
+        '200':
+          description: The object as stored, with every default filled in, and the bundle generation the WAF agent gets with it (null while no agent serves the application, and the current generation when the save changed nothing the agent reads).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppCacheSaved'
+              example:
+                cache:
+                  enabled: true
+                  default_ttl_s: 3600
+                  stale_if_error_s: 600
+                  disk_bytes: 1073741824
+                  memory_bytes: 33554432
+                  max_object_bytes: 8388608
+                  session_cookies:
+                    - shop_session
+                  rules:
+                    - prefix: /blog/
+                      action: cache
+                      ttl_s: 600
+                      signed_in: false
+                    - prefix: /account/
+                      action: bypass
+                      ttl_s: 0
+                      signed_in: false
+                generation: 1767225600
+        '400':
+          description: 'The body is not valid JSON (BAD_REQUEST), or a value is outside its limit (INVALID_DELIVERY_SETTINGS). The answer then carries field, the JSON key that was refused (default_ttl_s, stale_if_error_s, disk_bytes, memory_bytes, max_object_bytes, session_cookies, rules, or rules[n].prefix, rules[n].action and rules[n].ttl_s), and error holds the sentence the dashboard shows under that field.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Enter a time from 0 seconds to 365 days.
+                code: INVALID_DELIVERY_SETTINGS
+                field: max_age_s
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A check failed and nothing is saved. Codes: AGENT_TOO_OLD (the WAF agent that serves the application reported that it does not apply this part, and the save switches it on or changes it; the answer carries feature and agent; a part that is switched off, a save of the stored value and an agent that never reported always pass), BUNDLE_TOO_LARGE (the bundle of the agent with these settings would be larger than the 4,193,280 bytes an agent accepts).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: The WAF agent "edge-1" is too old for the cache. Upgrade it to use this.
+                code: AGENT_TOO_OLD
+                feature: cache
+                agent: edge-1
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The settings could not be saved. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/delivery/compression:
+    put:
+      operationId: AppDeliveryHandler_PutCompression
+      summary: Set the compression of an application
+      description: 'Replaces the compression object: the switch and min_bytes, the smallest answer that is compressed (0 to 1 MiB, default 1 KiB). The WAF agent compresses answers that came from the application with brotli or gzip, whichever the visitor accepts. The body is checked on every save, whether the switch is on or off (400 INVALID_DELIVERY_SETTINGS). A save raises the bundle generation and pushes it when the bundle changed, and writes the audit entry app.compression_updated with the old and the new object. Turning compression on, or changing it while it is on, needs an agent that did not report edge_compression as false (AGENT_TOO_OLD).'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppCompressionInput'
+            example:
+              enabled: true
+              min_bytes: 1024
+      responses:
+        '200':
+          description: The object as stored, with every default filled in, and the bundle generation the WAF agent gets with it (null while no agent serves the application, and the current generation when the save changed nothing the agent reads).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppCompressionSaved'
+              example:
+                compression:
+                  enabled: true
+                  min_bytes: 1024
+                generation: 1767225600
+        '400':
+          description: 'The body is not valid JSON (BAD_REQUEST), or a value is outside its limit (INVALID_DELIVERY_SETTINGS). The answer then carries field, the JSON key that was refused (min_bytes), and error holds the sentence the dashboard shows under that field.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Enter a time from 0 seconds to 365 days.
+                code: INVALID_DELIVERY_SETTINGS
+                field: max_age_s
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A check failed and nothing is saved. Codes: AGENT_TOO_OLD (the WAF agent that serves the application reported that it does not apply this part, and the save switches it on or changes it; the answer carries feature and agent; a part that is switched off, a save of the stored value and an agent that never reported always pass), BUNDLE_TOO_LARGE (the bundle of the agent with these settings would be larger than the 4,193,280 bytes an agent accepts).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: The WAF agent "edge-1" is too old for compression. Upgrade it to use this.
+                code: AGENT_TOO_OLD
+                feature: compression
+                agent: edge-1
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The settings could not be saved. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/delivery/static-files:
+    put:
+      operationId: AppDeliveryHandler_PutStaticFiles
+      summary: Set the files served from a folder of an application
+      description: 'Replaces the static files object: the switch, root (an absolute folder of the host of the agent, at most 1,024 bytes, no empty, . or .. segment and no control character, trimmed and without trailing slashes), missing (app, the default, sends a request whose file is not in the folder to the application; not_found answers 404) and max_age_s (0 to 365 days, the browser cache time; 0 sets none). The folder is refused when it is /, or is, is above or is below /etc, /root, /proc, /sys, /dev, /run, /boot, /usr, /var/lib/wafio-waf-agent or /var/cache/wafio-waf, or when any segment of its path is a name the host agent''s trace always keeps (66 names such as private, network, systemd, shadow, credentials and .aws, in any ASCII case, the list in test/frontend-fixtures/trace-keep-names.json; the agent never serves such a folder), except under /home, which the agent answers with root_unreadable (400 INVALID_DELIVERY_SETTINGS, field root, the same sentence for every kind of forbidden folder); the agent checks the folder again after it resolved it, and whether it exists and can be read (see status). The body is checked on every save, whether the switch is on or off; a folder is required only while the switch is on. A save raises the bundle generation and pushes it when the bundle changed, and writes the audit entry app.static_files_updated with the old and the new object. Turning the part on, or changing it while it is on, needs an agent that did not report edge_static_files as false (AGENT_TOO_OLD).'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppStaticFilesInput'
+            example:
+              enabled: true
+              root: /var/www/shop/public
+              missing: app
+              max_age_s: 3600
+      responses:
+        '200':
+          description: The object as stored, with every default filled in, and the bundle generation the WAF agent gets with it (null while no agent serves the application, and the current generation when the save changed nothing the agent reads).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppStaticFilesSaved'
+              example:
+                static_files:
+                  enabled: true
+                  root: /var/www/shop/public
+                  missing: app
+                  max_age_s: 3600
+                generation: 1767225600
+        '400':
+          description: 'The body is not valid JSON (BAD_REQUEST), or a value is outside its limit (INVALID_DELIVERY_SETTINGS). The answer then carries field, the JSON key that was refused (root, missing, max_age_s), and error holds the sentence the dashboard shows under that field.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Enter a time from 0 seconds to 365 days.
+                code: INVALID_DELIVERY_SETTINGS
+                field: max_age_s
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A check failed and nothing is saved. Codes: AGENT_TOO_OLD (the WAF agent that serves the application reported that it does not apply this part, and the save switches it on or changes it; the answer carries feature and agent; a part that is switched off, a save of the stored value and an agent that never reported always pass), BUNDLE_TOO_LARGE (the bundle of the agent with these settings would be larger than the 4,193,280 bytes an agent accepts).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: The WAF agent "edge-1" is too old for files from a folder. Upgrade it to use this.
+                code: AGENT_TOO_OLD
+                feature: static_files
+                agent: edge-1
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The settings could not be saved. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/projects/{id}/apps/{appId}/maintenance:
     get:
       operationId: AppMaintenanceHandler_Get
@@ -9332,6 +9835,448 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/tls:
+    get:
+      operationId: AppTLSHandler_Get
+      summary: Get how an application is served over TLS
+      description: 'Returns the TLS settings of the application (mode proxy or gateway, hosts, listen, redirect_listen and source), its current uploaded certificate, the ACME request, the last status its WAF agent reported, and warnings. A certificate is described by its names, issuer, dates, days_left, SHA-256 of the leaf, key type and trusted flag. No answer of the TLS operations carries a private key, and none ever will: the key is sealed at upload and only sent to the agent. certificate is null while the application has none, acme is null until a certificate was requested, and status is null until the agent reported since the settings last changed. agent_supported is whether the WAF agent that serves the application said in its Hello that it serves TLS certificates (null: no agent serves the application, or it never said), and agent_host_bound is whether its credential is bound to its host, which an uploaded key needs (null: no agent serves the application). listen is the HTTPS address the agent binds, 0.0.0.0:443 until another one is saved. warnings lists not_trusted (the uploaded chain does not verify to the system roots, which is fine for a private CA), and expires_soon (an uploaded certificate with 30 days or fewer left, an ACME certificate with 14 or fewer, which for ACME means that the renewal is late; days_left is 0 during the last day and negative once the certificate expired).'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: viewer
+      x-rate-limiter: rateReadByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      responses:
+        '200':
+          description: The TLS state of the application.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSState'
+              example:
+                mode: gateway
+                hosts:
+                  - shop.example.com
+                listen: 0.0.0.0:443
+                redirect_listen: 0.0.0.0:80
+                source: uploaded
+                canonical_host: shop.example.com
+                certificate:
+                  id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                  source: uploaded
+                  names:
+                    - shop.example.com
+                  issuer: Example Issuing CA
+                  not_before: '2026-10-01T00:00:00Z'
+                  not_after: '2027-01-01T00:00:00Z'
+                  days_left: 41
+                  leaf_sha256: 9b0c2b1f5d6a4f0b8a6c1e3d7f2a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
+                  key_type: ecdsa-p256
+                  trusted: true
+                  created_at: '2026-11-20T09:30:00Z'
+                acme: null
+                status:
+                  agent_id: a1f0c2d4-8e5b-4a77-b1c9-5d1c2e3f4a5b
+                  source: uploaded
+                  state: active
+                  certificate_id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                  leaf_sha256: 9b0c2b1f5d6a4f0b8a6c1e3d7f2a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
+                  error: ''
+                  error_code: ''
+                  next_attempt_at: null
+                  request_id: ''
+                  received_at: '2026-11-20T09:31:00Z'
+                  names:
+                    - shop.example.com
+                  issuer: Example Issuing CA
+                  not_before: '2026-10-01T00:00:00Z'
+                  not_after: '2027-01-01T00:00:00Z'
+                agent_supported: true
+                agent_host_bound: true
+                warnings: []
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The state could not be read. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      operationId: AppTLSHandler_Put
+      summary: Set how an application is served over TLS
+      description: 'Replaces the TLS settings: mode, hosts (1 to 100 lower-case DNS names without wildcard, IP address or port, unique on one listener of one agent), listen (ip:port or [ipv6]:port, default 0.0.0.0:443), redirect_listen (optional, differs from listen), source (acme or uploaded, required in gateway mode) and canonical_host (the main host name, optional, one of hosts). A proxy application keeps its settings as a draft and the agent never sees them. The first field that is not valid is answered with INVALID_TLS_SETTINGS and its name. Switching to gateway, or changing the source or the hosts of a gateway application, is checked under a lock on the application and on the bundle of its WAF agent: the agent must not have said that it cannot serve TLS certificates (TLS_UNSUPPORTED; an agent that never said is let through); for the uploaded source the application needs a current certificate that has not expired (CERTIFICATE_REQUIRED) and covers every host (CERTIFICATE_DOES_NOT_COVER), and its agent needs a credential bound to its host, kind and name (AGENT_NOT_HOST_BOUND: enroll the agent again with a host key); for acme a request id is minted when there is none. A save in gateway mode is also measured against the size of the bundle of its agent: the entry of an application has up to 100 hosts, and an agent accepts a configuration of at most 4,193,280 bytes (TLS_BUNDLE_TOO_LARGE, field hosts; use fewer hosts or serve some applications from another agent). The size is measured under the same lock, with the entry this save would give the application. Every PUT of a gateway application is also checked against the other applications on its agent, which the agent would otherwise refuse as a whole: a listener address is used by one kind of listener only (LISTEN_CONFLICT: an address of a plain listener, an HTTPS listener or a redirect listener, or two addresses on one port where one is a wildcard), and a host is served once per HTTPS listener (HOST_CONFLICT). Applications that share an HTTPS listener may have different timeouts and limits in proxy_config: the agent uses the largest value per listener and applies the limits of each application after routing. Nothing is saved when a check fails. Saves the settings, drops the status the agent reported for another source, raises the bundle generation and pushes it to the project agents when the bundle changed, and writes an audit entry (app.tls_updated). The answer has the shape of GET and, for the hosts this save looks up, carries a dns_mismatch warning for each host that resolves to at least one public address when none of its public addresses is a public address the agent host reported (the public_ip and primary_ip of its host information). Only a save that switches the application to gateway mode looks up all its hosts, and a save that stays in gateway mode looks up the hosts it added; a draft in proxy mode looks up nothing. One save looks up at most 10 hosts, the rest are not checked, and all lookups share 2 seconds. The hint is silent when the agent host reported no public address (the Rust WAF agent reports only primary_ip, which behind a NAT or on a cloud VM is a private address, so it stays silent there), for a host that does not resolve, for one that resolves to private addresses only (the two look the same), and for a host whose lookup did not finish in time. Nothing about DNS is stored.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppTLSInput'
+            example:
+              mode: gateway
+              hosts:
+                - shop.example.com
+              listen: 0.0.0.0:443
+              redirect_listen: 0.0.0.0:80
+              source: acme
+      responses:
+        '200':
+          description: The settings as stored, in the shape of the GET answer, with the dns_mismatch warnings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSState'
+              example:
+                mode: gateway
+                hosts:
+                  - shop.example.com
+                listen: 0.0.0.0:443
+                redirect_listen: 0.0.0.0:80
+                source: acme
+                canonical_host: ''
+                certificate: null
+                acme:
+                  request_id: 0f5d3a84-52f8-4c5f-8c5e-4e9d6d1f21aa
+                  requested_at: '2026-11-20T09:30:00Z'
+                status: null
+                agent_supported: true
+                agent_host_bound: true
+                warnings:
+                  - code: dns_mismatch
+                    host: shop.example.com
+                    resolved:
+                      - 198.51.100.7
+                    agent_addresses:
+                      - 203.0.113.10
+        '400':
+          description: 'The body is not valid JSON (BAD_REQUEST), or a field is not valid (INVALID_TLS_SETTINGS). The answer then carries field, the JSON key that was rejected (mode, source, hosts, listen or redirect_listen), and error holds the reason.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: 'hosts: at least one host is required when mode is "gateway"'
+                code: INVALID_TLS_SETTINGS
+                field: hosts
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A check failed and nothing is saved. Codes: TLS_UNSUPPORTED (the agent said it cannot serve TLS certificates), CERTIFICATE_REQUIRED (an uploaded source needs a current certificate that has not expired), CERTIFICATE_DOES_NOT_COVER (the certificate does not cover a host; the answer carries host), AGENT_NOT_HOST_BOUND (the agent has no credential bound to its host, kind and name), LISTEN_CONFLICT and HOST_CONFLICT (another application on the agent; field names the setting that must change), TLS_BUNDLE_TOO_LARGE (the bundle of the agent, with these settings, would be larger than the 4,193,280 bytes an agent accepts; field is hosts), AGENT_TOO_OLD (canonical_host is not empty and differs from the stored one, and the WAF agent reported that it does not apply redirects; the answer carries feature and agent).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: The WAF agent that serves this application does not serve TLS certificates. Upgrade the agent first.
+                code: TLS_UNSUPPORTED
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The settings could not be saved. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/tls/acme:
+    post:
+      operationId: AppTLSHandler_RequestACME
+      summary: Ask the agent to order an ACME certificate
+      description: 'Sets the source to acme and gives the application a new ACME request id, which the WAF agent reads as an order to start now (also a retry after a failed order). The application needs at least one host (INVALID_TLS_SETTINGS) and one request is accepted per application every 5 minutes (ACME_REQUEST_TOO_SOON, with retry_after in seconds). The status the agent reported for another source is dropped. Raises the bundle generation and pushes it when the application is in gateway mode, and writes an audit entry (app.tls_acme_requested). The answer has the shape of GET.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      responses:
+        '200':
+          description: The state of the application with the new request id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSState'
+              example:
+                mode: gateway
+                hosts:
+                  - shop.example.com
+                listen: 0.0.0.0:443
+                redirect_listen: ''
+                source: acme
+                canonical_host: ''
+                certificate: null
+                acme:
+                  request_id: 0f5d3a84-52f8-4c5f-8c5e-4e9d6d1f21aa
+                  requested_at: '2026-11-20T09:30:00Z'
+                status: null
+                agent_supported: true
+                agent_host_bound: true
+                warnings: []
+        '400':
+          description: 'The application has no host (INVALID_TLS_SETTINGS, field hosts).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: 'hosts: at least one host is required'
+                code: INVALID_TLS_SETTINGS
+                field: hosts
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A request was made less than 5 minutes ago (ACME_REQUEST_TOO_SOON). retry_after is the number of seconds to wait. Nothing is saved.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: an ACME request was made recently; try again in 212 seconds
+                code: ACME_REQUEST_TOO_SOON
+                retry_after: 212
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The request could not be saved. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/projects/{id}/apps/{appId}/tls/certificate:
+    post:
+      operationId: AppTLSHandler_UploadCertificate
+      summary: Upload the certificate and private key of an application
+      description: 'Stores a certificate chain and its private key as the current certificate of the application and sets the source to uploaded. The body is at most 96 KiB. chain_pem holds only CERTIFICATE blocks, leaf first (1 to 10 certificates, at most 64 KiB; a root at the end is dropped); key_pem holds one unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block (at most 16 KiB; RSA of 2048 to 4096 bits or ECDSA P-256 or P-384). The control plane checks the order of the chain, that the leaf is no CA, the dates (a certificate valid from at most 24 hours ahead is accepted), that no certificate is signed with SHA-1 or MD5, that the leaf covers every host of the application, and that the key matches the leaf. Every refusal is 400 INVALID_CERTIFICATE with field (chain_pem, key_pem, or body for a refusal about the whole request) and reason: bad_pem, private_key_in_chain, too_large (field body when the request is larger than 96 KiB), chain_order, ca_leaf, expired, not_yet_valid, weak_signature, names_do_not_cover (the answer carries host), key_encrypted (the message names the openssl command that removes the passphrase), pkcs12 (the message names the openssl command that converts the file), unsupported_key, key_mismatch, or bad_json (field body: a top-level field appears twice, in any letter case, for example key_pem and KEY_PEM, so there is no telling which one a reader would take). A body that is not a JSON object, or has a chain_pem or key_pem that is not a string, is 400 BAD_REQUEST. The answer never repeats the input. The control plane clears the request body and every copy it makes of the chain and the key on every way out, best effort: the connection read buffers of the server and the buffers of a reverse proxy in front of it may keep copies of an upload for a while. A chain that does not verify to the system roots is stored (a private CA is a legitimate source) and shown with trusted false. The key is sealed with the key from totp.enc_key before it is stored and is never returned or logged; without that key the upload is refused with 503 KEY_ENCRYPTION_UNAVAILABLE. A new upload gets a new certificate id and the previous certificate loses its key. When the application is in gateway mode the bundle generation goes up and the bundle is pushed; the certificate itself goes to the agent over its gRPC stream, and only to an agent whose credential is bound to its host. An application in gateway mode with another source switches to uploaded with this upload, and is refused with 409 AGENT_NOT_HOST_BOUND when its agent has no such credential. Writes an audit entry (app.tls_certificate_uploaded: id, names, expiry, leaf, replaced id). Uploads are limited to 10 per minute per user, refused ones included.'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser, rateCertUploadByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppTLSCertificateInput'
+            example:
+              chain_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n"
+              key_pem: "-----BEGIN PRIVATE KEY-----\nMIGH...\n-----END PRIVATE KEY-----\n"
+      responses:
+        '201':
+          description: The certificate as stored. It is now the current one of the application.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSCertificate'
+              example:
+                id: 6f1f4f0e-3c55-4b1c-9d33-2f6a5a1b7c10
+                source: uploaded
+                names:
+                  - shop.example.com
+                issuer: Example Issuing CA
+                not_before: '2026-10-01T00:00:00Z'
+                not_after: '2027-01-01T00:00:00Z'
+                days_left: 41
+                leaf_sha256: 9b0c2b1f5d6a4f0b8a6c1e3d7f2a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
+                key_type: ecdsa-p256
+                trusted: true
+                created_at: '2026-11-20T09:30:00Z'
+        '400':
+          description: 'The body is not a JSON object, or a text is not a string (BAD_REQUEST), or the chain, the key or the request is refused (INVALID_CERTIFICATE, with field and reason: chain_pem or key_pem for a text, body with too_large for a request over 96 KiB, body with bad_json for a field that appears twice in any letter case). Nothing is stored.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: 'the key is protected by a passphrase; remove it first: openssl pkey -in key.pem -out key-plain.pem'
+                code: INVALID_CERTIFICATE
+                field: key_pem
+                reason: key_encrypted
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'The application is in gateway mode with another source and its agent has no credential bound to its host (AGENT_NOT_HOST_BOUND). Nothing is stored.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: The WAF agent that serves this application has no credential bound to its host, so it cannot receive a private key. Enroll the agent again with a host key, then retry.
+                code: AGENT_NOT_HOST_BOUND
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The certificate could not be stored. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'No encryption key is configured on the control plane (KEY_ENCRYPTION_UNAVAILABLE). Nothing is stored.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'Certificate keys cannot be stored: no encryption key is configured on the control plane (totp.enc_key).'
+                code: KEY_ENCRYPTION_UNAVAILABLE
+    delete:
+      operationId: AppTLSHandler_DeleteCertificate
+      summary: Delete the certificates of an application
+      description: 'Deletes the private key of every certificate of the application and the pointer to the current one. The certificate rows stay as a record of what was uploaded. It is refused while the application is in gateway mode with the uploaded source (CERTIFICATE_IN_USE): switch it to acme or to proxy mode first, or upload a replacement. A key that an agent already holds is not recalled: replace the certificate after a move or a removal. The bundle does not change. Writes an audit entry (app.tls_certificate_deleted).'
+      tags:
+        - Applications
+        - WAF agents
+      x-required-project-role: member
+      x-rate-limiter: rateWriteByUser
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AppIdPath'
+      responses:
+        '200':
+          description: The certificate and its key were deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                    description: Always true.
+                required:
+                  - deleted
+                additionalProperties: false
+              example:
+                deleted: true
+        '401':
+          description: 'Missing, invalid or revoked token. Codes: UNAUTHORIZED, TOKEN_REVOKED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller holds a lower project role than member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The project, or the application, does not exist or belongs to another tenant (answer {"error": "not found"} without code for a foreign application; APP_NOT_FOUND when the application was deleted during the request), or the application has no current certificate (CERTIFICATE_NOT_FOUND).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'The application serves from the uploaded certificate (CERTIFICATE_IN_USE). Nothing is deleted.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppTLSError'
+              example:
+                error: This certificate is serving traffic. Switch the application to ACME or to proxy mode first, or upload a replacement.
+                code: CERTIFICATE_IN_USE
+        '429':
+          description: 'Rate limit exceeded. Codes: RATE_LIMITED, RATE_LIMIT_EXCEEDED. May carry Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The certificate could not be deleted. Code: INTERNAL_ERROR.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/projects/{id}/apps/{appId}/waf-agent:
     get:
       operationId: WAFAgentHandler_GetAppAgent
@@ -9377,7 +10322,7 @@ paths:
     put:
       operationId: WAFAgentHandler_AssignAppAgent
       summary: Assign an application to a WAF agent
-      description: Replaces the assignment of the application with the given WAF agent and mode (default block). While the application is in maintenance mode, it can only move to a different agent that supports maintenance mode (an agent that never reported is let through) and whose bundle, with this application added, stays within the 4,193,280 bytes an agent accepts; otherwise the answer is 409 and the assignment does not change. Changing only the mode on the agent that serves the application is not a move. Pushes a new bundle to the project agents and writes an audit entry (waf.app_assigned).
+      description: 'Replaces the assignment of the application with the given WAF agent and mode (default block). While the application is in maintenance mode, it can only move to a different agent that supports maintenance mode (an agent that never reported is let through) and whose bundle, with this application added, stays within the 4,193,280 bytes an agent accepts; otherwise the answer is 409 and the assignment does not change. An application in gateway mode also needs what a switch to gateway needs on the new agent (the agent must not have said that it cannot serve TLS certificates, and for the uploaded source it needs a credential bound to its host), and every application is checked against the TLS listeners, hosts and listener settings of the applications already on that agent; otherwise the answer is 409 and the assignment does not change. A key that the previous agent already holds is not recalled: replace the certificate after a move. Changing only the mode on the agent that serves the application is not a move. Pushes a new bundle to the project agents and writes an audit entry (waf.app_assigned).'
       tags:
         - Applications
         - WAF agents
@@ -9465,7 +10410,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Another application on the agent already uses the listen address (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the agent does not support it (MAINTENANCE_UNSUPPORTED), or its bundle with this application would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE).'
+          description: 'Another application on the agent already uses the listen address (LISTEN_HOST_TAKEN), or the application is in maintenance mode and the agent does not support it (MAINTENANCE_UNSUPPORTED), or its bundle with this application would be larger than the 4,193,280 bytes an agent accepts (MAINTENANCE_BUNDLE_TOO_LARGE), or the move breaks a TLS rule on the target agent: the application is in gateway mode and the agent said it cannot serve TLS certificates (TLS_UNSUPPORTED), the application uses the uploaded source and the agent has no credential bound to its host (AGENT_NOT_HOST_BOUND), or next to the applications already on the agent its plain listener, HTTPS or redirect listener or hosts would clash (LISTEN_CONFLICT, HOST_CONFLICT; field names the setting of the application that must change), or the application uses a part of the edge settings (compression, files from a folder or the cache switched on, a main host name or a path prefix) that the agent reported it does not apply (FEATURE_UNSUPPORTED; the answer carries agent and parts; an agent that never reported is let through). Applications that share an HTTPS listener may have different limits. Nothing changes.'
           content:
             application/json:
               schema:
@@ -9700,7 +10645,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppSummary
       summary: Request counters of an application
-      description: Returns decision counters (blocks, allows, logs, challenges, errors, WebSocket counts, detector breakdown) for the application over the last N minutes.
+      description: 'Returns decision counters (blocks, allows, logs, challenges, errors, WebSocket counts, detector breakdown) for the application over the last N minutes. The counters and the distinct client addresses are exact: they are read from per-minute and per-address rollups for the whole minutes of the window and from the decisions for its ends.'
       tags:
         - Applications
         - WAF analytics
@@ -9712,10 +10657,11 @@ paths:
         - name: minutes
           in: query
           required: false
-          description: Window length in minutes. Values below 1 fall back to 60; there is no upper bound.
+          description: Window length in minutes, 1 to 43200 (30 days). Values below 1 fall back to 60, larger ones are capped at 43200.
           schema:
             type: integer
             minimum: 1
+            maximum: 43200
             default: 60
       responses:
         '200':
@@ -9769,7 +10715,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppTimeline
       summary: Decision counts over time for an application
-      description: 'Returns request counts per time bucket for the timeline chart. At most 200 buckets: a bucket_seconds that would give more is raised.'
+      description: 'Returns request counts per time bucket for the timeline chart. Decisions are placed by the time the control plane recorded them. At most 200 buckets: a bucket_seconds that would give more is raised to the next whole number of minutes.'
       tags:
         - Applications
         - WAF analytics
@@ -9790,7 +10736,7 @@ paths:
         - name: bucket_seconds
           in: query
           required: false
-          description: 'Bucket width in seconds. Default: window divided into about 60 buckets; raised so there are at most 200.'
+          description: 'Bucket width in seconds. Default: window divided into about 60 buckets; raised, to a whole number of minutes, so there are at most 200. A width that is a whole number of minutes is read from per-minute rollups for the part of the window they cover.'
           schema:
             type: integer
             minimum: 1
@@ -9848,7 +10794,7 @@ paths:
     get:
       operationId: WAFAgentHandler_AppTop
       summary: Top-N list of an application
-      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents.'
+      description: 'Returns the most frequent values of one dimension over the last N minutes: client IPs, URIs, attack categories or User-Agents. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour, so a value is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly. A value longer than 1024 characters is shown cut to 1024; two values that differ only after that point are listed as separate rows with the same text.'
       tags:
         - Applications
         - WAF analytics
@@ -9960,7 +10906,7 @@ paths:
     get:
       operationId: DashboardHandler_AppGeoLocations
       summary: Client locations of an application
-      description: Returns the busiest client IPs of the application with their GeoIP location and allow, log and block counts, for the map view. Location fields are empty when no GeoIP database is loaded. Time filters are Unix seconds on the event time.
+      description: 'Returns the busiest client IPs of the application with their GeoIP location and allow, log and block counts, for the map view. Location fields are empty when no GeoIP database is loaded. Time filters are Unix seconds on the time the control plane recorded the decision. Counts are approximate for the part of the window read from hourly rollups, which keep only the busiest addresses of each hour, so an address is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - Applications
         - WAF analytics
@@ -10257,7 +11203,7 @@ paths:
     get:
       summary: Get the Overview page data in one response
       operationId: WAFAgentHandler_ProjectOverview
-      description: Aggregates WAF traffic (summary with previous-window comparison, timeline, top IPs, categories and countries), WAF agents, host fleet status, firewall counters and events, runtime-security stats and events, and the host list. Parts are queried in parallel; a failed part is reported in widgets[key].state = unavailable and the rest is still returned. Answers are cached 20 seconds per (project, filters, window) and refreshed in the background, so generated_at can be up to about 20 seconds old. host_id restricts the host parts and the WAF parts to agents of that host; waf_agent_id restricts the WAF parts to one WAF agent. Both must be canonical lower-case UUIDs of this project.
+      description: 'Aggregates WAF traffic (summary with previous-window comparison, timeline, top IPs, categories and countries), WAF agents, host fleet status, firewall counters and events, runtime-security stats and events, and the host list. Parts are queried in parallel; a failed part is reported in widgets[key].state = unavailable and the rest is still returned. Answers are cached 20 seconds per (project, filters, window) and refreshed in the background, so generated_at can be up to about 20 seconds old. host_id restricts the host parts and the WAF parts to agents of that host; waf_agent_id restricts the WAF parts to one WAF agent. Both must be canonical lower-case UUIDs of this project. The counters of the summaries and the timeline are exact, and the distinct client addresses are exact for the current window and 0 for the previous one. The top lists and the countries are approximate for the part of the window read from hourly rollups, which keep only the busiest addresses and categories of each hour, so a value is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly.'
       tags:
         - Projects
       parameters:
@@ -10633,7 +11579,7 @@ paths:
     get:
       operationId: WAFAgentHandler_ProjectSummary
       summary: Project WAF traffic summary
-      description: 'Returns the header KPIs of the project''s WAF traffic in the last N minutes: requests by action, block rate, average decision time, distinct clients and hosts, active agents, detections by method and WebSocket counts. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project.'
+      description: 'Returns the header KPIs of the project''s WAF traffic in the last N minutes: requests by action, block rate, average decision time, distinct clients and hosts, active agents, detections by method and WebSocket counts. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project. The counters and the distinct client addresses are exact; the distinct hosts are counted from the busiest hosts of each hour.'
       tags:
         - WAF analytics
       parameters:
@@ -10806,7 +11752,7 @@ paths:
     get:
       operationId: WAFAgentHandler_ProjectTimeline
       summary: Project requests over time
-      description: 'Returns decision counts per time bucket for the timeline chart, oldest first. Requests = blocks + allows + monitors + logs + challenges + errors. At most 200 buckets: a smaller bucket_seconds is raised to window/200. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project.'
+      description: 'Returns decision counts per time bucket for the timeline chart, oldest first. Requests = blocks + allows + monitors + logs + challenges + errors. At most 200 buckets: a smaller bucket_seconds is raised to window/200. Counts decisions by the time the control plane stored them. A bucket that is a whole number of minutes is read from per-minute rollups for the part of the window they cover. Optional agent_id limits the result to one WAF agent of the project.'
       tags:
         - WAF analytics
       parameters:
@@ -10877,7 +11823,7 @@ paths:
     get:
       operationId: WAFAgentHandler_ProjectTop
       summary: Top-N list of project WAF traffic
-      description: Returns the most frequent client addresses, URIs, attack categories or Host headers in the window. For ips, only block, monitor, log and challenge decisions count unless scope=all, so the list shows attackers. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project.
+      description: 'Returns the most frequent client addresses, URIs, attack categories or Host headers in the window. For ips, only block, monitor, log and challenge decisions count unless scope=all, so the list shows attackers. Counts decisions by the time the control plane stored them. Optional agent_id limits the result to one WAF agent of the project. For ips and categories the counts are approximate for the part of the window read from hourly rollups, which keep only the busiest values of each hour, so a value is counted only in the hours where it was among them: its count can be well below the true one, and it can drop out of the list. The ends of the window that fall outside the rollups are counted exactly. For ips and categories, a value longer than 1024 characters is shown cut to 1024.'
       tags:
         - WAF analytics
       parameters:
@@ -12930,7 +13876,7 @@ paths:
     put:
       operationId: StorageHandler_UpdateRetention
       summary: Set telemetry retention per table
-      description: 'Sets the retention in days of one or more tables (null resets a table to its default) and applies it at once: TimescaleDB policies are replaced in the same transaction, a shortened policy also drops its expired chunks right away, and control-plane modes run a pass immediately. Returns the new status, or {ok: true} when the save succeeded but the status could not be read. Recorded as admin.retention_updated in the system audit log with old and new days per table. The route exists only when the storage service started with the control plane.'
+      description: 'Sets the retention in days of one or more tables (null resets a table to its default) and applies it at once: TimescaleDB policies are replaced in the same transaction, a shortened policy also drops its expired chunks right away, and control-plane modes run a pass immediately. The save also starts a retention pass that trims the dashboard rollups of waf_decisions (counters per minute, client addresses, busiest values per hour), so a shortening takes effect for them within moments; in the first hour after an upgrade it takes effect when that hour ends. Returns the new status, or {ok: true} when the save succeeded but the status could not be read. Recorded as admin.retention_updated in the system audit log with old and new days per table. The route exists only when the storage service started with the control plane.'
       tags:
         - Admin
       requestBody:
@@ -15107,6 +16053,7 @@ paths:
                       reject_invalid_path_encoding: true
                     fcgi_doc_root: ''
                     fcgi_index: index.php
+                    fcgi_keep_conn: false
                     maintenance_enabled: false
                 total: 1
                 limit: 100
@@ -15184,6 +16131,9 @@ paths:
                 fcgi_index:
                   type: string
                   description: FastCGI index script; an empty string stores index.php. On update, absent keeps the stored value.
+                fcgi_keep_conn:
+                  type: boolean
+                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only if PHP is at least 8.2.36, 8.3.37, 8.4.28 or 8.5.13 for its 8.2, 8.3, 8.4 or 8.5 series; 8.1 and older are not fixed (CVE-2026-129289). On update, absent keeps the stored value.'
               required:
                 - name
                 - listen_port
@@ -15222,6 +16172,7 @@ paths:
                     reject_invalid_path_encoding: true
                   fcgi_doc_root: ''
                   fcgi_index: index.php
+                  fcgi_keep_conn: false
                   maintenance_enabled: false
         '400':
           description: 'Validation failed. Codes: ROUTE_FIELDS_REQUIRED, INVALID_PORT, INVALID_HOST, INVALID_UPSTREAM, INVALID_PROXY_CONFIG. A body that is not JSON answers 400 ''invalid body''.'
@@ -15248,7 +16199,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (an application with this name exists in the project), LISTEN_HOST_TAKEN (another application on this agent uses the listen address).'
+          description: 'Codes: CONFLICT (an application with this name exists in the project), LISTEN_HOST_TAKEN (another application on this agent uses the listen address), LISTEN_CONFLICT (the listen address is used by an HTTPS or redirect listener of another application on this agent; field is listen_port), FEATURE_UNSUPPORTED (proxy_config sets a strip_path_prefix and the agent reported that it does not apply redirects; the answer carries agent and parts). Nothing is created.'
           content:
             application/json:
               schema:
@@ -15322,6 +16273,9 @@ paths:
                 fcgi_index:
                   type: string
                   description: FastCGI index script; an empty string stores index.php. On update, absent keeps the stored value.
+                fcgi_keep_conn:
+                  type: boolean
+                  description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Default false: the agent closes the connection after each reply. Turn it on only if PHP is at least 8.2.36, 8.3.37, 8.4.28 or 8.5.13 for its 8.2, 8.3, 8.4 or 8.5 series; 8.1 and older are not fixed (CVE-2026-129289). On update, absent keeps the stored value.'
               additionalProperties: false
             example:
               upstream: http://10.0.0.6:8080
@@ -15360,7 +16314,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts). Nothing is saved.'
+          description: 'Codes: CONFLICT (name taken), LISTEN_HOST_TAKEN, MAINTENANCE_BUNDLE_TOO_LARGE (the application is in maintenance mode and the change gives it a listen port and an upstream for the first time, which brings its maintenance page into the bundle of the agent, and that bundle would be larger than the 4,193,280 bytes an agent accepts), TLS_BUNDLE_TOO_LARGE (the same for an application in gateway mode, whose TLS entry comes into the bundle), LISTEN_CONFLICT (the new listen address is used by an HTTPS or redirect listener of another application on the agent, or by the HTTPS listener of this one; field is listen_port), AGENT_TOO_OLD (proxy_config sets a strip_path_prefix that is not empty and differs from the stored one, and the agent reported that it does not apply redirects; the answer carries feature and agent). A save that sends the listen host and port the route already has is not checked again. Nothing is saved.'
           content:
             application/json:
               schema:
@@ -18351,6 +19305,9 @@ components:
         fcgi_index:
           type: string
           description: FastCGI index script (default index.php).
+        fcgi_keep_conn:
+          type: boolean
+          description: 'true when the agent keeps the FastCGI connection open between requests (upstream fcgi: only). false closes it after each reply. Always present.'
         maintenance_enabled:
           type: boolean
           description: true while maintenance mode is on for the application (see the Maintenance tab). Always present.
@@ -18363,6 +19320,7 @@ components:
         - mode
         - fcgi_doc_root
         - fcgi_index
+        - fcgi_keep_conn
         - maintenance_enabled
       additionalProperties: false
     AgentSecurityComponent:
@@ -18441,6 +19399,9 @@ components:
         fcgi_index:
           type: string
           description: FastCGI index script; empty string when unset (the agent defaults to index.php).
+        fcgi_keep_conn:
+          type: boolean
+          description: 'true when the agent keeps the FastCGI connection open between requests (upstream fcgi: only). false closes it after each reply. Always present.'
         maintenance_enabled:
           type: boolean
           description: true while maintenance mode is on for the application. The rest of the maintenance settings are read with GET /api/projects/{id}/apps/{appId}/maintenance. Always present.
@@ -18461,6 +19422,7 @@ components:
         - upstream_url
         - fcgi_doc_root
         - fcgi_index
+        - fcgi_keep_conn
         - maintenance_enabled
         - created_at
         - updated_at
@@ -18633,10 +19595,597 @@ components:
           type: string
           description: FastCGI index script. Omitted keeps the stored value; empty string resets it to index.php.
           maxLength: 128
+        fcgi_keep_conn:
+          type: boolean
+          description: 'Keep the FastCGI connection open between requests (upstream fcgi: only), like nginx fastcgi_keep_conn. Omitted keeps the stored value; false closes the connection after each reply. Turn it on only if PHP is at least 8.2.36, 8.3.37, 8.4.28 or 8.5.13 for its 8.2, 8.3, 8.4 or 8.5 series; 8.1 and older are not fixed (CVE-2026-129289).'
         proxy_config:
           allOf:
             - $ref: '#/components/schemas/ProxyConfig'
           description: 'Reverse-proxy configuration. Replaces the whole stored object (not a merge): keys left out return to their defaults, including trust_forwarded (false) and trusted_proxies (empty). Validated on save (400 INVALID_PROXY_CONFIG).'
+      additionalProperties: false
+    AppCache:
+      type: object
+      description: The response cache of an application, with every default filled in. The WAF agent keeps copies of answers on disk and in memory and sends them without asking the application. It checks every request first, so a blocked request never gets a copy. A request is signed in when it has an Authorization header, user information in an absolute-form request target, or a session cookie (a built-in name or one of session_cookies). A signed-in request is never answered from a stored copy and never makes one, unless a path rule that matches it has signed_in. It goes to the application with X-Cache BYPASS. A request that has a cookie that is not a session cookie is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers. A matching path rule alone does not allow that, only a rule with signed_in does. This limits only what is stored, and such a request is still answered from a copy that another request made.
+      properties:
+        enabled:
+          type: boolean
+          description: The switch. The bundle carries the object only while it is on.
+        default_ttl_s:
+          type: integer
+          minimum: 0
+          maximum: 31536000
+          description: Seconds to keep images, fonts, video, audio, styles and scripts when the application gives no lifetime. Pages and data are kept only when the application says so. 0 turns this off.
+        stale_if_error_s:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          description: Seconds a stored copy may answer while the application is down or answers 500, 502, 503 or 504. 0 sends the error. An answer with must-revalidate, proxy-revalidate or s-maxage is never served this way unless it carries its own stale directive.
+        disk_bytes:
+          type: integer
+          format: int64
+          minimum: 16777216
+          maximum: 1099511627776
+          description: The most the copies of this application may use on disk, in bytes. The least used copies go first when it is full.
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967296
+          description: Memory for small, often requested copies, in bytes. 0 keeps copies on disk only.
+        max_object_bytes:
+          type: integer
+          format: int64
+          minimum: 1024
+          maximum: 67108864
+          description: The largest answer that is kept, in bytes, and at most disk_bytes.
+        session_cookies:
+          type: array
+          maxItems: 20
+          description: Cookie names that mark a visitor as signed in, besides the names the agent knows (any name with sess in it, the WordPress sign-in cookies, remember-me and others). A request with one of these cookies, like one with an Authorization header, is never answered from a stored copy and never makes one, unless a path rule that matches it has signed_in. It goes to the application with X-Cache BYPASS. Compression sends such a visitor no HTML or JSON compressed. The names reach the agent while compression or the cache is on, so they count with the cache switched off too.
+          items:
+            type: string
+            maxLength: 64
+        rules:
+          type: array
+          maxItems: 50
+          description: Path rules. The longest matching prefix wins. A rule's copies are sent to every request that is not signed in, with a cookie or without. A rule alone does not let the answer to a request that carries a cookie be stored. For that the rule needs signed_in.
+          items:
+            $ref: '#/components/schemas/AppCacheRule'
+      required:
+        - enabled
+        - default_ttl_s
+        - stale_if_error_s
+        - disk_bytes
+        - memory_bytes
+        - max_object_bytes
+        - session_cookies
+        - rules
+      additionalProperties: false
+    AppCacheInput:
+      type: object
+      description: The cache settings to store. Replaces the stored object. A number that is left out takes its default, so an explicit 0 is kept where 0 is valid. The limits are those of AppCache.
+      properties:
+        enabled:
+          type: boolean
+        default_ttl_s:
+          type: integer
+          format: int64
+        stale_if_error_s:
+          type: integer
+          format: int64
+        disk_bytes:
+          type: integer
+          format: int64
+        memory_bytes:
+          type: integer
+          format: int64
+        max_object_bytes:
+          type: integer
+          format: int64
+        session_cookies:
+          type: array
+          items:
+            type: string
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/AppCacheRule'
+      required:
+        - enabled
+      additionalProperties: false
+    AppCacheRule:
+      type: object
+      description: A path rule of the cache.
+      properties:
+        prefix:
+          type: string
+          maxLength: 256
+          description: A path that starts with /, printable ASCII without space, ? or #. Each prefix has one rule. A rule never stores a path that holds a semicolon.
+        action:
+          type: string
+          description: cache keeps the answer for ttl_s seconds; bypass never keeps it.
+          enum:
+            - cache
+            - bypass
+        ttl_s:
+          type: integer
+          minimum: 0
+          maximum: 31536000
+          description: 1 second to 365 days for cache. A bypass rule stores 0.
+        signed_in:
+          type: boolean
+          description: Also for signed-in visitors. Without it, a signed-in request (an Authorization header, user information in the request target or a session cookie) never uses the cache under this prefix, and a request with another cookie is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers. With it, a signed-in request is answered from a copy too, and the answers to both are stored. Everyone then gets the same copy. A request with another cookie is answered from a copy either way. A bypass rule stores false.
+      required:
+        - prefix
+        - action
+      additionalProperties: false
+    AppCacheSaved:
+      type: object
+      description: The cache object as stored, and the bundle generation it goes out with.
+      properties:
+        cache:
+          $ref: '#/components/schemas/AppCache'
+        generation:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: The bundle generation of the WAF agent after the save; null while no agent serves the application.
+      required:
+        - cache
+        - generation
+      additionalProperties: false
+    AppCacheStats:
+      type: object
+      description: What the agent counted for the cache of one application over the last hour, in one-minute buckets, and three gauges of the moment (disk_bytes, memory_bytes, objects). Every value is capped at 2^53.
+      properties:
+        requests:
+          type: integer
+          format: int64
+        hits_memory:
+          type: integer
+          format: int64
+        hits_disk:
+          type: integer
+          format: int64
+        misses:
+          type: integer
+          format: int64
+        bypass:
+          type: integer
+          format: int64
+        stale:
+          type: integer
+          format: int64
+        stored:
+          type: integer
+          format: int64
+        skipped_no_lifetime:
+          type: integer
+          format: int64
+        skipped_private:
+          type: integer
+          format: int64
+        skipped_too_large:
+          type: integer
+          format: int64
+        skipped_streamed:
+          type: integer
+          format: int64
+        skipped_disk_full:
+          type: integer
+          format: int64
+        evictions:
+          type: integer
+          format: int64
+        corrupt:
+          type: integer
+          format: int64
+        disk_bytes:
+          type: integer
+          format: int64
+        memory_bytes:
+          type: integer
+          format: int64
+        objects:
+          type: integer
+          format: int64
+      required:
+        - requests
+        - hits_memory
+        - hits_disk
+        - misses
+        - bypass
+        - stale
+        - stored
+        - skipped_no_lifetime
+        - skipped_private
+        - skipped_too_large
+        - skipped_streamed
+        - skipped_disk_full
+        - evictions
+        - corrupt
+        - disk_bytes
+        - memory_bytes
+        - objects
+      additionalProperties: false
+    AppCachePurge:
+      type: object
+      description: A removal of stored copies.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The command id the agent acks.
+        scope:
+          type: string
+          enum:
+            - url
+            - prefix
+            - app
+        url:
+          type: string
+          description: The address as sent to the agent; empty for app.
+        state:
+          type: string
+          description: pending until the agent that serves the application answers, then done or failed.
+          enum:
+            - pending
+            - done
+            - failed
+        error:
+          type: string
+          description: 'The code of a failure: not_in_bundle, cache_off, invalid, unknown (the agent wrote something else) or expired (it waited 7 days). Empty otherwise.'
+          maxLength: 64
+        by:
+          type: string
+          description: The name of the user who asked, or the email when there is no name; empty when that user is gone.
+        agent:
+          type: string
+          description: The name of the agent that answered; empty while pending or when that agent is deleted.
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      required:
+        - id
+        - scope
+        - url
+        - state
+        - error
+        - by
+        - agent
+        - created_at
+        - finished_at
+      additionalProperties: false
+    AppCachePurgeInput:
+      type: object
+      description: What to remove.
+      properties:
+        scope:
+          type: string
+          description: url is one stored address, prefix everything under a path, app everything.
+          enum:
+            - url
+            - prefix
+            - app
+        url:
+          type: string
+          maxLength: 2048
+          description: 'A path that starts with / or an absolute http:// or https:// URL. Required for url and prefix; ignored for app. prefix takes no query.'
+      required:
+        - scope
+      additionalProperties: false
+    AppCompression:
+      type: object
+      description: The compression of an application, with the default filled in.
+      properties:
+        enabled:
+          type: boolean
+          description: The switch. The bundle carries the object only while it is on.
+        min_bytes:
+          type: integer
+          minimum: 0
+          maximum: 1048576
+          description: The smallest answer that is compressed, in bytes. Smaller answers go as they are. Answers over 8 MiB and answers the application sends in pieces without a length are never compressed.
+      required:
+        - enabled
+        - min_bytes
+      additionalProperties: false
+    AppCompressionInput:
+      type: object
+      description: The compression settings to store. Replaces the stored object. A min_bytes that is left out takes its default of 1,024; an explicit 0 is kept.
+      properties:
+        enabled:
+          type: boolean
+        min_bytes:
+          type: integer
+          format: int64
+      required:
+        - enabled
+      additionalProperties: false
+    AppCompressionSaved:
+      type: object
+      description: The compression object as stored, and the bundle generation it goes out with.
+      properties:
+        compression:
+          $ref: '#/components/schemas/AppCompression'
+        generation:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: The bundle generation of the WAF agent after the save; null while no agent serves the application.
+      required:
+        - compression
+        - generation
+      additionalProperties: false
+    AppCompressionStats:
+      type: object
+      description: What the agent counted for the compression of one application over the last hour. Every value is capped at 2^53.
+      properties:
+        responses:
+          type: integer
+          format: int64
+          description: Answers sent compressed.
+        skipped_streamed:
+          type: integer
+          format: int64
+          description: Answers that could not be compressed because the application sent them in pieces, without a size.
+        bytes_saved:
+          type: integer
+          format: int64
+          description: The size before compression minus the size sent.
+      required:
+        - responses
+        - skipped_streamed
+        - bytes_saved
+      additionalProperties: false
+    AppDelivery:
+      type: object
+      description: The delivery settings of an application and what its WAF agent reported about them.
+      properties:
+        compression:
+          $ref: '#/components/schemas/AppCompression'
+        static_files:
+          $ref: '#/components/schemas/AppStaticFiles'
+        cache:
+          $ref: '#/components/schemas/AppCache'
+        agent:
+          description: The WAF agent that serves the application; null when none does.
+          oneOf:
+            - $ref: '#/components/schemas/AppDeliveryAgent'
+            - type: 'null'
+        generation:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: The bundle generation of that agent; null when no agent serves the application.
+        status:
+          description: The last report of that agent; null until it reported.
+          oneOf:
+            - $ref: '#/components/schemas/AppDeliveryStatus'
+            - type: 'null'
+        cache_stats:
+          description: The counters of the cache from that report; null when there is none.
+          oneOf:
+            - $ref: '#/components/schemas/AppCacheStats'
+            - type: 'null'
+        compression_stats:
+          description: The counters of compression from that report; null when there is none.
+          oneOf:
+            - $ref: '#/components/schemas/AppCompressionStats'
+            - type: 'null'
+        purges:
+          type: array
+          description: The last 10 removals, newest first.
+          items:
+            $ref: '#/components/schemas/AppCachePurge'
+      required:
+        - compression
+        - static_files
+        - cache
+        - agent
+        - generation
+        - status
+        - cache_stats
+        - compression_stats
+        - purges
+      additionalProperties: false
+    AppDeliveryAgent:
+      type: object
+      description: The WAF agent that serves an application, as the delivery settings need it.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        online:
+          type: boolean
+          description: Whether it sent a heartbeat or telemetry within the last 90 seconds.
+        features:
+          type: object
+          description: What the agent said in its last Hello. null = it never said; false = it said Hello without that name, so it is older than that part and switching the part on is refused.
+          properties:
+            redirects:
+              type:
+                - boolean
+                - 'null'
+              description: The main host name and the path prefix.
+            compression:
+              type:
+                - boolean
+                - 'null'
+            static_files:
+              type:
+                - boolean
+                - 'null'
+            cache:
+              type:
+                - boolean
+                - 'null'
+          required:
+            - redirects
+            - compression
+            - static_files
+            - cache
+          additionalProperties: false
+      required:
+        - id
+        - name
+        - online
+        - features
+      additionalProperties: false
+    AppDeliveryStatus:
+      type: object
+      description: The last report of the agent about the edge parts of one application. For each part, the state it reported or null when it sent none.
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        generation:
+          type: integer
+          format: int64
+          description: The bundle generation the report answers.
+        received_at:
+          type: string
+          format: date-time
+          description: When the control plane received it.
+        redirects:
+          oneOf:
+            - $ref: '#/components/schemas/AppEdgeFeatureState'
+            - type: 'null'
+        compression:
+          oneOf:
+            - $ref: '#/components/schemas/AppEdgeFeatureState'
+            - type: 'null'
+        static_files:
+          oneOf:
+            - $ref: '#/components/schemas/AppEdgeFeatureState'
+            - type: 'null'
+        cache:
+          oneOf:
+            - $ref: '#/components/schemas/AppEdgeFeatureState'
+            - type: 'null'
+      required:
+        - agent_id
+        - generation
+        - received_at
+        - redirects
+        - compression
+        - static_files
+        - cache
+      additionalProperties: false
+    AppEdgeFeatureState:
+      type: object
+      description: Whether the agent applies one part. A state, a code or a part outside the lists is stored as unknown. The detail is a path or numbers of at most 256 bytes, cleaned of control characters; show it as text, never as markup.
+      properties:
+        feature:
+          type: string
+          enum:
+            - redirects
+            - compression
+            - static_files
+            - cache
+            - unknown
+        state:
+          type: string
+          enum:
+            - applied
+            - refused
+            - unknown
+        code:
+          type: string
+          description: For refused, why. Empty for applied.
+          enum:
+            - ''
+            - invalid
+            - root_missing
+            - root_not_directory
+            - root_unreadable
+            - root_forbidden
+            - cache_dir_unusable
+            - disk_too_small
+            - memory_too_small
+            - unknown
+        detail:
+          type: string
+          maxLength: 256
+        running_previous:
+          type: boolean
+          description: For refused, whether the agent keeps running the part it applied before (true) or the part is off (false).
+      required:
+        - feature
+        - state
+        - code
+        - detail
+        - running_previous
+      additionalProperties: false
+    AppStaticFiles:
+      type: object
+      description: 'Files served from a folder of the host of the agent, with the defaults filled in. Never served from the folder, whatever the settings: folder listings, names that start with a dot (except .well-known), PHP files and symbolic links.'
+      properties:
+        enabled:
+          type: boolean
+          description: The switch. The bundle carries the object only while it is on.
+        root:
+          type: string
+          maxLength: 1024
+          description: The folder, an absolute path; empty until one is chosen. The user wafio must be able to read it, and folders under /home, /root and /run/user are hidden from the agent.
+        missing:
+          type: string
+          description: 'app: a request whose file is not in the folder goes to the application. not_found: it is answered 404, and the application gets no request.'
+          enum:
+            - app
+            - not_found
+        max_age_s:
+          type: integer
+          minimum: 0
+          maximum: 31536000
+          description: The browser cache time of a served file, in seconds. 0 sets none.
+      required:
+        - enabled
+        - root
+        - missing
+        - max_age_s
+      additionalProperties: false
+    AppStaticFilesInput:
+      type: object
+      description: The static files settings to store. Replaces the stored object. A missing that is left out is app. The limits are those of AppStaticFiles.
+      properties:
+        enabled:
+          type: boolean
+        root:
+          type: string
+        missing:
+          type: string
+        max_age_s:
+          type: integer
+          format: int64
+      required:
+        - enabled
+      additionalProperties: false
+    AppStaticFilesSaved:
+      type: object
+      description: The static files object as stored, and the bundle generation it goes out with.
+      properties:
+        static_files:
+          $ref: '#/components/schemas/AppStaticFiles'
+        generation:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: The bundle generation of the WAF agent after the save; null while no agent serves the application.
+      required:
+        - static_files
+        - generation
       additionalProperties: false
     AppMaintenance:
       type: object
@@ -18739,6 +20288,373 @@ components:
         - client_ip
         - default_message
         - stock_html
+      additionalProperties: false
+    AppTLSCertificate:
+      type: object
+      description: An uploaded certificate without its chain and its private key.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Certificate id. An upload or a replace always gets a new one, so an id never names other bytes.
+        source:
+          type: string
+          enum:
+            - uploaded
+        names:
+          type: array
+          description: The DNS names the leaf covers, lower case.
+          items:
+            type: string
+        issuer:
+          type: string
+          description: Common name of the issuer, else its organisation, at most 255 bytes.
+        not_before:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+        days_left:
+          type: integer
+          description: Whole days until not_after, rounded down; 0 during the last day, negative once it expired.
+        leaf_sha256:
+          type: string
+          description: Lower-case hex SHA-256 of the DER of the leaf.
+          pattern: ^[0-9a-f]{64}$
+        key_type:
+          type: string
+          description: rsa-<bits>, ecdsa-p256 or ecdsa-p384.
+          pattern: ^(rsa-[0-9]+|ecdsa-p256|ecdsa-p384)$
+        trusted:
+          type: boolean
+          description: Whether the chain verifies to the system roots. false is a warning, not a refusal.
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - source
+        - names
+        - issuer
+        - not_before
+        - not_after
+        - days_left
+        - leaf_sha256
+        - key_type
+        - trusted
+        - created_at
+      additionalProperties: false
+    AppTLSCertificateInput:
+      type: object
+      description: A certificate chain and its private key.
+      properties:
+        chain_pem:
+          type: string
+          description: PEM text with CERTIFICATE blocks only, leaf first.
+          maxLength: 65536
+        key_pem:
+          type: string
+          description: One unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block. It is sealed before it is stored and never returned.
+          maxLength: 16384
+      required:
+        - chain_pem
+        - key_pem
+      additionalProperties: false
+    AppTLSError:
+      type: object
+      description: An error of the TLS operations. Like Error, with the reason of a refused certificate, the host that is not covered and the seconds to wait for a new ACME request.
+      properties:
+        error:
+          type: string
+          maxLength: 512
+          description: Message for people. Do not parse it. It never repeats an uploaded certificate or key.
+        code:
+          type: string
+          maxLength: 64
+          pattern: ^[A-Z0-9_]+$
+          description: 'Machine code: INVALID_TLS_SETTINGS, INVALID_CERTIFICATE, KEY_ENCRYPTION_UNAVAILABLE, TLS_UNSUPPORTED, CERTIFICATE_REQUIRED, CERTIFICATE_DOES_NOT_COVER, AGENT_NOT_HOST_BOUND, CERTIFICATE_IN_USE, ACME_REQUEST_TOO_SOON, LISTEN_CONFLICT, HOST_CONFLICT, TLS_BUNDLE_TOO_LARGE, AGENT_TOO_OLD, FEATURE_UNSUPPORTED, BAD_REQUEST, and the generic codes of Error.'
+        field:
+          type: string
+          maxLength: 64
+          description: The request field or setting that was refused or must change.
+        reason:
+          type: string
+          description: Why a certificate was refused (INVALID_CERTIFICATE).
+          enum:
+            - bad_pem
+            - private_key_in_chain
+            - too_large
+            - chain_order
+            - ca_leaf
+            - expired
+            - not_yet_valid
+            - weak_signature
+            - names_do_not_cover
+            - key_encrypted
+            - pkcs12
+            - unsupported_key
+            - key_mismatch
+            - bad_json
+        host:
+          type: string
+          maxLength: 253
+          description: The host that the certificate does not cover (names_do_not_cover, CERTIFICATE_DOES_NOT_COVER).
+        retry_after:
+          type: integer
+          minimum: 1
+          description: Seconds until a new ACME request is accepted (ACME_REQUEST_TOO_SOON).
+        feature:
+          type: string
+          maxLength: 32
+          description: The part of the edge settings that the WAF agent does not apply (AGENT_TOO_OLD); redirects for a main host name.
+        agent:
+          type: string
+          maxLength: 67
+          description: The name of that agent (AGENT_TOO_OLD), cut to 64 characters.
+      required:
+        - error
+      additionalProperties: false
+    AppTLSInput:
+      type: object
+      description: The TLS settings of an application.
+      properties:
+        mode:
+          type: string
+          description: proxy leaves TLS to whatever sits in front of the agent; gateway lets the agent terminate it for the hosts.
+          enum:
+            - proxy
+            - gateway
+        hosts:
+          type: array
+          description: 1 to 100 lower-case DNS names (at least one dot, no wildcard, IP address, port or trailing dot). A name is trimmed, its ASCII letters are lower-cased, and a repeat is dropped. A name with any other character than letters, digits, hyphens and dots is refused, so write an international name in its xn-- form. A proxy application may have none.
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 253
+        listen:
+          type: string
+          description: The HTTPS address the agent binds, ip:port or [ipv6]:port. Empty or absent means 0.0.0.0:443. Applications on one agent may share an address (each host once); their timeouts and limits may differ, the agent uses the largest value per listener and applies the limits of each application after routing.
+          maxLength: 64
+        redirect_listen:
+          type: string
+          description: Optional address that answers plain HTTP with a redirect to HTTPS. It differs from listen, and no other kind of listener on the agent may use it.
+          maxLength: 64
+        source:
+          type: string
+          description: Where the certificate comes from. Required in gateway mode.
+          enum:
+            - ''
+            - acme
+            - uploaded
+        canonical_host:
+          type: string
+          maxLength: 253
+          description: 'The main host name: empty or absent sends no redirect, otherwise it is one of hosts (400 INVALID_TLS_SETTINGS, field canonical_host). A visitor who comes in by another host name of the application is sent to it with a 308, and the HTTP to HTTPS listener sends visitors straight to it. It works in gateway mode only. The name is trimmed and its ASCII letters are lower-cased. A save that sets a new one (not empty, not the stored one) is refused with AGENT_TOO_OLD when the WAF agent reported that it does not apply redirects (edge_redirects false); clearing it, and saving the stored one again, always pass. A save replaces it, so a client that does not send it clears it.'
+      required:
+        - mode
+      additionalProperties: false
+    AppTLSState:
+      type: object
+      description: How an application is served over TLS, with what the dashboard needs to show it. No field holds key material.
+      properties:
+        mode:
+          type: string
+          enum:
+            - proxy
+            - gateway
+        hosts:
+          type: array
+          items:
+            type: string
+        listen:
+          type: string
+          description: The HTTPS address; 0.0.0.0:443 until another one is saved.
+        redirect_listen:
+          type: string
+          description: Empty when there is none.
+        source:
+          type: string
+          enum:
+            - ''
+            - acme
+            - uploaded
+        canonical_host:
+          type: string
+          description: The main host name; empty when there is none.
+        certificate:
+          description: The current uploaded certificate; null when there is none.
+          oneOf:
+            - $ref: '#/components/schemas/AppTLSCertificate'
+            - type: 'null'
+        acme:
+          description: The last ACME request; null until there was one.
+          oneOf:
+            - $ref: '#/components/schemas/AppTLSACMERequest'
+            - type: 'null'
+        status:
+          description: What the agent last reported; null until it reported since the settings last changed.
+          oneOf:
+            - $ref: '#/components/schemas/AppTLSStatus'
+            - type: 'null'
+        agent_supported:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the WAF agent that serves the application said in its Hello that it serves TLS certificates. null = no agent serves the application, or it never said; false = it said something else, and switching to gateway is refused.
+        agent_host_bound:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the agent has a credential bound to its host, kind and name, which an uploaded key needs. null = no agent serves the application.
+        warnings:
+          type: array
+          description: Warnings that follow from what is stored (not_trusted, expires_soon), and in the answer of a save the dns_mismatch hints for the hosts that save looked up. A save looks up the hosts of a switch to gateway mode, or the hosts it added, at most 10 hosts and 2 seconds in all; the other hosts are not checked, and a host that is not checked or that did not resolve in time gives no warning.
+          items:
+            $ref: '#/components/schemas/AppTLSWarning'
+      required:
+        - mode
+        - hosts
+        - listen
+        - redirect_listen
+        - source
+        - canonical_host
+        - certificate
+        - acme
+        - status
+        - agent_supported
+        - agent_host_bound
+        - warnings
+      additionalProperties: false
+    AppTLSACMERequest:
+      type: object
+      description: The ACME request that the bundle names. A new id asks the agent to order now.
+      properties:
+        request_id:
+          type: string
+        requested_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      required:
+        - request_id
+        - requested_at
+      additionalProperties: false
+    AppTLSStatus:
+      type: object
+      description: What the WAF agent last reported about the TLS of the application. The parsed fields (names, issuer, dates) are the server's own reading of the chain the agent serves.
+      properties:
+        agent_id:
+          type: string
+        source:
+          type: string
+          enum:
+            - acme
+            - uploaded
+        state:
+          type: string
+          description: pending (an ACME order is running), active (a certificate is in use), failed (the last order or install failed; the previous certificate may still be in use) or missing (TLS is on and there is nothing to serve yet).
+          enum:
+            - pending
+            - active
+            - failed
+            - missing
+        certificate_id:
+          type:
+            - string
+            - 'null'
+          description: The uploaded certificate the report is about; null for acme.
+        leaf_sha256:
+          type: string
+        error:
+          type: string
+          maxLength: 1024
+          description: For failed, cleaned of control characters. Escape it when you show it.
+        error_code:
+          type: string
+          description: 'Why an uploaded certificate failed, when error is exactly one of the control plane''s own phrases for it: the agent refused the certificate (bad_pem, too_large, key_mismatch, leaf_mismatch, unsupported_key, write_failed, invalid_ack for an answer that is no code) or the stored key cannot be read (key_unreadable). Empty for every other error, for any other state and for the acme source. An agent can send a phrase as its error text and is then read the same way, for its own application only.'
+          enum:
+            - ''
+            - bad_pem
+            - too_large
+            - key_mismatch
+            - leaf_mismatch
+            - unsupported_key
+            - write_failed
+            - invalid_ack
+            - key_unreadable
+        next_attempt_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        request_id:
+          type: string
+        received_at:
+          type: string
+          format: date-time
+          description: When the control plane received the report.
+        names:
+          type: array
+          items:
+            type: string
+        issuer:
+          type: string
+        not_before:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        not_after:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      required:
+        - agent_id
+        - source
+        - state
+        - certificate_id
+        - leaf_sha256
+        - error
+        - error_code
+        - next_attempt_at
+        - request_id
+        - received_at
+        - names
+        - issuer
+        - not_before
+        - not_after
+      additionalProperties: false
+    AppTLSWarning:
+      type: object
+      description: 'A warning, not a refusal. not_trusted: the uploaded chain does not verify to the system roots. expires_soon: the certificate in use has 30 days or fewer left (14 for acme); days_left and not_after say when. dns_mismatch: host resolves to at least one public address, and none of its public addresses is a public address the agent host reported; resolved lists the public addresses it resolves to (at most 8) and agent_addresses the ones the agent host reported. It appears only in the answer of a save, never in GET. The hint is silent when the agent host reports no public address: the Rust WAF agent reports only primary_ip, so behind a NAT or on a cloud VM it stays silent.'
+      properties:
+        code:
+          type: string
+          enum:
+            - not_trusted
+            - expires_soon
+            - dns_mismatch
+        host:
+          type: string
+        resolved:
+          type: array
+          items:
+            type: string
+        agent_addresses:
+          type: array
+          items:
+            type: string
+        days_left:
+          type: integer
+          description: Whole days until not_after, rounded down; 0 during the last day, negative once it expired.
+        not_after:
+          type: string
+          format: date-time
+      required:
+        - code
       additionalProperties: false
     AppWafAgentAssignment:
       type: object
@@ -20861,6 +22777,19 @@ components:
             - recipient
             - message
           description: The SMTP stage that failed (SMTP_TEST_FAILED).
+        feature:
+          type: string
+          maxLength: 32
+          description: 'The part of the edge settings that the WAF agent does not apply (AGENT_TOO_OLD): redirects, compression, static_files or cache.'
+        agent:
+          type: string
+          maxLength: 67
+          description: The name of that agent (AGENT_TOO_OLD, FEATURE_UNSUPPORTED), cut to 64 characters.
+        parts:
+          type: array
+          description: The parts of the edge settings that the agent an application moves to does not apply (FEATURE_UNSUPPORTED).
+          items:
+            type: string
       example:
         error: Project not found
         code: PROJECT_NOT_FOUND
@@ -27090,7 +29019,7 @@ components:
           description: Distinct client IPs.
         unique_hosts:
           type: integer
-          description: Distinct request hosts.
+          description: Distinct request hosts. Counted from hourly rollups for most of the window, which keep only the 200 busiest hosts of each hour, so a host that is never among them is not counted.
         agents_active:
           type: integer
           description: WAF agents that reported decisions.
@@ -27887,7 +29816,7 @@ components:
           maximum: 600000
         idle_conn_ms:
           type: integer
-          description: Idle upstream connection lifetime, 0-600000 ms (default 10000). On a fcgi upstream every open connection keeps one PHP-FPM worker busy, so idle connections are closed once they pass this lifetime.
+          description: Idle upstream connection lifetime, 0-600000 ms (default 10000). On a fcgi upstream with fcgi_keep_conn on, every open connection keeps one PHP-FPM worker busy, so idle connections are closed once they pass this lifetime. From agent 2.1.1, with fcgi_keep_conn off the agent closes each connection after the reply and this value does not apply. Earlier agents keep FastCGI connections open whatever the setting.
           minimum: 0
           maximum: 600000
         host_header:
@@ -27948,6 +29877,10 @@ components:
         reject_invalid_path_encoding:
           type: boolean
           description: 'Absent or null = true; a request whose path has an invalid percent escape is answered 400 before the WAF runs. Only an explicit false forwards it.'
+        strip_path_prefix:
+          type: string
+          maxLength: 256
+          description: 'For an application that lives under a path. With /shop, a request for /shop/cart reaches the application as /cart. A path that is not /shop and does not continue it with / (/shopping is not under /shop) is answered 404 by the agent, a WebSocket handshake included, and never reaches the application. Empty or absent removes nothing. The agent still inspects and logs the full path. It is / and segments, with no empty, . or .. segment (so no trailing /), printable ASCII without space, ?, #, % or backslash, at most 256 bytes; anything else answers 400 INVALID_PROXY_CONFIG. A prefix that is not empty and differs from the stored one is refused with 409 AGENT_TOO_OLD when the WAF agent reported that it does not apply redirects (edge_redirects false); clearing it, and saving the stored one again, always pass. Links the application writes must include the prefix.'
       additionalProperties: true
     ProxyWarning:
       type: object
@@ -28127,7 +30060,7 @@ components:
       properties:
         field:
           type: string
-          description: 'Event field to test. Numeric fields: severity (0..4), port (0..65535), uid, gid, addr_family, flags, detail, ret_val (non-negative integers; ret_val is the syscall result, which exit events, enforcement and an open whose agent records the result set; an open without a recorded result carries 0, so ret_val gte 0 drops only an open reported as failed). Boolean fields: is_container, exe_verified (true when the kernel saw the process in the agent-verified protected set; use it instead of comm to drop events safely). All others are strings.'
+          description: 'Event field to test. Numeric fields: severity (0..4), port (0..65535), uid, gid, addr_family, flags, detail, ret_val (non-negative integers; ret_val is the syscall result, which exit events, enforcement and an open whose agent records the result set; an open without a recorded result carries 0, so ret_val gte 0 drops only an open reported as failed). Boolean fields: is_container, exe_verified (true when the kernel saw the process in the agent-verified protected set; use it instead of comm to drop events safely). All others are strings; args is the destination of a rename, cleaned like filename; a rule with a condition on it must also have event_name eq rename, or it is refused.'
           enum:
             - comm
             - parent_comm
@@ -28136,6 +30069,7 @@ components:
             - category
             - severity
             - filename
+            - args
             - addr
             - port
             - uid
@@ -30744,11 +32678,11 @@ components:
           description: Average decision time in microseconds.
         unique_ips:
           type: integer
-          description: Distinct client addresses.
+          description: Distinct client addresses. 0 in the summary of the previous window.
           format: int64
         unique_hosts:
           type: integer
-          description: Distinct Host headers.
+          description: Distinct Host headers. Counted from hourly rollups for most of the window, which keep only the 200 busiest hosts of each hour, so a host that is never among them is not counted.
           format: int64
         agents_active:
           type: integer

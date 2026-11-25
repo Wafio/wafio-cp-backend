@@ -16,15 +16,18 @@ import (
 // after the other. When agentID is set and is not the agent that serves the application now,
 // admit is called with the stored maintenance object, before anything is written and with the
 // bundle of the new agent locked (lockAgentBundle); an error from it is returned as it is and the
-// move does not happen. A nil admit checks nothing.
+// move does not happen. A nil admit checks no maintenance rule. An application in gateway mode
+// is also checked, whatever admit is, against the agent it moves to (admitTLSMove: the feature, a
+// host-bound credential for an uploaded source, hosts and listeners next to its applications), and
+// its status report is dropped, since it described the agent it leaves.
 func (r *WAFRepo) ReplaceAssignment(ctx context.Context, projectID, appID, agentID, mode string, admit func(stored domain.Maintenance) error) error {
-	if admit != nil {
-		leave, err := enterNestedTx(ctx)
-		if err != nil {
-			return err
-		}
-		defer leave()
+	// The row lock and the bundle lock of the new agent are waited for with a connection in hand, so
+	// every move takes a place, whether or not it measures anything.
+	leave, err := enterNestedTx(ctx)
+	if err != nil {
+		return err
 	}
+	defer leave()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -59,6 +62,14 @@ func (r *WAFRepo) ReplaceAssignment(ctx context.Context, projectID, appID, agent
 			}
 		}
 	}
+	if agentID != "" {
+		if err := admitTLSMove(ctx, tx, projectID, appID, agentID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM app_tls_status WHERE app_id=$1 AND project_id=$2 AND agent_id IS DISTINCT FROM NULLIF($3::text,'')::uuid`, appID, projectID, agentID); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `UPDATE waf_agent_apps SET enabled=FALSE,updated_at=now() WHERE app_id=$1`, appID); err != nil {
 		return err
 	}
@@ -74,6 +85,11 @@ func (r *WAFRepo) ReplaceAssignment(ctx context.Context, projectID, appID, agent
 }
 
 func (r *WAFRepo) ResetAppConfig(ctx context.Context, projectID, appID string) error {
+	leave, err := enterNestedTx(ctx) // it waits for the row of the application, with a connection in hand
+	if err != nil {
+		return err
+	}
+	defer leave()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err

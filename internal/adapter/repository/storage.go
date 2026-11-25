@@ -441,12 +441,18 @@ func (r *StorageRepo) AdminEmails(ctx context.Context) ([]string, error) {
 
 // TryRetentionLock takes a session advisory lock on a dedicated connection.
 func (r *StorageRepo) TryRetentionLock(ctx context.Context) (func(), bool, error) {
-	conn, err := r.pool.Acquire(ctx)
+	return tryAdvisoryLock(ctx, r.pool, retentionLockKey)
+}
+
+// tryAdvisoryLock takes the session advisory lock of key on a connection of its own, without
+// waiting. ok false means another session holds it. release gives the lock back, and closes the
+// connection when that fails, so the session (and its lock) never returns to the pool.
+func tryAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, key int64) (release func(), ok bool, err error) {
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return func() {}, false, err
 	}
-	var ok bool
-	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, retentionLockKey).Scan(&ok); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&ok); err != nil {
 		conn.Release()
 		return func() {}, false, err
 	}
@@ -457,8 +463,7 @@ func (r *StorageRepo) TryRetentionLock(ctx context.Context) (func(), bool, error
 	return func() {
 		uctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := conn.Exec(uctx, `SELECT pg_advisory_unlock($1)`, retentionLockKey); err != nil {
-			// The session (and its lock) must not go back to the pool.
+		if _, err := conn.Exec(uctx, `SELECT pg_advisory_unlock($1)`, key); err != nil {
 			_ = conn.Conn().Close(uctx)
 		}
 		conn.Release()

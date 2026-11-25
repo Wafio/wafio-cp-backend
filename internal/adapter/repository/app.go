@@ -38,6 +38,8 @@ type App struct {
 	// written by the route/app update paths (app_atomic.go, app_wafkey.go).
 	FCGIDocRoot string `json:"fcgi_doc_root"`
 	FCGIIndex   string `json:"fcgi_index"`
+	// FCGIKeepConn (migration 000123): false closes the FastCGI connection after each reply.
+	FCGIKeepConn bool `json:"fcgi_keep_conn"`
 
 	// MaintenanceEnabled is the switch of apps.maintenance (migration 000119); the rest of that
 	// object is read with GetMaintenance.
@@ -71,7 +73,7 @@ func (r *AppRepo) GetByID(ctx context.Context, id string) (*App, error) {
 		SELECT id, project_id, name,
 		       listen_host, listen_port, upstream_url,
 		       COALESCE(proxy_config, '{}'::jsonb),
-		       COALESCE(fcgi_doc_root, ''), COALESCE(fcgi_index, ''),
+		       COALESCE(fcgi_doc_root, ''), COALESCE(fcgi_index, ''), fcgi_keep_conn,
 		       COALESCE((maintenance->>'enabled')::boolean, false),
 		       created_at, updated_at
 		FROM apps WHERE id = $1`, id,
@@ -79,7 +81,7 @@ func (r *AppRepo) GetByID(ctx context.Context, id string) (*App, error) {
 		&a.ID, &a.ProjectID, &a.Name,
 		&a.ListenHost, &a.ListenPort, &a.UpstreamURL,
 		&a.ProxyConfig,
-		&a.FCGIDocRoot, &a.FCGIIndex,
+		&a.FCGIDocRoot, &a.FCGIIndex, &a.FCGIKeepConn,
 		&a.MaintenanceEnabled,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
@@ -95,7 +97,7 @@ func (r *AppRepo) ListByProject(ctx context.Context, projectID string) ([]App, e
 		SELECT id, project_id, name,
 		       listen_host, listen_port, upstream_url,
 		       COALESCE(proxy_config, '{}'::jsonb),
-		       COALESCE(fcgi_doc_root, ''), COALESCE(fcgi_index, ''),
+		       COALESCE(fcgi_doc_root, ''), COALESCE(fcgi_index, ''), fcgi_keep_conn,
 		       COALESCE((maintenance->>'enabled')::boolean, false),
 		       created_at, updated_at
 		FROM apps WHERE project_id = $1 ORDER BY created_at`, projectID)
@@ -111,7 +113,7 @@ func (r *AppRepo) ListByProject(ctx context.Context, projectID string) ([]App, e
 			&a.ID, &a.ProjectID, &a.Name,
 			&a.ListenHost, &a.ListenPort, &a.UpstreamURL,
 			&a.ProxyConfig,
-			&a.FCGIDocRoot, &a.FCGIIndex,
+			&a.FCGIDocRoot, &a.FCGIIndex, &a.FCGIKeepConn,
 			&a.MaintenanceEnabled,
 			&a.CreatedAt, &a.UpdatedAt,
 		); err != nil {

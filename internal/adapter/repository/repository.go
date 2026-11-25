@@ -15,6 +15,7 @@ type Repository struct {
 	EBPF             *EBPFRepo
 	App              *AppRepo
 	WAF              *WAFRepo
+	WAFRollup        *WAFRollupRepo
 	Host             *HostRepo
 	Audit            *AuditRepo
 	AgentGRPC        *AgentGRPCRepo
@@ -30,6 +31,12 @@ type Repository struct {
 	PasswordReset    *PasswordResetRepo
 	HostEnroll       *HostEnrollRepo
 	Storage          *StorageRepo
+	TLS              *TLSRepo
+	Edge             *EdgeRepo
+
+	// keyTuning is the lock key and the waits of the encryption key lock; the zero value is the
+	// production setting, and a test sets its own.
+	keyTuning keyTuning
 }
 
 // PoolOptions sizes the shared connection pool. A zero value keeps pgx's own
@@ -111,6 +118,7 @@ func FromPool(pool *pgxpool.Pool) *Repository {
 		EBPF:             &EBPFRepo{pool: pool, eventCache: newTraceEventCache(), projects: projects},
 		App:              &AppRepo{pool: pool},
 		WAF:              &WAFRepo{pool: pool},
+		WAFRollup:        &WAFRollupRepo{pool: pool},
 		Host:             host,
 		Audit:            &AuditRepo{pool: pool},
 		AgentGRPC:        agentGRPC,
@@ -126,6 +134,8 @@ func FromPool(pool *pgxpool.Pool) *Repository {
 		PasswordReset:    &PasswordResetRepo{pool: pool},
 		HostEnroll:       &HostEnrollRepo{pool: pool, host: host, grpc: agentGRPC},
 		Storage:          NewStorageRepo(pool),
+		TLS:              &TLSRepo{pool: pool},
+		Edge:             &EdgeRepo{pool: pool},
 	}
 }
 

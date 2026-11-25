@@ -17,3 +17,17 @@ func TestFCGIPatch(t *testing.T) {
 		t.Fatalf("clear doc root: %v %v", r, i)
 	}
 }
+
+// The audit entry names fcgi_keep_conn only when the request sent it, and keeps an explicit false.
+func TestWithFCGIKeepConn(t *testing.T) {
+	on, off := true, false
+	if _, ok := withFCGIKeepConn(map[string]any{}, nil)["fcgi_keep_conn"]; ok {
+		t.Fatal("an absent field was recorded")
+	}
+	if v := withFCGIKeepConn(map[string]any{}, &on)["fcgi_keep_conn"]; v != true {
+		t.Fatalf("true recorded as %v", v)
+	}
+	if v, ok := withFCGIKeepConn(map[string]any{}, &off)["fcgi_keep_conn"]; !ok || v != false {
+		t.Fatalf("false recorded as %v (present %v)", v, ok)
+	}
+}

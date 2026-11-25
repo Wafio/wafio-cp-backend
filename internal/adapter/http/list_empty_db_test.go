@@ -69,6 +69,10 @@ var nullAllowed = map[string]bool{
 	"after_bytes":  true,
 	// Agent capability from its Hello: null = unknown, a scalar although the name ends in "s".
 	"script_rules": true,
+	// Counters of the last hour from the last report of the agent: an object, null while there is none,
+	// although the names end in "s".
+	"cache_stats":       true,
+	"compression_stats": true,
 }
 
 // Every list endpoint answers [] for an empty list, never null. Walks

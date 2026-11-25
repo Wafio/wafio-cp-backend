@@ -55,6 +55,21 @@ func TestBuiltinRulePredicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	migration = append(migration, noiseMigration...)
+	tlsKeyMigration, err := os.ReadFile("../../../migrations/000121_waf_agent_tls_key_reads.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration = append(migration, tlsKeyMigration...)
+	expectedReadersMigration, err := os.ReadFile(expectedReadersUpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration = append(migration, expectedReadersMigration...)
+	tlsKeyDirMigration, err := os.ReadFile(tlsKeyDirUpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration = append(migration, tlsKeyDirMigration...)
 	for _, rule := range builtinRules("project", "host") {
 		if err := rule.Validate(); err != nil {
 			t.Errorf("%s: %v", rule.Name, err)
@@ -102,6 +117,11 @@ func TestBuiltinRulePredicates(t *testing.T) {
 				}
 			}
 			touchesFiles = touchesFiles && !otherEvent
+			// The one rule that lowers writes on purpose: the WAF agent installing its own keys. It names
+			// its events, its directory and a verified identity (TestWAFAgentTLSKeyWriteRuleSeeded).
+			if rule.Name == tlsKeyWriteRuleName {
+				touchesFiles = false
+			}
 			if touchesFiles {
 				found := false
 				for _, c := range rule.Conditions {

@@ -1,0 +1,143 @@
+wafio.agent.v1.AgentMessage 1 hello optional message wafio.agent.v1.Hello oneof=kind
+wafio.agent.v1.AgentMessage 2 heartbeat optional message wafio.agent.v1.Heartbeat oneof=kind
+wafio.agent.v1.AgentMessage 3 decision optional message wafio.agent.v1.WAFDecisionEvent oneof=kind
+wafio.agent.v1.AgentMessage 4 ack optional message wafio.agent.v1.CommandAck oneof=kind
+wafio.agent.v1.AgentMessage 5 certificate_status optional message wafio.agent.v1.CertificateStatus oneof=kind
+wafio.agent.v1.AgentMessage 6 edge_status optional message wafio.agent.v1.EdgeStatus oneof=kind
+wafio.agent.v1.BundleUpdate 1 command_id optional string
+wafio.agent.v1.BundleUpdate 2 generation optional int64
+wafio.agent.v1.BundleUpdate 3 bundle_json optional bytes
+wafio.agent.v1.CachePurge 1 command_id optional string
+wafio.agent.v1.CachePurge 2 app_id optional string
+wafio.agent.v1.CachePurge 3 scope optional string
+wafio.agent.v1.CachePurge 4 url optional string
+wafio.agent.v1.CertificateInstall 1 command_id optional string
+wafio.agent.v1.CertificateInstall 2 app_id optional string
+wafio.agent.v1.CertificateInstall 3 certificate_id optional string
+wafio.agent.v1.CertificateInstall 4 chain_pem optional bytes
+wafio.agent.v1.CertificateInstall 5 key_pem optional bytes
+wafio.agent.v1.CertificateInstall 6 leaf_sha256 optional string
+wafio.agent.v1.CertificateStatus 1 app_id optional string
+wafio.agent.v1.CertificateStatus 10 unix_time optional int64
+wafio.agent.v1.CertificateStatus 2 source optional string
+wafio.agent.v1.CertificateStatus 3 state optional string
+wafio.agent.v1.CertificateStatus 4 certificate_id optional string
+wafio.agent.v1.CertificateStatus 5 chain_pem optional bytes
+wafio.agent.v1.CertificateStatus 6 leaf_sha256 optional string
+wafio.agent.v1.CertificateStatus 7 error optional string
+wafio.agent.v1.CertificateStatus 8 next_attempt_unix optional int64
+wafio.agent.v1.CertificateStatus 9 request_id optional string
+wafio.agent.v1.CommandAck 1 command_id optional string
+wafio.agent.v1.CommandAck 2 ok optional bool
+wafio.agent.v1.CommandAck 3 error optional string
+wafio.agent.v1.CommandAck 4 payload optional bytes
+wafio.agent.v1.EdgeCacheCounters 1 requests optional uint64
+wafio.agent.v1.EdgeCacheCounters 10 skipped_too_large optional uint64
+wafio.agent.v1.EdgeCacheCounters 11 skipped_streamed optional uint64
+wafio.agent.v1.EdgeCacheCounters 12 skipped_disk_full optional uint64
+wafio.agent.v1.EdgeCacheCounters 13 evictions optional uint64
+wafio.agent.v1.EdgeCacheCounters 14 corrupt optional uint64
+wafio.agent.v1.EdgeCacheCounters 15 disk_bytes optional uint64
+wafio.agent.v1.EdgeCacheCounters 16 memory_bytes optional uint64
+wafio.agent.v1.EdgeCacheCounters 17 objects optional uint64
+wafio.agent.v1.EdgeCacheCounters 2 hits_memory optional uint64
+wafio.agent.v1.EdgeCacheCounters 3 hits_disk optional uint64
+wafio.agent.v1.EdgeCacheCounters 4 misses optional uint64
+wafio.agent.v1.EdgeCacheCounters 5 bypass optional uint64
+wafio.agent.v1.EdgeCacheCounters 6 stale optional uint64
+wafio.agent.v1.EdgeCacheCounters 7 stored optional uint64
+wafio.agent.v1.EdgeCacheCounters 8 skipped_no_lifetime optional uint64
+wafio.agent.v1.EdgeCacheCounters 9 skipped_private optional uint64
+wafio.agent.v1.EdgeCompressionCounters 1 responses optional uint64
+wafio.agent.v1.EdgeCompressionCounters 2 skipped_streamed optional uint64
+wafio.agent.v1.EdgeCompressionCounters 3 bytes_saved optional uint64
+wafio.agent.v1.EdgeFeatureState 1 feature optional string
+wafio.agent.v1.EdgeFeatureState 2 state optional string
+wafio.agent.v1.EdgeFeatureState 3 code optional string
+wafio.agent.v1.EdgeFeatureState 4 detail optional string
+wafio.agent.v1.EdgeFeatureState 5 running_previous optional bool
+wafio.agent.v1.EdgeStatus 1 app_id optional string
+wafio.agent.v1.EdgeStatus 2 generation optional int64
+wafio.agent.v1.EdgeStatus 3 features repeated message wafio.agent.v1.EdgeFeatureState
+wafio.agent.v1.EdgeStatus 4 cache optional message wafio.agent.v1.EdgeCacheCounters
+wafio.agent.v1.EdgeStatus 5 compression optional message wafio.agent.v1.EdgeCompressionCounters
+wafio.agent.v1.EdgeStatus 6 unix_time optional int64
+wafio.agent.v1.FetchSecurityData 1 command_id optional string
+wafio.agent.v1.FetchSecurityData 2 components optional string
+wafio.agent.v1.FetchSecurityData 3 force optional bool
+wafio.agent.v1.FetchSecurityData 4 malware_from_control_plane optional bool
+wafio.agent.v1.Heartbeat 1 unix_time optional int64
+wafio.agent.v1.Heartbeat 10 bundle_generation optional int64 optional
+wafio.agent.v1.Heartbeat 11 script_incomplete_total optional uint64 optional
+wafio.agent.v1.Heartbeat 12 script_errors_total optional uint64 optional
+wafio.agent.v1.Heartbeat 13 script_rules_rejected_total optional uint64 optional
+wafio.agent.v1.Heartbeat 14 script_runs_in_flight optional int64 optional
+wafio.agent.v1.Heartbeat 15 agent_panics_total optional uint64 optional
+wafio.agent.v1.Heartbeat 16 analyze_latency_p50_us optional uint64 optional
+wafio.agent.v1.Heartbeat 17 analyze_latency_p95_us optional uint64 optional
+wafio.agent.v1.Heartbeat 18 analyze_latency_p99_us optional uint64 optional
+wafio.agent.v1.Heartbeat 19 analyze_latency_samples optional uint64 optional
+wafio.agent.v1.Heartbeat 2 decisions_total optional uint64
+wafio.agent.v1.Heartbeat 20 regex_rules_dropped_total optional uint64 optional
+wafio.agent.v1.Heartbeat 3 blocks_total optional uint64
+wafio.agent.v1.Heartbeat 4 host_info_json optional bytes
+wafio.agent.v1.Heartbeat 5 analyze_panics_total optional uint64 optional
+wafio.agent.v1.Heartbeat 6 engine_panics_total optional uint64 optional
+wafio.agent.v1.Heartbeat 7 partial_coverage_total optional uint64 optional
+wafio.agent.v1.Heartbeat 8 parse_budget_exhausted_total optional uint64 optional
+wafio.agent.v1.Heartbeat 9 bundle_source optional string optional
+wafio.agent.v1.Hello 1 agent_name optional string
+wafio.agent.v1.Hello 2 agent_version optional string
+wafio.agent.v1.Hello 3 hostname optional string
+wafio.agent.v1.Hello 4 bundle_generation optional int64
+wafio.agent.v1.Hello 6 host_key optional string
+wafio.agent.v1.Hello 7 agent_kind optional string
+wafio.agent.v1.Hello 8 features repeated string
+wafio.agent.v1.Hello reserved "waf_key"
+wafio.agent.v1.Hello reserved 5-5
+wafio.agent.v1.KeyRotation 1 command_id optional string
+wafio.agent.v1.KeyRotation 2 new_host_key optional string
+wafio.agent.v1.KeyRotation reserved "new_waf_keys"
+wafio.agent.v1.KeyRotation reserved 3-3
+wafio.agent.v1.MalwareDatabaseChunk 1 data optional bytes
+wafio.agent.v1.MalwareDatabaseChunk 2 sha256 optional string
+wafio.agent.v1.Ping 1 nonce optional int64
+wafio.agent.v1.ServerMessage 1 welcome optional message wafio.agent.v1.Welcome oneof=kind
+wafio.agent.v1.ServerMessage 2 bundle optional message wafio.agent.v1.BundleUpdate oneof=kind
+wafio.agent.v1.ServerMessage 3 key_rotation optional message wafio.agent.v1.KeyRotation oneof=kind
+wafio.agent.v1.ServerMessage 4 ping optional message wafio.agent.v1.Ping oneof=kind
+wafio.agent.v1.ServerMessage 5 fetch_security_data optional message wafio.agent.v1.FetchSecurityData oneof=kind
+wafio.agent.v1.ServerMessage 7 certificate_install optional message wafio.agent.v1.CertificateInstall oneof=kind
+wafio.agent.v1.ServerMessage 8 cache_purge optional message wafio.agent.v1.CachePurge oneof=kind
+wafio.agent.v1.ServerMessage reserved "self_update"
+wafio.agent.v1.ServerMessage reserved 6-6
+wafio.agent.v1.WAFDecisionEvent 1 ts_unix optional int64
+wafio.agent.v1.WAFDecisionEvent 10 match_detail optional string
+wafio.agent.v1.WAFDecisionEvent 11 analyze_method optional string
+wafio.agent.v1.WAFDecisionEvent 12 app_id optional string
+wafio.agent.v1.WAFDecisionEvent 13 user_agent optional string
+wafio.agent.v1.WAFDecisionEvent 14 content_type optional string
+wafio.agent.v1.WAFDecisionEvent 15 body_size optional int32
+wafio.agent.v1.WAFDecisionEvent 16 body_preview optional string
+wafio.agent.v1.WAFDecisionEvent 17 cwe optional string
+wafio.agent.v1.WAFDecisionEvent 18 latency_us optional int32
+wafio.agent.v1.WAFDecisionEvent 19 match_source optional string
+wafio.agent.v1.WAFDecisionEvent 2 method optional string
+wafio.agent.v1.WAFDecisionEvent 20 request_headers repeated message wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry
+wafio.agent.v1.WAFDecisionEvent 21 request_body optional string
+wafio.agent.v1.WAFDecisionEvent 22 query_params optional string
+wafio.agent.v1.WAFDecisionEvent 23 payload_type optional string
+wafio.agent.v1.WAFDecisionEvent 24 coverage optional string
+wafio.agent.v1.WAFDecisionEvent 25 match_source_exact optional bool
+wafio.agent.v1.WAFDecisionEvent 3 host optional string
+wafio.agent.v1.WAFDecisionEvent 4 uri optional string
+wafio.agent.v1.WAFDecisionEvent 5 remote_ip optional string
+wafio.agent.v1.WAFDecisionEvent 6 status optional int32
+wafio.agent.v1.WAFDecisionEvent 7 score optional int32
+wafio.agent.v1.WAFDecisionEvent 8 action optional string
+wafio.agent.v1.WAFDecisionEvent 9 categories repeated string
+wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry 1 key optional string
+wafio.agent.v1.WAFDecisionEvent.RequestHeadersEntry 2 value optional string
+wafio.agent.v1.Welcome 1 agent_id optional string
+wafio.agent.v1.Welcome 2 server_time_unix optional int64
+wafio.agent.v1.Welcome 3 heartbeat_seconds optional uint32

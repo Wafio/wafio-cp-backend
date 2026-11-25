@@ -146,6 +146,9 @@ func (h *WAFAgentHandler) AssignAppAgent(c *fiber.Ctx) error {
 		if errors.As(err, &refuse) {
 			return c.Status(refuse.status).JSON(refuse.body)
 		}
+		if handled, answered := tlsRefused(c, err); handled {
+			return answered
+		}
 		if isListenAddrTaken(err) {
 			conflict, _ := appUniqueConflict(err)
 			return c.Status(fiber.StatusConflict).JSON(conflict)
@@ -475,7 +478,7 @@ var wafDecisionMethodRe = regexp.MustCompile(`^[A-Z][A-Z0-9-]{0,15}$`)
 // for an app over the last N minutes (default 60).
 func (h *WAFAgentHandler) AppSummary(c *fiber.Ctx) error {
 	appID := c.Params("appId")
-	since := c.QueryInt("minutes", 60)
+	since := clampMinutes(c.QueryInt("minutes", 60))
 	summary, err := h.Repo.WAF.SummarizeApp(c.UserContext(), c.Params("id"), appID, since)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -560,6 +563,8 @@ type agentRouteBody struct {
 	// On update a field the request does not send keeps its stored value.
 	FCGIDocRoot *string `json:"fcgi_doc_root,omitempty"`
 	FCGIIndex   *string `json:"fcgi_index,omitempty"`
+	// FCGIKeepConn (migration 000123): nil keeps the stored value; the default is off.
+	FCGIKeepConn *bool `json:"fcgi_keep_conn,omitempty"`
 }
 
 // ListAgentRoutes returns the routes (apps) assigned to a WAF agent, paged
@@ -679,14 +684,18 @@ func (h *WAFAgentHandler) CreateAgentRoute(c *fiber.Ctx) error {
 		}
 	}
 	// Persist FCGI config if provided (only relevant when upstream is fcgi:).
-	if docRoot, index := derefString(body.FCGIDocRoot), derefString(body.FCGIIndex); docRoot != "" || index != "" {
-		if err := h.Repo.App.SetFCGIConfig(c.UserContext(), created.ID, docRoot, index); err != nil {
+	keepConn := body.FCGIKeepConn != nil && *body.FCGIKeepConn
+	if docRoot, index := derefString(body.FCGIDocRoot), derefString(body.FCGIIndex); docRoot != "" || index != "" || keepConn {
+		if err := h.Repo.App.SetFCGIConfig(c.UserContext(), created.ID, docRoot, index, keepConn); err != nil {
 			_ = h.Repo.App.Delete(c.UserContext(), created.ID)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to set fcgi config"})
 		}
 	}
 	if err := h.Repo.WAF.AssignApp(c.UserContext(), agentID, created.ID, mode); err != nil {
 		_ = h.Repo.App.Delete(c.UserContext(), created.ID)
+		if handled, answered := tlsRefused(c, err); handled {
+			return answered
+		}
 		if conflict, ok := appUniqueConflict(err); ok {
 			return c.Status(fiber.StatusConflict).JSON(conflict)
 		}
@@ -699,7 +708,7 @@ func (h *WAFAgentHandler) CreateAgentRoute(c *fiber.Ctx) error {
 		ProjectID: projectID, ActorUserID: userID,
 		Action: repository.AuditAppRouteCreated, TargetType: "app", TargetID: created.ID, TargetName: created.Name,
 		IP: c.IP(), UserAgent: string(c.Request().Header.UserAgent()),
-		MetadataJSON: withProxyTrust(map[string]any{"listen_host": body.ListenHost, "listen_port": body.ListenPort, "upstream": domain.StripURLUserinfo(body.Upstream), "mode": mode, "agent_id": agentID}, body.ProxyConfig),
+		MetadataJSON: withFCGIKeepConn(withProxyTrust(map[string]any{"listen_host": body.ListenHost, "listen_port": body.ListenPort, "upstream": domain.StripURLUserinfo(body.Upstream), "mode": mode, "agent_id": agentID}, body.ProxyConfig), body.FCGIKeepConn),
 	})
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"route": repository.AgentRouteRow{
@@ -711,6 +720,7 @@ func (h *WAFAgentHandler) CreateAgentRoute(c *fiber.Ctx) error {
 			Mode:          mode,
 			ProxyConfig:   json.RawMessage(body.ProxyConfig),
 			ProxyWarnings: domain.ProxyConfigWarnings(body.ProxyConfig),
+			FCGIKeepConn:  keepConn,
 		},
 	})
 }
@@ -769,6 +779,12 @@ func (h *WAFAgentHandler) UpdateAgentRoute(c *fiber.Ctx) error {
 		if err != nil {
 			return invalidInput(c, "INVALID_PROXY_CONFIG", err)
 		}
+		if err := requireRedirectsForPrefix(c.UserContext(), h.Repo, projectID, appID, app.ProxyConfig, body.ProxyConfig); err != nil {
+			if handled, answered := edgeRefused(c, err); handled {
+				return answered
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update route"})
+		}
 	}
 	patch := repository.AppPatch{ProxyConfig: body.ProxyConfig, AgentID: agentID}
 	if name := strings.TrimSpace(body.Name); name != "" {
@@ -791,11 +807,15 @@ func (h *WAFAgentHandler) UpdateAgentRoute(c *fiber.Ctx) error {
 		patch.Mode = body.Mode
 	}
 	patch.FCGIDocRoot, patch.FCGIIndex = fcgiPatch(body.FCGIDocRoot, body.FCGIIndex)
+	patch.FCGIKeepConn = body.FCGIKeepConn
 	if err := h.Repo.App.UpdateAtomic(c.UserContext(), projectID, appID, patch,
 		admitRouteChange(c.UserContext(), h.Repo, h.Bundles, projectID, appID, patch)); err != nil {
 		var refuse *refusal
 		if errors.As(err, &refuse) {
 			return c.Status(refuse.status).JSON(refuse.body)
+		}
+		if handled, answered := tlsRefused(c, err); handled {
+			return answered
 		}
 		if conflict, ok := appUniqueConflict(err); ok {
 			return c.Status(fiber.StatusConflict).JSON(conflict)
@@ -809,7 +829,7 @@ func (h *WAFAgentHandler) UpdateAgentRoute(c *fiber.Ctx) error {
 		ProjectID: projectID, ActorUserID: userID,
 		Action: repository.AuditAppRouteUpdated, TargetType: "app", TargetID: appID, TargetName: app.Name,
 		IP: c.IP(), UserAgent: string(c.Request().Header.UserAgent()),
-		MetadataJSON: withProxyTrust(map[string]any{"listen_host": body.ListenHost, "listen_port": body.ListenPort, "upstream": domain.StripURLUserinfo(body.Upstream), "mode": body.Mode, "agent_id": agentID}, body.ProxyConfig),
+		MetadataJSON: withFCGIKeepConn(withProxyTrust(map[string]any{"listen_host": body.ListenHost, "listen_port": body.ListenPort, "upstream": domain.StripURLUserinfo(body.Upstream), "mode": body.Mode, "agent_id": agentID}, body.ProxyConfig), body.FCGIKeepConn),
 	})
 	return c.JSON(fiber.Map{"ok": true})
 }

@@ -164,6 +164,8 @@ var (
 		"/root/.ssh/id_",
 		"/etc/ssl/private/",
 		"/etc/letsencrypt/live/",
+		// The WAF agent's own certificate keys and ACME account key.
+		"/var/lib/wafio-waf-agent/tls/",
 	}
 	credSuffixes = []string{
 		"/.ssh/id_rsa", "/.ssh/id_ecdsa", "/.ssh/id_ed25519", "/.ssh/id_dsa",
@@ -224,7 +226,7 @@ func filePathTier(filename string) int {
 	if strings.HasPrefix(filename, "/etc/ssh/ssh_host_") && strings.HasSuffix(filename, "_key") {
 		return tierCredential
 	}
-	if strings.HasPrefix(filename, "/etc/letsencrypt/live/") && (strings.HasSuffix(filename, "/cert.pem") || strings.HasSuffix(filename, "/chain.pem") || strings.HasSuffix(filename, "/fullchain.pem")) {
+	if strings.HasPrefix(filename, "/etc/letsencrypt/live/") && (strings.HasSuffix(filename, "/cert.pem") || strings.HasSuffix(filename, "/chain.pem") || strings.HasSuffix(filename, "/fullchain.pem") || strings.HasSuffix(filename, "/README")) {
 		return tierSysinfo
 	}
 	// TIER_CREDENTIAL (5): direct secret material
@@ -445,6 +447,12 @@ func applyLineageContext(t *TraceEventPayload) {
 			who := processLabel(t.Comm, group)
 			// Flags is the Linux open(2) flags bitmask: O_RDONLY=0, O_WRONLY=1, O_RDWR=2
 			isWrite := (t.Flags & (3 | 64 | 512)) != 0
+			// An O_DIRECTORY open lists a directory: on a file it fails with ENOTDIR and reads nothing.
+			// O_TMPFILE carries the bit too but needs write access, so isWrite keeps it.
+			// shortcut: x86_64 flag value; the release builds amd64 only (build-dist.sh, build-ebpf.sh); an arm64 port must translate open flags.
+			if !isWrite && t.Flags&0o200000 != 0 {
+				return
+			}
 			if tier == tierCredential && !isWrite && (t.RetVal >= 0 || openFoundNoFile(t.RetVal)) && lowerCredentialClientRead(t, who) {
 				return
 			}
