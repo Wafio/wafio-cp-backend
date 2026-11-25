@@ -75,11 +75,14 @@ func TestCacheSignedInContractText(t *testing.T) {
 			"it is never answered from a stored copy and never makes one, and goes upstream with X-Cache: BYPASS, unless a rule that matches it has signed_in true",
 			"a matching rule alone does not allow it, only a rule with signed_in true does",
 			"is stored only when the answer is marked public or has s-maxage, or its type is one that default_ttl_s covers",
+			"This limits only what is stored, and such a request is still answered from a copy that another request made.",
 		},
 		"../../api/openapi.yaml": {
 			"A signed-in request is never answered from a stored copy and never makes one, unless a path rule that matches it has signed_in. It goes to the application with X-Cache BYPASS.",
 			"A matching path rule alone does not allow that, only a rule with signed_in does.",
 			"is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers",
+			"This limits only what is stored, and such a request is still answered from a copy that another request made.",
+			"A request with another cookie is answered from a copy either way.",
 		},
 	} {
 		text := flat(path)
@@ -92,6 +95,7 @@ func TestCacheSignedInContractText(t *testing.T) {
 			"unless a rule says so",
 			"Also keep answers for visitors who are signed in",
 			"or a rule matches",
+			"both are stored and answered from a copy",
 		} {
 			if strings.Contains(text, stale) {
 				t.Errorf("%s still says %q", path, stale)
