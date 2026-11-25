@@ -170,3 +170,45 @@ func TestDefaultChallengeTemplateVersionIsCurrent(t *testing.T) {
 			def.Challenge.TemplateVersion, CurrentChallengeTemplateVersion)
 	}
 }
+
+// block_policy.target is waf (also when missing or empty) or kernel; a save and a load refuse anything else,
+// and an absent value is not written into the stored document.
+func TestBlockPolicyTarget(t *testing.T) {
+	doc := func(target string) string {
+		return `{"block_policy":{"enabled":true,"block_duration_sec":600,"block_after_n_blocks":3` + target + `}}`
+	}
+	for _, tc := range []struct {
+		name, target, want string
+	}{
+		{"missing", ``, "waf"},
+		{"empty", `,"target":""`, "waf"},
+		{"waf", `,"target":"waf"`, "waf"},
+		{"kernel", `,"target":"kernel"`, "kernel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := []byte(doc(tc.target))
+			if err := ValidateRulesJSONForSave(d); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			res, err := LoadRuleMapFromJSON(d)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if res.BlockPolicy == nil || res.BlockPolicy.Target != tc.want {
+				t.Fatalf("load: %+v, want target %q", res.BlockPolicy, tc.want)
+			}
+			norm, _ := NormalizeRulesJSON(d)
+			if strings.Contains(tc.target, "target") != strings.Contains(string(norm), "target") {
+				t.Errorf("normalised document %s must keep the target key exactly when it was given", norm)
+			}
+		})
+	}
+	for _, target := range []string{`"firewall"`, `"Kernel"`, `" kernel"`} {
+		d := []byte(doc(`,"target":` + target))
+		for name, validate := range map[string]func([]byte) error{"save": ValidateRulesJSONForSave, "load": ValidateRulesJSON} {
+			if err := validate(d); err == nil || !strings.Contains(err.Error(), "block_policy.target must be waf or kernel") {
+				t.Errorf("%s target %s: %v, want block_policy.target must be waf or kernel", name, target, err)
+			}
+		}
+	}
+}
