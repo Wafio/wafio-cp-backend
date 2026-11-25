@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/wafio/wafio-cp-backend/shared/hostpolicy"
 )
 
 // Limits of the three delivery parts of an application: compression, files from a folder and the
@@ -131,7 +133,11 @@ var forbiddenStaticRoots = []string{
 }
 
 // StaticRootForbidden says whether an absolute path without empty, . or .. segments is the root
-// folder, an ancestor of a forbidden folder, or a forbidden folder or something below one.
+// folder, an ancestor of a forbidden folder, a forbidden folder or something below one, or has a
+// segment that the host agent's trace keeps (hostpolicy.TraceKeepBuiltin, in any ASCII case, as the
+// WAF agent compares it): the WAF agent opens the folder by its path on every request, so such a
+// name would put an open the kernel never sheds into the trace ring. A folder under /home is left
+// to the agent, which answers root_unreadable for it before it looks at any name.
 func StaticRootForbidden(root string) bool {
 	if root == "/" {
 		return true
@@ -141,7 +147,26 @@ func StaticRootForbidden(root string) bool {
 			return true
 		}
 	}
+	if root == "/home" || strings.HasPrefix(root, "/home/") {
+		return false
+	}
+	for _, seg := range strings.Split(root, "/") {
+		if _, kept := hostpolicy.TraceKeepBuiltin[asciiLower(seg)]; kept {
+			return true
+		}
+	}
 	return false
+}
+
+// asciiLower folds the letters A to Z only, as the kernel and the WAF agent do; strings.ToLower
+// would also fold characters such as the Kelvin sign into ASCII.
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
 }
 
 // validStaticRoot says whether root is an absolute path with no empty, . or .. segment, no control
@@ -202,8 +227,11 @@ type CacheRule struct {
 	Action string `json:"action"`
 	// TTLS is 1 to 365 days for a keep rule and 0 for a bypass rule.
 	TTLS int64 `json:"ttl_s"`
-	// SignedIn lets a keep rule store answers for visitors who are signed in. The dashboard asks the
-	// admin to type the prefix first.
+	// SignedIn lets a keep rule store answers for, and send copies to, visitors who are signed in or
+	// who send a cookie that is not a session cookie. Without it a signed-in request skips the cache
+	// and such a cookie request is stored only for an answer marked public or with s-maxage or a
+	// default lifetime file type: a rule alone does not allow it. The dashboard asks the admin to
+	// type the prefix first.
 	SignedIn bool `json:"signed_in"`
 }
 
@@ -220,7 +248,9 @@ type Cache struct {
 	DiskBytes      *int64 `json:"disk_bytes"`
 	MemoryBytes    *int64 `json:"memory_bytes"`
 	MaxObjectBytes *int64 `json:"max_object_bytes"`
-	// SessionCookies are cookie names that mark a visitor as signed in, besides the built-in ones.
+	// SessionCookies are cookie names that mark a visitor as signed in, besides the built-in ones. A
+	// signed-in request is never answered from a stored copy and never fills one unless a matching
+	// rule has SignedIn.
 	SessionCookies []string    `json:"session_cookies"`
 	Rules          []CacheRule `json:"rules"`
 }
