@@ -18,7 +18,7 @@ require (
 	github.com/pquerna/otp v1.5.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
-	github.com/valyala/fasthttp v1.79.0
+	github.com/valyala/fasthttp v1.80.0
 	github.com/valyala/fastjson v1.6.10
 	golang.org/x/crypto v0.59.0
 	golang.org/x/sync v0.25.0
