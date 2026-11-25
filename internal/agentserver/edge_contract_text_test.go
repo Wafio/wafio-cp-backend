@@ -57,3 +57,45 @@ func TestEdgeContractText(t *testing.T) {
 		}
 	}
 }
+
+// The cache does not look at a signed-in request, and a cookie that is not a session cookie is stored
+// only for a public, s-maxage or file-type answer; a rule alone does not change that, only signed_in
+// does. The agent, the dashboard and the OpenAPI text are built from these sentences, so a wording
+// that says the old thing (a rule is enough, signed-in visitors are looked up) fails here.
+func TestCacheSignedInContractText(t *testing.T) {
+	flat := func(path string) string {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(strings.Fields(strings.ReplaceAll(string(raw), "`", "")), " ")
+	}
+	for path, want := range map[string][]string{
+		"../../docs/agent-protocol.md": {
+			"it is never answered from a stored copy and never makes one, and goes upstream with X-Cache: BYPASS, unless a rule that matches it has signed_in true",
+			"a matching rule alone does not allow it, only a rule with signed_in true does",
+			"is stored only when the answer is marked public or has s-maxage, or its type is one that default_ttl_s covers",
+		},
+		"../../api/openapi.yaml": {
+			"A signed-in request is never answered from a stored copy and never makes one, unless a path rule that matches it has signed_in. It goes to the application with X-Cache BYPASS.",
+			"A matching path rule alone does not allow that, only a rule with signed_in does.",
+			"is stored only when the answer is marked public or has s-maxage, or its type is one of the file types that default_ttl_s covers",
+		},
+	} {
+		text := flat(path)
+		for _, s := range want {
+			if !strings.Contains(text, s) {
+				t.Errorf("%s no longer says %q", path, s)
+			}
+		}
+		for _, stale := range []string{
+			"unless a rule says so",
+			"Also keep answers for visitors who are signed in",
+			"or a rule matches",
+		} {
+			if strings.Contains(text, stale) {
+				t.Errorf("%s still says %q", path, stale)
+			}
+		}
+	}
+}

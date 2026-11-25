@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/wafio/wafio-cp-backend/shared/hostpolicy"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -67,6 +69,8 @@ var staticFilesCases = []struct {
 	{"a deploy link folder", StaticFiles{Enabled: true, Root: "/srv/app/current/public"}, StaticFiles{Enabled: true, Root: "/srv/app/current/public", Missing: "app"}, ""},
 	{"under /home is the agent's to refuse", StaticFiles{Enabled: true, Root: "/home/deploy/site"}, StaticFiles{Enabled: true, Root: "/home/deploy/site", Missing: "app"}, ""},
 	{"a name that only starts like a forbidden one", StaticFiles{Enabled: true, Root: "/var/lib/wafio-waf-agent-x"}, StaticFiles{Enabled: true, Root: "/var/lib/wafio-waf-agent-x", Missing: "app"}, ""},
+	{"a name that only holds a kept one", StaticFiles{Enabled: true, Root: "/var/www/my-private/privates"}, StaticFiles{Enabled: true, Root: "/var/www/my-private/privates", Missing: "app"}, ""},
+	{"a kept name under /home is the agent's to refuse", StaticFiles{Enabled: true, Root: "/home/deploy/private/site"}, StaticFiles{Enabled: true, Root: "/home/deploy/private/site", Missing: "app"}, ""},
 	{"365 days", StaticFiles{MaxAgeS: DeliveryMaxSeconds}, StaticFiles{Missing: "app", MaxAgeS: DeliveryMaxSeconds}, ""},
 
 	{"on without a folder", StaticFiles{Enabled: true}, StaticFiles{}, "root"},
@@ -79,6 +83,14 @@ var staticFilesCases = []struct {
 	{"a NUL byte", StaticFiles{Root: "/var/www\x00"}, StaticFiles{}, "root"},
 	{"invalid UTF-8", StaticFiles{Root: "/var/www/\xff"}, StaticFiles{}, "root"},
 	{"1025 bytes", StaticFiles{Root: "/" + strings.Repeat("a", 1024)}, StaticFiles{}, "root"},
+	{"the root folder", StaticFiles{Enabled: true, Root: "/"}, StaticFiles{}, "root"},
+	{"a system folder", StaticFiles{Enabled: true, Root: "/etc/nginx/html"}, StaticFiles{}, "root"},
+	{"a folder above a system folder", StaticFiles{Enabled: true, Root: "/var/lib"}, StaticFiles{}, "root"},
+	{"a kept name in the folder", StaticFiles{Enabled: true, Root: "/srv/private/site"}, StaticFiles{}, "root"},
+	{"a kept name as the last segment", StaticFiles{Enabled: true, Root: "/var/www/network"}, StaticFiles{}, "root"},
+	{"a kept name in any case", StaticFiles{Enabled: true, Root: "/var/www/Network/public"}, StaticFiles{}, "root"},
+	{"a kept name that starts with a dot", StaticFiles{Enabled: true, Root: "/srv/.aws/site"}, StaticFiles{}, "root"},
+	{"a kept name while off", StaticFiles{Root: "/srv/private/site"}, StaticFiles{}, "root"},
 	{"missing is one of two values", StaticFiles{Missing: "both"}, StaticFiles{}, "missing"},
 	{"a negative browser cache time", StaticFiles{MaxAgeS: -1}, StaticFiles{}, "max_age_s"},
 	{"over 365 days", StaticFiles{MaxAgeS: DeliveryMaxSeconds + 1}, StaticFiles{}, "max_age_s"},
@@ -108,6 +120,13 @@ func TestStaticRootForbidden(t *testing.T) {
 		"/var/lib/wafio-waf-agent": true, "/var/lib/wafio-waf-agent/tls": true, "/var/cache/wafio-waf": true, "/var/cache/wafio-waf/app/ab": true,
 		"/var/www": false, "/var/www/shop/public": false, "/srv/www": false, "/home/deploy/site": false, "/opt/site/public": false,
 		"/var/lib/wafio-waf-agent2": false, "/var/lib/other": false, "/etcetera": false, "/usr2": false, "/rootfs": false,
+		// A name the host agent's trace keeps, wherever it stands and in any ASCII case.
+		"/srv/private/site": true, "/var/www/network/public": true, "/srv/Private": true, "/srv/SHADOW/x": true, "/srv/.aws": true,
+		"/srv/systemd/public": true, "/srv/hosts": true, "/srv/privates": false, "/srv/my-private/x": false, "/srv/net": false,
+		// Only A to Z fold, as in the kernel and the agent: a Kelvin sign is not a k.
+		"/srv/networ\u212a/x": false,
+		// Under /home the agent answers root_unreadable before it looks at a name.
+		"/home/deploy/private/site": false, "/home/private": false, "/home": false, "/homes/private": true,
 	} {
 		s := StaticFiles{Enabled: true, Root: root}
 		err := s.Normalize()
@@ -115,6 +134,18 @@ func TestStaticRootForbidden(t *testing.T) {
 		got := errors.As(err, &fe) && fe.Msg == msgRootForbidden
 		if got != want {
 			t.Errorf("%s: forbidden %v, want %v (err %v)", root, got, want, err)
+		}
+	}
+}
+
+// Every name the host agent's trace keeps is refused as a folder name, and the dashboard's copy of the
+// list (test/frontend-fixtures/trace-keep-names.json) is the same list, so the two checks cannot drift.
+func TestStaticRootRefusesEveryKeptName(t *testing.T) {
+	for name := range hostpolicy.TraceKeepBuiltin {
+		for _, n := range []string{name, strings.ToUpper(name)} {
+			if !StaticRootForbidden("/srv/" + n + "/public") {
+				t.Errorf("/srv/%s/public is not refused", n)
+			}
 		}
 	}
 }
