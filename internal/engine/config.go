@@ -53,7 +53,7 @@ const (
 //     shell-like text or path segments in legitimate content while keeping clear payloads detectable.
 //   - ssrf block_threshold kept at 2.5 — SSRF is already header-excluded; query-param SSRF
 //     must remain strict because metadata-URL attacks are high severity.
-const defaultRulesJSON = `{"geo":{"allow_ips":[],"block_ips":[],"allow_countries":[],"block_countries":[]},"siem":{"enabled":false,"webhook_url":""},"ssrf":{},"bot_protection":{"enabled":false,"mode":"off","base_score":100},"l7_flood":{"enabled":true,"key_fields":["remote_addr","user_agent"],"window_sec":60,"max_requests":500,"allow_ips":[]},"challenge":{"enabled":false,"type":"js_challenge","site_key":"","secret_key":"","cookie_ttl_sec":3600,"trigger":"always","simulation":false,"ip_rep_enabled":false,"ip_rep_block_level1":true,"ip_rep_block_level2":false,"good_bot_allowlist":["Googlebot","Googlebot-Image","Googlebot-Video","Google-InspectionTool","bingbot","BingPreview","DuckDuckBot","YandexBot","Baiduspider","Slurp","facebookexternalhit","Twitterbot","LinkedInBot","Applebot","AhrefsBot","SemrushBot","MJ12bot"],"template_version":3},"semantic_policies":{"sql":{"block_threshold":4.0,"soft_threshold":2.5},"xss":{"block_threshold":3.8,"soft_threshold":2.2},"cmd":{"block_threshold":3.2,"soft_threshold":1.6},"lfi":{"block_threshold":3.2,"soft_threshold":1.5},"ssrf":{"block_threshold":2.5,"soft_threshold":1.5},"php":{"block_threshold":3.2,"soft_threshold":1.6},"python":{"block_threshold":3.2,"soft_threshold":1.6},"java":{"block_threshold":3.2,"soft_threshold":1.6},"nosql":{"block_threshold":3.0,"soft_threshold":1.5},"ssti":{"block_threshold":3.0,"soft_threshold":1.8},"xxe":{"block_threshold":2.5,"soft_threshold":1.5},"deser":{"block_threshold":2.5,"soft_threshold":1.5}},"block_policy":{"enabled":true,"key_fields":["remote_addr","user_agent"],"block_duration_sec":3600,"block_after_n_blocks":100},"request_body_limit":"5M"}`
+const defaultRulesJSON = `{"geo":{"allow_ips":[],"block_ips":[],"allow_countries":[],"block_countries":[]},"siem":{"enabled":false,"webhook_url":""},"ssrf":{},"bot_protection":{"enabled":false,"mode":"off","base_score":100},"l7_flood":{"enabled":true,"key_fields":["remote_addr","user_agent"],"window_sec":60,"max_requests":500,"allow_ips":[]},"challenge":{"enabled":false,"type":"js_challenge","site_key":"","secret_key":"","cookie_ttl_sec":3600,"trigger":"always","simulation":false,"ip_rep_enabled":false,"ip_rep_block_level1":true,"ip_rep_block_level2":false,"good_bot_allowlist":["Googlebot","Googlebot-Image","Googlebot-Video","Google-InspectionTool","bingbot","BingPreview","DuckDuckBot","YandexBot","Baiduspider","Slurp","facebookexternalhit","Twitterbot","LinkedInBot","Applebot","AhrefsBot","SemrushBot","MJ12bot"],"template_version":3},"semantic_policies":{"sql":{"block_threshold":4.0,"soft_threshold":2.5},"xss":{"block_threshold":3.8,"soft_threshold":2.2},"cmd":{"block_threshold":3.2,"soft_threshold":1.6},"lfi":{"block_threshold":3.2,"soft_threshold":1.5},"ssrf":{"block_threshold":2.5,"soft_threshold":1.5},"php":{"block_threshold":3.2,"soft_threshold":1.6},"python":{"block_threshold":3.2,"soft_threshold":1.6},"java":{"block_threshold":3.2,"soft_threshold":1.6},"nosql":{"block_threshold":3.0,"soft_threshold":1.5},"ssti":{"block_threshold":3.0,"soft_threshold":1.8},"xxe":{"block_threshold":2.5,"soft_threshold":1.5},"deser":{"block_threshold":2.5,"soft_threshold":1.5}},"block_policy":{"enabled":true,"key_fields":["remote_addr","user_agent"],"block_duration_sec":3600,"block_after_n_blocks":100,"target":"waf"},"request_body_limit":"5M"}`
 
 // DefaultRulesJSON returns default rules JSON for new project configs.
 func DefaultRulesJSON() []byte {
@@ -80,6 +80,12 @@ type SIEMConfig struct {
 	WebhookURL string `json:"webhook_url"` // POST event JSON to URL (SIEM API, collector)
 }
 
+// block_policy.target: "kernel" also drops the client at the host firewall for the block duration.
+const (
+	BlockTargetWAF    = "waf"
+	BlockTargetKernel = "kernel"
+)
+
 // BlockPolicyConfig is the "block_policy" block in rules.json (optional). E.g. block client 1h after 5 blocks.
 // KeyFields: composite key (AND). Blocks are counted per combination of values; e.g. ["remote_addr", "user_agent"].
 // Supported fields: remote_addr, user_agent, host, request_id, header:Header-Name (case-sensitive).
@@ -89,6 +95,7 @@ type BlockPolicyConfig struct {
 	BlockDurationSec  int      `json:"block_duration_sec"`   // e.g. 3600 (1 hour)
 	KeyField          string   `json:"key_field"`            // deprecated: use key_fields
 	KeyFields         []string `json:"key_fields"`           // e.g. ["remote_addr", "user_agent"]
+	Target            string   `json:"target"`               // "waf" (default, also "") or "kernel"
 }
 
 // SSRFBlocklistConfig is the "ssrf" / "fast_scan" block in rules.json (optional). SSRF blocklist only.
@@ -631,6 +638,9 @@ func parseRuleMapJSON(data []byte) (*LoadResult, error) {
 			}
 			if blockPolicy.BlockDurationSec <= 0 {
 				blockPolicy.BlockDurationSec = 3600
+			}
+			if blockPolicy.Target == "" {
+				blockPolicy.Target = BlockTargetWAF
 			}
 		}
 		delete(raw, "block_policy")
@@ -1485,6 +1495,9 @@ func validateLoadResult(r *LoadResult, raw []byte) error {
 		}
 		if r.BlockPolicy.BlockDurationSec < 1 || r.BlockPolicy.BlockDurationSec > 604800 {
 			return errors.New("block_policy.block_duration_sec must be 1–604800 (max 7 days)")
+		}
+		if t := r.BlockPolicy.Target; t != BlockTargetWAF && t != BlockTargetKernel {
+			return errors.New("block_policy.target must be waf or kernel")
 		}
 		for _, k := range r.BlockPolicy.KeyFields {
 			k = strings.TrimSpace(k)
